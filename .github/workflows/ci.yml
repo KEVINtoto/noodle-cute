@@ -1,0 +1,62 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  validate:
+    name: Validate (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - features: default
+            args: ""
+          - features: all-features
+            args: --all-features
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check all targets
+        run: cargo check --workspace --all-targets ${{ matrix.args }}
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets ${{ matrix.args }} -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace --all-targets ${{ matrix.args }}
+
+      # --all-targets excludes doctests, so run them separately.
+      - name: Run doctests
+        run: cargo test --workspace --doc ${{ matrix.args }}
+
+      - name: Build API documentation
+        run: cargo doc --workspace --no-deps ${{ matrix.args }}
