@@ -1,13 +1,16 @@
 # noodle-cute
 
-## Purpose
-
 `noodle-cute` provides a device-independent foundation for CuTe-style layouts and tensor algorithms in Rust. It uses static integers and nested heterogeneous tuples to describe structures such as shapes and strides, keeping compile-time values in their types while supporting runtime parameters.
 
 The core uses `no_std`. The `int` and `tuple` modules covered here require neither heap allocation nor a device backend:
 
 - `int` provides compile-time and runtime integer representations with a shared interface and arithmetic operations.
 - `tuple` organizes integers into nested structures, with access, concatenation, flattening, and product operations.
+
+CuTe design and implementation references:
+
+- [NVlabs/CuTe](https://github.com/NVlabs/CuTe): a Python reference implementation of CuTe layouts and layout algebra.
+- [CuTe in NVIDIA CUTLASS](https://github.com/NVIDIA/cutlass/tree/main/include/cute): the C++ headers for CuTe integer tuples, layouts, tensors, and related operations.
 
 ## Toolchain Dependencies
 
