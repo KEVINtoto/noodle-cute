@@ -102,7 +102,7 @@ fn nested_head_increases_depth_but_not_the_trailing_chain() {
 #[test]
 fn product_short_circuits_on_a_zero_leaf_before_overflowing() {
     // A zero makes the product zero even when the other factors would overflow.
-    let has_zero = int_tuple![DynInt(isize::MAX), DynInt(0), DynInt(isize::MAX)];
+    let has_zero = int_tuple![DynInt(isize::MAX), DynInt(2), DynInt(0)];
     assert_eq!(has_zero.product(), Ok(0));
 }
 
