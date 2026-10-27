@@ -13,6 +13,7 @@
 #![allow(incomplete_features)]
 
 pub mod int;
+pub mod layout;
 pub mod tuple;
 
 pub use int::{DynInt, Int, Integer};
