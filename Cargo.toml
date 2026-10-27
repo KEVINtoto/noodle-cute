@@ -1,0 +1,14 @@
+[package]
+name = "noodle-cute"
+version = "0.1.0"
+edition = "2024"
+description = "Device-independent, CuTe-style layouts and tensor algorithms"
+authors = ["noodle-project"]
+
+[features]
+# 默认核心使用 no_std，且不要求堆分配。
+default = []
+# 仅为符号索引表达式树启用 alloc；不隐式启用 std 或具体设备后端。
+alloc = []
+
+[dependencies]
