@@ -67,6 +67,7 @@ impl DynLayout {
         if shape.len() > MAX_RANK {
             return Err(Error::CapacityExceeded);
         }
+        checked_size(0..shape.len(), |i| Ok(shape[i]))?;
         let mut strides = [0; MAX_RANK];
         let mut scale = 1;
         for j in 0..shape.len() {
@@ -137,7 +138,8 @@ impl DynLayout {
             }
             if out.rank > 0 {
                 let j = out.rank - 1;
-                if mul(out.shape[j], out.stride[j])? == d {
+                // An unrepresentable probe cannot equal the next stride.
+                if out.shape[j].checked_mul(out.stride[j]) == Some(d) {
                     out.shape[j] = mul(out.shape[j], s)?;
                     continue;
                 }
@@ -185,7 +187,7 @@ impl DynLayout {
                 continue;
             }
             let j = out.rank - 1;
-            if mul(s, d)? == out.stride[j] {
+            if s.checked_mul(d) == Some(out.stride[j]) {
                 out.shape[j] = mul(s, out.shape[j])?;
                 out.stride[j] = d;
                 continue;
@@ -204,6 +206,7 @@ impl DynLayout {
     /// For a nonempty domain, this preserves the set of reachable addresses,
     /// but may change the logical size and coordinate mapping. Replacing a
     /// zero extent on a stride-0 leaf can also make an empty domain nonempty.
+    /// The resulting size and address bounds must remain representable.
     pub fn filter(&self) -> Result<Self> {
         let mut zeros = *self;
         for a in 0..zeros.rank {
@@ -211,7 +214,10 @@ impl DynLayout {
                 zeros.shape[a] = 1;
             }
         }
-        zeros.coalesce()
+        let out = zeros.coalesce()?;
+        out.size()?;
+        out.address_range()?;
+        Ok(out)
     }
 }
 
@@ -311,7 +317,8 @@ impl GroupedLayout {
         if groups.len() > MAX_RANK {
             return Err(Error::CapacityExceeded);
         }
-        if groups.iter().sum::<usize>() != flat.rank {
+        let total = groups.iter().try_fold(0usize, |sum, &n| sum.checked_add(n));
+        if total != Some(flat.rank) {
             return Err(Error::StructureMismatch);
         }
         let mut out = Self {
@@ -389,7 +396,8 @@ impl LayoutMap for GroupedLayout {
     }
 
     fn extent(&self, axis: usize) -> Result<isize> {
-        self.mode(axis)?.size()
+        let (start, len) = self.mode_span(axis)?;
+        checked_size(start..start + len, |i| Ok(self.flat.shape[i]))
     }
 
     fn index(&self, linear: isize) -> Result<isize> {
@@ -406,7 +414,14 @@ impl LayoutMap for GroupedLayout {
         }
         let mut result = 0;
         for (axis, &c) in coord.iter().enumerate() {
-            result = add(result, self.mode(axis)?.index_extended(c)?)?;
+            let (start, len) = self.mode_span(axis)?;
+            let part = affine_index_extended(
+                start..start + len,
+                |i| Ok(self.flat.shape[i]),
+                |i| Ok(self.flat.stride[i]),
+                c,
+            )?;
+            result = add(result, part)?;
         }
         Ok(result)
     }

@@ -10,7 +10,9 @@
 use core::mem::{size_of, size_of_val};
 
 use noodle_cute::int::{DynInt, Int};
-use noodle_cute::layout::{DynLayout, Layout, LayoutLeft, LayoutMap, LayoutRight, MAX_RANK};
+use noodle_cute::layout::{
+    DynLayout, GroupedLayout, Layout, LayoutLeft, LayoutMap, LayoutRight, MAX_RANK,
+};
 use noodle_cute::tuple::{Flatten, Item, Product};
 use noodle_cute::{Error, IntTuple, Nil, shape, stride};
 
@@ -455,4 +457,109 @@ fn extended_indexing_continues_beyond_linear_and_mode_extents() {
     for i in 0..12 {
         assert_eq!(nested.index_extended(i), nested.index(i));
     }
+}
+
+#[test]
+fn grouped_mode_queries_do_not_revalidate_address_ranges() {
+    // The empty domain makes the whole address range `None`, so the huge stride
+    // is accepted. Evaluating mode 1 alone must not re-run that range check.
+    let flat = DynLayout::new(&[0, 3], &[1, isize::MAX]).unwrap();
+    let grouped = GroupedLayout::new(flat, &[1, 1]).unwrap();
+    assert_eq!(grouped.extent(0), Ok(0));
+    assert_eq!(grouped.extent(1), Ok(3));
+    assert_eq!(grouped.index_extended_of_coord(&[0, 1]), Ok(isize::MAX));
+
+    let typed = Layout::new(
+        shape![Int::<0>, Int::<3>],
+        stride![Int::<1>, Int::<{ isize::MAX }>],
+    )
+    .unwrap();
+    assert_eq!(typed.extent(1), grouped.extent(1));
+    assert_eq!(
+        typed.index_extended_of_coord(&[0, 1]),
+        grouped.index_extended_of_coord(&[0, 1])
+    );
+}
+
+#[test]
+fn grouped_layout_rejects_overflowing_group_counts() {
+    let flat = DynLayout::new(&[2], &[1]).unwrap();
+    for groups in [&[usize::MAX, 2][..], &[usize::MAX, 1, 1], &[2]] {
+        assert_eq!(
+            GroupedLayout::new(flat, groups),
+            Err(Error::StructureMismatch)
+        );
+    }
+    let grouped = GroupedLayout::new(flat, &[0, 1, 0]).unwrap();
+    assert_eq!(grouped.groups().collect::<Vec<_>>(), [0, 1, 0]);
+    assert_eq!(grouped.extent(0), Ok(1));
+    assert_eq!(grouped.mode(1), Ok(flat));
+}
+
+#[test]
+fn runtime_coalesce_retains_axes_when_merge_predicate_overflows() {
+    for stride in [isize::MAX / 2 + 1, isize::MIN / 2 - 1] {
+        let layout = DynLayout::new(&[2, 2], &[stride, 1]).unwrap();
+        let result = layout.coalesce().unwrap();
+        assert_eq!(result.shape(), &[2, 2]);
+        assert_eq!(result.stride(), &[stride, 1]);
+        for i in 0..4 {
+            assert_eq!(result.index(i), layout.index(i));
+        }
+    }
+    // A genuine merge still must reject an unrepresentable extent, even when
+    // a later zero extent makes the original domain empty.
+    let empty = DynLayout::new(&[isize::MAX, 2, 0], &[0, 0, 1]).unwrap();
+    assert_eq!(empty.coalesce(), Err(Error::Overflow));
+}
+
+#[test]
+fn filter_revalidates_size_and_address_bounds_after_removing_empty_axes() {
+    let address_overflow = DynLayout::new(&[3, 0], &[isize::MAX, 0]).unwrap();
+    assert_eq!(address_overflow.filter(), Err(Error::Overflow));
+    let size_overflow = DynLayout::new(&[isize::MAX, 2, 0], &[1, 1, 0]).unwrap();
+    assert_eq!(size_overflow.filter(), Err(Error::Overflow));
+
+    let valid = DynLayout::new(&[3, 0], &[2, 0]).unwrap().filter().unwrap();
+    assert_eq!(valid.size(), Ok(3));
+    assert_eq!(valid.address_range(), Ok(Some((0, 4))));
+}
+
+#[test]
+fn grouped_extent_depends_only_on_mode_shape() {
+    let flat = DynLayout::new(&[3, 0], &[isize::MAX, 0]).unwrap();
+    let grouped = GroupedLayout::new(flat, &[1, 1]).unwrap();
+    assert_eq!(grouped.extent(0), Ok(3));
+    assert_eq!(grouped.extent(1), Ok(0));
+    assert_eq!(grouped.extent(2), Err(Error::AxisOutOfBounds));
+    // Extracting an actual standalone layout must still validate its bounds.
+    assert_eq!(grouped.mode(0), Err(Error::Overflow));
+    let huge = DynLayout::new(&[isize::MAX, 2, 0], &[0, 0, 0]).unwrap();
+    assert_eq!(
+        GroupedLayout::new(huge, &[2, 1]).unwrap().extent(0),
+        Err(Error::Overflow)
+    );
+}
+
+#[test]
+fn grouped_extended_coordinates_check_only_requested_address_arithmetic() {
+    let flat = DynLayout::new(&[3, 0], &[isize::MAX, 0]).unwrap();
+    let grouped = GroupedLayout::new(flat, &[1, 1]).unwrap();
+    for coord in [[0, 0], [1, 0], [2, 0], [-1, 0]] {
+        assert_eq!(
+            grouped.index_extended_of_coord(&coord),
+            flat.index_extended_of_coord(&coord)
+        );
+    }
+    assert_eq!(
+        grouped.index_extended_of_coord(&[0]),
+        Err(Error::StructureMismatch)
+    );
+
+    let with_empty_mode = GroupedLayout::new(flat, &[0, 1, 1]).unwrap();
+    assert_eq!(with_empty_mode.index_extended_of_coord(&[0, 0, 0]), Ok(0));
+    assert_eq!(
+        with_empty_mode.index_extended_of_coord(&[1, 0, 0]),
+        Err(Error::CoordinateOutOfBounds)
+    );
 }
