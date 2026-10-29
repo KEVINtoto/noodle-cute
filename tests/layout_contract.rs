@@ -11,7 +11,7 @@ use core::mem::{size_of, size_of_val};
 
 use noodle_cute::int::{DynInt, Int};
 use noodle_cute::layout::{
-    DynLayout, GroupedLayout, Layout, LayoutLeft, LayoutMap, LayoutRight, MAX_RANK,
+    AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutLeft, LayoutMap, LayoutRight, MAX_RANK,
 };
 use noodle_cute::tuple::{Flatten, Item, Product};
 use noodle_cute::{Error, IntTuple, Nil, shape, stride};
@@ -66,9 +66,9 @@ fn typed_extended_coordinates_stay_within_their_own_mode() {
 #[test]
 fn typed_layout_exports_grouped_affine_metadata() {
     let layout = nested!();
-    let flat = layout.to_dyn().unwrap();
-    assert_eq!(flat.shape(), &[2, 2, 3]);
-    assert_eq!(flat.stride(), &[1, 6, 2]);
+    let flat = layout.as_flat_layout().unwrap();
+    assert_eq!(flat.shapes(), &[2, 2, 3]);
+    assert_eq!(flat.strides(), &[1, 6, 2]);
 
     let grouped = layout.as_affine().unwrap().unwrap();
     assert_eq!(grouped.groups().collect::<Vec<_>>(), [2, 1]);
@@ -184,7 +184,7 @@ fn typed_layouts_beyond_max_rank_keep_leaf_level_capabilities() {
     assert_eq!(layout.index_extended_of_coord(&coord), Ok(3 << 32));
 
     // Runtime metadata still enforces its fixed capacity for the same layout.
-    assert_eq!(layout.to_dyn(), Err(Error::CapacityExceeded));
+    assert_eq!(layout.as_flat_layout(), Err(Error::CapacityExceeded));
     assert_eq!(layout.as_affine(), Err(Error::CapacityExceeded));
 }
 
@@ -501,8 +501,8 @@ fn runtime_coalesce_retains_axes_when_merge_predicate_overflows() {
     for stride in [isize::MAX / 2 + 1, isize::MIN / 2 - 1] {
         let layout = DynLayout::new(&[2, 2], &[stride, 1]).unwrap();
         let result = layout.coalesce().unwrap();
-        assert_eq!(result.shape(), &[2, 2]);
-        assert_eq!(result.stride(), &[stride, 1]);
+        assert_eq!(result.shapes(), &[2, 2]);
+        assert_eq!(result.strides(), &[stride, 1]);
         for i in 0..4 {
             assert_eq!(result.index(i), layout.index(i));
         }

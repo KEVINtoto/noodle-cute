@@ -5,15 +5,15 @@
 
 use core::mem::{size_of, size_of_val};
 
-use noodle_cute::Error;
 use noodle_cute::int::{DynInt, Int, Integer, NON_NEGATIVE};
+use noodle_cute::{Error, i};
 
 #[test]
 fn static_arithmetic_keeps_results_in_the_type() {
     // Type annotations verify both the result type and its value at compile time.
-    let _: Int<5> = Int::<2> + Int::<3>;
-    let _: Int<4> = Int::<6> - Int::<2>;
-    let _: Int<42> = Int::<6> * Int::<7>;
+    let _: Int<5> = Int::<2> + i!(3);
+    let _: Int<4> = Int::<6> - i!(2);
+    let _: Int<42> = Int::<6> * i!(7);
     let _: Int<4> = Int::<12> / Int::<3>;
     // A nonzero remainder has the dividend's sign, as with native Rust integers.
     let _: Int<1> = Int::<13> % Int::<4>;

@@ -3,6 +3,15 @@
 //! Arithmetic on two [`Int`] values keeps the result in its type. Mixing an
 //! `Int` with a [`DynInt`] or `isize` produces a `DynInt`, as does arithmetic
 //! involving `DynInt`. Operators follow Rust's integer arithmetic rules.
+//!
+//! ```
+//! use noodle_cute::{DynInt, Int};
+//!
+//! let sum: Int<5> = Int::<2> + Int::<3>;
+//! assert_eq!(sum.value(), 5);
+//! let product: DynInt = Int::<2> * DynInt(3);
+//! assert_eq!(product.value(), 6);
+//! ```
 
 use core::ops::{Add, Div, Mul, Neg, Rem, Sub};
 
@@ -169,7 +178,6 @@ impl Neg for DynInt {
 /// Whether `N` is nonnegative, for use in compile-time shape constraints.
 pub const NON_NEGATIVE<const N: isize>: bool = N >= 0;
 
-#[allow(dead_code)]
 /// Adds two runtime values, returning `Error::Overflow` if the sum cannot fit.
 pub(crate) fn add(a: isize, b: isize) -> Result<isize> {
     a.checked_add(b).ok_or(Error::Overflow)
@@ -178,4 +186,42 @@ pub(crate) fn add(a: isize, b: isize) -> Result<isize> {
 /// Multiplies two runtime values, returning `Error::Overflow` if the product cannot fit.
 pub(crate) fn mul(a: isize, b: isize) -> Result<isize> {
     a.checked_mul(b).ok_or(Error::Overflow)
+}
+
+#[allow(dead_code)]
+/// Computes ceiling division without forming the potentially overflowing `a + b - 1`.
+/// The caller must ensure `a >= 0` and `b > 0`.
+pub(crate) fn ceil_div(a: isize, b: isize) -> isize {
+    a / b + isize::from(a % b != 0)
+}
+
+#[allow(dead_code)]
+/// Computes a checked product, treating an empty slice as one and any zero as zero.
+/// This helper does not validate the signs of shape extents.
+pub(crate) fn product_slice(values: &[isize]) -> Result<isize> {
+    // Detect empty domains before multiplying to avoid irrelevant intermediate overflow.
+    if values.contains(&0) {
+        return Ok(0);
+    }
+    let mut n = 1;
+    for &v in values {
+        n = mul(n, v)?;
+    }
+    Ok(n)
+}
+
+/// Creates a compile-time integer.
+///
+/// This macro can be used to create an `Int<N>` type for a given integer literal `N`.
+/// Example:
+/// ```
+/// use noodle_cute::{Int, i};
+///
+/// let x: Int<5> = i!(5);
+/// ```
+#[macro_export]
+macro_rules! i {
+    ($n:expr) => {
+        Int::<$n>
+    };
 }

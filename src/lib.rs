@@ -2,6 +2,20 @@
 //!
 //! Integers may be encoded in types or stored at runtime; nested tuples preserve
 //! their structure. Checked operations share [`Error`] and [`Result`].
+//!
+//! Use [`layout::DynLayout`] for runtime metadata or [`layout::Layout`] to keep
+//! static values and nested modes in types. Indexing returns address offsets;
+//! layouts do not own or access a backing allocation.
+//!
+//! ```
+//! use noodle_cute::layout::{DynLayout, LayoutMap};
+//!
+//! let layout = DynLayout::left(&[2, 3])?;
+//! assert_eq!(layout.strides(), &[1, 2]);
+//! assert_eq!(layout.index_of_coord(&[1, 2])?, 5);
+//! assert_eq!(layout.size()?, 6);
+//! # Ok::<(), noodle_cute::Error>(())
+//! ```
 
 #![no_std]
 #![feature(
@@ -14,9 +28,11 @@
 
 pub mod int;
 pub mod layout;
+mod slice;
 pub mod tuple;
 
 pub use int::{DynInt, Int, Integer};
+pub use slice::Slice;
 pub use tuple::{IntTuple, Nil};
 
 /// Errors reported by checked integer, tuple, and layout operations.

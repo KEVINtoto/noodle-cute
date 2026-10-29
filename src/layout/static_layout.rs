@@ -3,16 +3,14 @@
 //! Type-level coalescing uses only facts encoded in integer types. Intermediate
 //! fold results use [`Layout`] directly and are validated when the fold finishes.
 
+use core::fmt::Debug;
 use core::ops::Mul;
 
-use crate::int::{Int, Integer, add, mul};
-use crate::tuple::{Flatten, Item, Nil};
+use crate::int::{Int, Integer, mul};
+use crate::tuple::{Flatten, Item, Nil, Tuple};
 use crate::{Error, IntTuple, Result};
 
-use super::{
-    DynLayout, GroupedLayout, LayoutMap, MAX_RANK, Shape, affine_address_range, affine_index,
-    affine_index_extended, affine_injective, checked_size, injective_by_enumeration,
-};
+use super::{AffineLayoutMap, DynLayout, GroupedLayout, LayoutMap, MAX_RANK, Shape};
 
 /// An affine map defined by a shape and structurally congruent strides.
 ///
@@ -25,18 +23,25 @@ use super::{
 /// Public fields allow construction without validation. Use [`Layout::new`] to
 /// check the shape and address arithmetic. The coalescing fold also builds
 /// unchecked `Layout { shape, stride }` intermediates before validating its result.
+///
+/// ```
+/// use noodle_cute::{DynInt, Int, shape, stride};
+/// use noodle_cute::layout::{Layout, LayoutMap};
+///
+/// let layout = Layout::new(
+///     shape![Int::<2>, DynInt(3)],
+///     stride![Int::<1>, Int::<2>],
+/// )?;
+/// assert_eq!(layout.size()?, 6);
+/// assert_eq!(layout.index_of_coord(&[1, 2])?, 5);
+/// # Ok::<(), noodle_cute::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout<S, D> {
     /// Nonnegative extents arranged as an integer leaf or nested tuple.
     pub shape: S,
     /// Signed address increments with the same nested profile as `shape`.
     pub stride: D,
-}
-
-// Validate every extent before taking the product: a zero extent makes the
-// domain empty, but must not hide a negative extent elsewhere in the shape.
-pub(super) fn shape_size<S: Item>(shape: &S) -> Result<isize> {
-    checked_size(0..S::LEAVES, |i| shape.leaf(i))
 }
 
 impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
@@ -47,8 +52,8 @@ impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
     /// address calculations return [`Error::Overflow`]. Addresses may be negative
     /// or repeated, and an empty domain has no address endpoints to check.
     pub fn new(shape: S, stride: D) -> Result<Self> {
-        shape_size(&shape)?;
         let layout = Self { shape, stride };
+        layout.size()?;
         layout.address_range()?;
         Ok(layout)
     }
@@ -67,13 +72,35 @@ impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
             stride: self.stride.flatten(),
         }
     }
+}
+
+impl<S: Shape, D: Item<Profile = S::Profile>> AffineLayoutMap for Layout<S, D> {
+    fn affine_rank(&self) -> usize {
+        S::RANK
+    }
+
+    fn shape(&self, leaf: usize) -> Result<isize> {
+        self.shape.leaf(leaf)
+    }
+
+    fn stride(&self, leaf: usize) -> Result<isize> {
+        self.stride.leaf(leaf)
+    }
+
+    fn leaves(&self) -> core::ops::Range<usize> {
+        0..S::LEAVES
+    }
+
+    fn mode_span(&self, axis: usize) -> Result<(usize, usize)> {
+        self.shape.mode_span(axis)
+    }
 
     /// Exports flattened runtime metadata for reflection or backend parameters.
     ///
     /// The result has one axis per leaf and discards the original mode grouping.
     /// Returns [`Error::CapacityExceeded`] if the leaf count exceeds [`MAX_RANK`].
     /// The exported values are validated by [`DynLayout::new`].
-    pub fn to_dyn(&self) -> Result<DynLayout> {
+    fn as_flat_layout(&self) -> Result<DynLayout> {
         if S::LEAVES > MAX_RANK {
             return Err(Error::CapacityExceeded);
         }
@@ -85,65 +112,8 @@ impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
         }
         DynLayout::new(&shape[..S::LEAVES], &stride[..S::LEAVES])
     }
-}
 
-impl<S: Shape, D: Item<Profile = S::Profile>> LayoutMap for Layout<S, D> {
-    fn size(&self) -> Result<isize> {
-        shape_size(&self.shape)
-    }
-
-    fn rank(&self) -> usize {
-        S::RANK
-    }
-
-    fn extent(&self, axis: usize) -> Result<isize> {
-        let (start, len) = self.shape.mode_span(axis)?;
-        checked_size(start..start + len, |i| self.shape.leaf(i))
-    }
-
-    fn index(&self, linear: isize) -> Result<isize> {
-        affine_index(
-            0..S::LEAVES,
-            |i| self.shape.leaf(i),
-            |i| self.stride.leaf(i),
-            linear,
-        )
-    }
-
-    fn index_extended(&self, linear: isize) -> Result<isize> {
-        self.size()?;
-        affine_index_extended(
-            0..S::LEAVES,
-            |i| self.shape.leaf(i),
-            |i| self.stride.leaf(i),
-            linear,
-        )
-    }
-
-    // Evaluate each mode directly over its leaf span. Avoiding `as_affine`
-    // keeps this operation independent of the runtime metadata capacity.
-    fn index_extended_of_coord(&self, coord: &[isize]) -> Result<isize> {
-        self.size()?;
-        if coord.len() != S::RANK {
-            return Err(Error::StructureMismatch);
-        }
-        let mut result = 0;
-        for (axis, &c) in coord.iter().enumerate() {
-            let (start, len) = self.shape.mode_span(axis)?;
-            let part = affine_index_extended(
-                start..start + len,
-                |i| self.shape.leaf(i),
-                |i| self.stride.leaf(i),
-                c,
-            )?;
-            result = add(result, part)?;
-        }
-        Ok(result)
-    }
-
-    // Both the flattened leaf count and the top-level mode count must fit
-    // within `MAX_RANK`; `to_dyn` checks the leaf count below.
-    fn as_affine(&self) -> Result<Option<GroupedLayout>> {
+    fn as_grouped_layout(&self) -> Result<GroupedLayout> {
         if S::RANK > MAX_RANK {
             return Err(Error::CapacityExceeded);
         }
@@ -151,34 +121,148 @@ impl<S: Shape, D: Item<Profile = S::Profile>> LayoutMap for Layout<S, D> {
         for (axis, g) in groups[..S::RANK].iter_mut().enumerate() {
             *g = self.shape.mode_span(axis)?.1;
         }
-        let mut grouped = GroupedLayout::new(self.to_dyn()?, &groups[..S::RANK])?;
+        let mut grouped = GroupedLayout::new(self.as_flat_layout()?, &groups[..S::RANK])?;
         // A leaf type (depth zero) represents a CuTe integral shape, distinct
         // from a one-element tuple even though both have rank one.
         grouped.integral = S::DEPTH == 0;
-        Ok(Some(grouped))
+        Ok(grouped)
     }
+}
 
-    fn address_range(&self) -> Result<Option<(isize, isize)>> {
-        affine_address_range(
-            0..S::LEAVES,
-            |i| self.shape.leaf(i),
-            |i| self.stride.leaf(i),
-        )
+//-----------------------------------------------------------------------------
+// Compact stride construction.
+
+/// Constructs typed compact layouts with the leftmost leaf varying fastest.
+/// Also serves as the direction marker for [`Compact`].
+#[derive(Clone, Copy, Debug)]
+pub struct LayoutLeft;
+
+/// Constructs typed compact layouts with the rightmost leaf varying fastest.
+/// Also serves as the direction marker for [`Compact`].
+#[derive(Clone, Copy, Debug)]
+pub struct LayoutRight;
+
+/// Builds compact strides while preserving tuple structure and static arithmetic.
+///
+/// `Dir` is [`LayoutLeft`] or [`LayoutRight`] and determines the order in which
+/// leaf extents multiply the running stride. The result is
+/// `(stride_tree, start * product_of_extents)`. This low-level operation uses
+/// ordinary integer multiplication; use the direction marker's `make` method
+/// for checked layout construction.
+pub trait Compact<Dir, Start: Integer>: Item {
+    /// Stride tree with the same nested structure as the shape.
+    type Stride: Item<Profile = Self::Profile>;
+    /// Running stride after all extents have been multiplied into `Start`.
+    type End: Integer;
+    /// Assigns strides beginning at `start` and returns the final running stride.
+    fn compact(self, start: Start) -> (Self::Stride, Self::End);
+}
+
+// Leaves and empty tuples are direction-independent; only `IntTuple` changes
+// its recursive evaluation order with the direction marker.
+impl<I, Dir, Start> Compact<Dir, Start> for I
+where
+    I: Integer + Debug + Mul<Start>,
+    <I as Mul<Start>>::Output: Integer,
+    Start: Integer + Debug,
+{
+    type Stride = Start;
+    type End = <I as Mul<Start>>::Output;
+    fn compact(self, start: Start) -> (Start, Self::End) {
+        (start, self * start)
     }
+}
 
-    fn is_injective(&self) -> Result<bool> {
-        let proof = affine_injective(
-            0..S::LEAVES,
-            |i| self.shape.leaf(i),
-            |i| self.stride.leaf(i),
-        )?;
-        // The fast proof uses a sufficient separation condition. If it cannot
-        // decide, enumerate exactly so irregular strides are not misclassified.
-        match proof {
-            Some(injective) => Ok(injective),
-            None => injective_by_enumeration(self),
+impl<Dir, Start: Integer> Compact<Dir, Start> for Nil {
+    type Stride = Nil;
+    type End = Start;
+    fn compact(self, start: Start) -> (Nil, Start) {
+        (Nil, start)
+    }
+}
+
+impl<H, T, Start> Compact<LayoutLeft, Start> for IntTuple<H, T>
+where
+    Start: Integer,
+    H: Compact<LayoutLeft, Start>,
+    T: Tuple + Compact<LayoutLeft, H::End>,
+    T::Stride: Tuple,
+{
+    type Stride = IntTuple<H::Stride, T::Stride>;
+    type End = T::End;
+    fn compact(self, start: Start) -> (Self::Stride, Self::End) {
+        let (h, end) = self.0.compact(start);
+        let (t, end) = self.1.compact(end);
+        (IntTuple(h, t), end)
+    }
+}
+
+impl<H, T, Start> Compact<LayoutRight, Start> for IntTuple<H, T>
+where
+    Start: Integer,
+    T: Tuple + Compact<LayoutRight, Start>,
+    H: Compact<LayoutRight, T::End>,
+    T::Stride: Tuple,
+{
+    type Stride = IntTuple<H::Stride, T::Stride>;
+    type End = H::End;
+    fn compact(self, start: Start) -> (Self::Stride, Self::End) {
+        let (t, end) = self.1.compact(start);
+        let (h, end) = self.0.compact(end);
+        (IntTuple(h, t), end)
+    }
+}
+
+impl LayoutLeft {
+    /// Builds a compact layout with left-to-right cumulative strides.
+    ///
+    /// Validates extents and partial products before constructing strides,
+    /// retaining static values in their types. The first leaf has stride one.
+    ///
+    /// ```
+    /// use noodle_cute::{Int, shape};
+    /// use noodle_cute::layout::{AffineLayoutMap, LayoutLeft, LayoutMap};
+    ///
+    /// let layout = LayoutLeft::make(shape![Int::<2>, (Int::<3>, Int::<4>)])?;
+    /// assert_eq!(layout.rank(), 2);
+    /// assert_eq!(layout.extent(1)?, 12);
+    /// assert_eq!(layout.as_flat_layout()?.strides(), &[1, 2, 6]);
+    /// # Ok::<(), noodle_cute::Error>(())
+    /// ```
+    pub fn make<S: Shape + Compact<Self, Int<1>>>(shape: S) -> Result<Layout<S, S::Stride>> {
+        make_compact(shape, 0..S::LEAVES)
+    }
+}
+
+impl LayoutRight {
+    /// Builds a compact layout with right-to-left cumulative strides.
+    ///
+    /// Checks extents and partial products for overflow. The last leaf has
+    /// stride one; logical linear indices still use left-major order.
+    pub fn make<S: Shape + Compact<Self, Int<1>>>(shape: S) -> Result<Layout<S, S::Stride>> {
+        make_compact(shape, (0..S::LEAVES).rev())
+    }
+}
+
+// Typed stride construction uses ordinary multiplication. Reject negative
+// extents first, then preflight partial products in the same leaf order so
+// overflow before a zero extent returns an error rather than panicking, even
+// when the final logical size is zero.
+fn make_compact<Dir, S: Shape + Compact<Dir, Int<1>>>(
+    shape: S,
+    order: impl Iterator<Item = usize>,
+) -> Result<Layout<S, S::Stride>> {
+    for i in 0..S::LEAVES {
+        if shape.leaf(i)? < 0 {
+            return Err(Error::InvalidShape);
         }
     }
+    let mut scale = 1;
+    for i in order {
+        scale = mul(scale, shape.leaf(i)?)?;
+    }
+    let (stride, _) = shape.clone().compact(Int);
+    Layout::new(shape, stride)
 }
 
 //-----------------------------------------------------------------------------
