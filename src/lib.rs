@@ -26,6 +26,7 @@
 )]
 #![allow(incomplete_features)]
 
+pub mod algebra;
 pub mod int;
 pub mod layout;
 mod slice;
