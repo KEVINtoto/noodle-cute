@@ -29,6 +29,16 @@ fn static_arithmetic_keeps_results_in_the_type() {
 }
 
 #[test]
+fn integer_macro_does_not_depend_on_caller_scope() {
+    use noodle_cute::i;
+
+    struct Int;
+    let _ = Int;
+
+    let _: noodle_cute::Int<5> = i!(5);
+}
+
+#[test]
 fn mixed_static_dynamic_operands_promote_to_dynint() {
     // A dynamic operand makes the result dynamic on either side of an operation.
     let a: DynInt = Int::<2> + DynInt(4);
