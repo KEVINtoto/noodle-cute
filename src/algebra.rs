@@ -291,8 +291,14 @@ impl<T: LayoutMap, R: LayoutMap> LayoutMap for TileRest<T, R> {
         if i >= 0 && i < self.size()? {
             return self.index(i);
         }
-        if let Some(affine) = self.as_affine()? {
-            return affine.index_extended(i);
+        match self.as_affine() {
+            Ok(Some(affine)) => return affine.index_extended(i),
+            Ok(None) | Err(Error::CapacityExceeded) => {}
+            Err(e) => return Err(e),
+        }
+        // When `rest` is a 0-leaf scalar `():()`, the last leaf of the concatenated layout belongs to `tile`.
+        if matches!(self.rest.as_affine(), Ok(Some(r)) if r.shapes().is_empty()) {
+            return self.tile.index_extended(i);
         }
         // Extended domain only extends the slowest rest group; the tile group continues to wrap modulo.
         let tile_size = self.tile.size()?;

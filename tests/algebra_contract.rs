@@ -282,11 +282,22 @@ fn tile_rest_affine_export_injectivity_and_capacity_or_overflow_errors() {
     );
     assert_eq!(overlapping.is_injective(), Ok(false));
 
-    // Combined leaves exceeding MAX_RANK fail during leaf collection.
-    let leaves_20 = dyn_layout(&[1; 20], &[0; 20]);
-    let leaves_13 = dyn_layout(&[1; 13], &[0; 13]);
+    // Combined leaves exceeding MAX_RANK fail during leaf collection, while index_extended
+    // and is_injective fall back to component-wise / enumerated evaluation.
+    let mut shapes_20 = [1isize; 20];
+    let mut strides_20 = [0isize; 20];
+    shapes_20[19] = 2;
+    strides_20[19] = 1;
+    let mut shapes_13 = [1isize; 13];
+    let mut strides_13 = [0isize; 13];
+    shapes_13[12] = 2;
+    strides_13[12] = 10;
+    let leaves_20 = dyn_layout(&shapes_20, &strides_20);
+    let leaves_13 = dyn_layout(&shapes_13, &strides_13);
     let too_many_leaves = TileRest::new(leaves_20, leaves_13, Grouping::Logical);
     assert_eq!(too_many_leaves.as_affine(), Err(Error::CapacityExceeded));
+    assert_eq!(too_many_leaves.index_extended(5), Ok(21));
+    assert_eq!(too_many_leaves.is_injective(), Ok(true));
 
     // Empty 0-leaf modes keep total leaves small while exceeding MAX_RANK groups.
     let mut mode_groups = [0usize; 20];
@@ -294,6 +305,17 @@ fn tile_rest_affine_export_injectivity_and_capacity_or_overflow_errors() {
     let modes_20 = GroupedLayout::new(dyn_layout(&[2], &[1]), &mode_groups).unwrap();
     let too_many_groups = TileRest::new(modes_20, modes_20, Grouping::Flat);
     assert_eq!(too_many_groups.as_affine(), Err(Error::CapacityExceeded));
+    assert_eq!(too_many_groups.index_extended(5), Ok(3));
+
+    // When `rest` has 0 affine leaves and group count exceeds MAX_RANK, the fallback
+    // still extends along `tile`'s last leaf rather than dividing by `tile_size`.
+    let empty_modes_20 = GroupedLayout::new(dyn_layout(&[], &[]), &[0; 20]).unwrap();
+    let scalar_rest_overflow = TileRest::new(modes_20, empty_modes_20, Grouping::Flat);
+    assert_eq!(
+        scalar_rest_overflow.as_affine(),
+        Err(Error::CapacityExceeded)
+    );
+    assert_eq!(scalar_rest_overflow.index_extended(5), Ok(5));
 
     // Size and address arithmetic overflow must be reported rather than wrapping.
     let huge = dyn_layout(&[1 << 32], &[0]);
@@ -748,6 +770,22 @@ fn composition_weak_divisibility_follows_cute_while_not_divisible_falls_back_poi
     assert_eq!(row.index_extended(6), Ok(13));
     assert_eq!(values(&weak), [0, 18, 1, 19, 2, 20, 3, 21]);
 
+    // Under weak divisibility, `composition` normalizes before probing `outer.index_extended(max)`:
+    // here `outer.index_extended(45)` overflows, whereas the normalized layout `(2, 8):(3, d_big)`
+    // restarts at the second mode after 2 steps and stays well within `isize::MAX`.
+    let d_big = isize::MAX / 10;
+    let outer_big = dyn_layout(&[4, 6], &[1, d_big]);
+    let inner_weak = dyn_layout(&[16], &[3]);
+    assert_eq!(outer_big.index_extended(45), Err(Error::Overflow));
+    let weak_big = composition(outer_big, inner_weak).unwrap();
+    assert!(weak_big.is_normalized());
+    assert_grouped(
+        &weak_big.as_affine().unwrap().unwrap(),
+        &[2, 8],
+        &[3, d_big],
+        &[2],
+    );
+
     // Stride divisibility failure (5 >= 4 and 5 % 4 != 0): eager errors, lazy evaluates pointwise.
     let bad_stride = dyn_layout(&[2], &[5]);
     assert_eq!(
@@ -804,7 +842,17 @@ fn composition_handles_broadcast_empty_unit_and_non_affine_maps() {
     // An empty inner domain produces no addresses, so even an empty outer is allowed.
     let empty_composed = composition(TableMap(&[]), dyn_layout(&[0], &[3])).unwrap();
     assert_eq!(empty_composed.size(), Ok(0));
+    assert_eq!(empty_composed.address_range(), Ok(None));
     assert_eq!(empty_composed.index(0), Err(Error::CoordinateOutOfBounds));
+
+    // Normalized `Composition::address_range` delegates to the cached affine layout in O(leaves).
+    let huge_comp =
+        composition(dyn_layout(&[1 << 30], &[2]), dyn_layout(&[1 << 30], &[1])).unwrap();
+    assert!(huge_comp.is_normalized());
+    assert_eq!(
+        huge_comp.address_range(),
+        Ok(Some((0, ((1isize << 30) - 1) * 2)))
+    );
 
     // Non-affine outer (Gray-code swizzle) composed with affine inner.
     let swizzled = TableMap(&[0, 1, 3, 2, 4, 5, 7, 6]);
@@ -812,6 +860,7 @@ fn composition_handles_broadcast_empty_unit_and_non_affine_maps() {
     assert!(!sub.is_normalized());
     assert_eq!(sub.as_affine(), Ok(None));
     assert_eq!(values(&sub), [0, 1, 4, 5]);
+    assert_eq!(sub.address_range(), Ok(Some((0, 5))));
 
     // Exceeding a non-affine outer's domain is rejected at construction.
     assert_eq!(
@@ -867,6 +916,28 @@ fn composition_reports_negative_indices_invalid_shapes_and_overflow() {
         composition(dyn_layout(&[4], &[1]), dyn_layout(&[2], &[-1])).err(),
         Some(Error::CoordinateOutOfBounds)
     );
+    assert_eq!(
+        composition_layout(&dyn_layout(&[4], &[1]), &dyn_layout(&[2], &[-1])),
+        Err(Error::CoordinateOutOfBounds)
+    );
+    assert_eq!(
+        composition_layout(&dyn_layout(&[4, 4], &[1, 4]), &dyn_layout(&[2], &[-1])),
+        Err(Error::CoordinateOutOfBounds)
+    );
+
+    // A unit-extent leaf with a non-divisible negative stride has non-negative reachable
+    // addresses [0, 1], but still violates CuTe's stride divisibility check `|-5| >= 4`.
+    assert_eq!(
+        composition_layout(
+            &dyn_layout(&[4, 6], &[6, 1]),
+            &dyn_layout(&[1, 2], &[-5, 1])
+        ),
+        Err(Error::NotDivisible)
+    );
+    let unit_neg =
+        composition(dyn_layout(&[4, 6], &[6, 1]), dyn_layout(&[1, 2], &[-5, 1])).unwrap();
+    assert!(!unit_neg.is_normalized());
+    assert_eq!(values(&unit_neg), [0, 6]);
 
     // An uncoalesceable leading zero extent in `outer` fails multi-mode composition.
     assert_eq!(
@@ -1403,11 +1474,15 @@ fn structural_right_and_left_inverses_match_cute_and_satisfy_inverse_identities(
         Ok(dyn_layout(&[5, 2], &[1, 4]))
     );
 
-    // Error bounds for `left_inverse`.
-    assert_eq!(
-        left_inverse(dyn_layout(&[0], &[1])),
-        Err(Error::Unsupported)
-    );
+    // Error bounds for `right_inverse` and `left_inverse`.
+    for empty in [
+        dyn_layout(&[0], &[1]),
+        dyn_layout(&[0], &[2]),
+        dyn_layout(&[0, 2], &[0, 1]),
+    ] {
+        assert_eq!(right_inverse(empty), Err(Error::Unsupported));
+        assert_eq!(left_inverse(empty), Err(Error::Unsupported));
+    }
     assert_eq!(
         left_inverse(dyn_layout(&[2], &[-1])),
         Err(Error::Unsupported)
@@ -1420,17 +1495,26 @@ fn structural_right_and_left_inverses_match_cute_and_satisfy_inverse_identities(
         left_inverse(dyn_layout(&[2, 2, 2], &[1, 4, 6])),
         Err(Error::NotDivisible)
     );
+    for overlapping in [
+        dyn_layout(&[2, 2], &[1, 1]),
+        dyn_layout(&[3, 2], &[1, 2]),
+        dyn_layout(&[3, 2, 2], &[1, 2, 6]),
+    ] {
+        assert_eq!(left_inverse(overlapping), Err(Error::NonInjective));
+    }
     // 32 non-coalescing leaves starting at stride 1 fit in MAX_RANK for both inverses;
     // starting at stride 2 requires 33 output slots (a leading hole plus 32 leaves).
     let mut rev_stride = [0isize; MAX_RANK];
-    for (i, slot) in rev_stride.iter_mut().enumerate() {
-        *slot = 1isize << (MAX_RANK - 1 - i);
+    let mut rev_stride_from_2 = [0isize; MAX_RANK];
+    for i in 0..MAX_RANK {
+        rev_stride[i] = 1isize << (MAX_RANK - 1 - i);
+        rev_stride_from_2[i] = 1isize << (MAX_RANK - i);
     }
     let rev_32 = dyn_layout(&[2; MAX_RANK], &rev_stride);
     assert_eq!(right_inverse(rev_32).unwrap().rank(), MAX_RANK);
     assert_eq!(left_inverse(rev_32).unwrap().rank(), MAX_RANK);
     assert_eq!(
-        left_inverse(dyn_layout(&[2; MAX_RANK], &[2; MAX_RANK])),
+        left_inverse(dyn_layout(&[2; MAX_RANK], &rev_stride_from_2)),
         Err(Error::CapacityExceeded)
     );
 }

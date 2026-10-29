@@ -57,9 +57,13 @@ fn sorted_leaves<L: AffineLayoutMap>(layout: &L) -> Result<SortedLeaves> {
 ///
 /// # Errors
 ///
+/// - Returns [`Error::Unsupported`] if `layout` has size 0.
 /// - Returns [`Error::CapacityExceeded`] if leaf capacity is exceeded.
 /// - Returns [`Error::Overflow`] if stride arithmetic overflows.
 pub fn right_inverse<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
+    if layout.size()? == 0 {
+        return Err(Error::Unsupported);
+    }
     let sorted = sorted_leaves(&layout)?;
     let flat = &sorted.flat;
     let mut leaves = Leaves::new();
@@ -96,6 +100,7 @@ pub fn right_inverse<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
 ///
 /// - Returns [`Error::Unsupported`] if `layout` has size 0 or contains negative strides.
 /// - Returns [`Error::NotDivisible`] if a stride is not divisible by the covered size.
+/// - Returns [`Error::NonInjective`] if non-broadcast leaves overlap (`stride < prev_shape * prev_stride`).
 /// - Returns [`Error::CapacityExceeded`] or [`Error::Overflow`] on capacity or arithmetic limits.
 pub fn left_inverse<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
     if layout.size()? == 0 {
@@ -109,6 +114,7 @@ pub fn left_inverse<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
     let mut stride = [0; MAX_RANK + 1];
     let mut len = 0;
     let mut covered = 1;
+    let mut min_stride = 1;
     for &a in &sorted.order[..rank] {
         let d = flat.stride(a)?;
         if d == 0 {
@@ -120,9 +126,13 @@ pub fn left_inverse<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
         if d % covered != 0 {
             return Err(Error::NotDivisible);
         }
+        if d < min_stride {
+            return Err(Error::NonInjective);
+        }
         shape[len] = d / covered;
         stride[len + 1] = sorted.preprod[a];
         covered = mul(covered, shape[len])?;
+        min_stride = mul(flat.shape(a)?, d)?;
         len += 1;
     }
     shape[len] = flat.shape(sorted.order[rank - 1])?;

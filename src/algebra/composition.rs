@@ -30,10 +30,10 @@ fn compose_leaf(lhs: &DynLayout, s: isize, d: isize, out: &mut Leaves) -> Result
             return Err(Error::InvalidShape);
         }
         // Stride divisibility: statically asserted in CuTe; checked here at runtime.
-        if rest_stride % cs != 0 && rest_stride >= cs {
+        let magnitude = rest_stride.checked_abs().ok_or(Error::Overflow)?;
+        if rest_stride % cs != 0 && magnitude >= cs {
             return Err(Error::NotDivisible);
         }
-        let magnitude = rest_stride.checked_abs().ok_or(Error::Overflow)?;
         let next_shape = ceil_div(cs, magnitude);
         let next_stride = ceil_div(magnitude, cs) * rest_stride.signum();
         if next_shape == 1 || rest_shape == 1 {
@@ -122,11 +122,11 @@ fn compose_grouped(outer: &DynLayout, rhs: &GroupedLayout) -> Result<GroupedLayo
 /// - Returns [`Error::CapacityExceeded`] if the normalized layout exceeds [`MAX_RANK`] leaves or groups.
 /// - Returns other layout errors if computing address ranges or normalized layouts fails.
 pub fn composition<A: LayoutMap, B: LayoutMap>(outer: A, inner: B) -> Result<Composition<A, B>> {
-    if let Some((min, max)) = inner.address_range()? {
-        if min < 0 {
-            return Err(Error::CoordinateOutOfBounds);
-        }
-        outer.index_extended(max)?;
+    let range = inner.address_range()?;
+    if let Some((min, _)) = range
+        && min < 0
+    {
+        return Err(Error::CoordinateOutOfBounds);
     }
 
     let normalized = match (outer.as_affine()?, inner.as_affine()?) {
@@ -140,6 +140,12 @@ pub fn composition<A: LayoutMap, B: LayoutMap>(outer: A, inner: B) -> Result<Com
         },
         _ => None,
     };
+
+    if normalized.is_none()
+        && let Some((_, max)) = range
+    {
+        outer.index_extended(max)?;
+    }
 
     Ok(Composition {
         outer,
@@ -174,6 +180,7 @@ pub fn composition<A: LayoutMap, B: LayoutMap>(outer: A, inner: B) -> Result<Com
 ///
 /// # Errors
 ///
+/// - Returns [`Error::CoordinateOutOfBounds`] if `inner` has negative reachable addresses.
 /// - Returns [`Error::NotDivisible`] if stride or shape divisibility conditions fail.
 /// - Returns [`Error::InvalidShape`] if any non-positive extent is encountered.
 /// - Returns [`Error::CapacityExceeded`] if leaf or group counts exceed [`MAX_RANK`].
@@ -182,6 +189,11 @@ pub fn composition_layout<A: AffineLayoutMap, B: AffineLayoutMap>(
     outer: &A,
     inner: &B,
 ) -> Result<GroupedLayout> {
+    if let Some((min, _)) = inner.address_range()?
+        && min < 0
+    {
+        return Err(Error::CoordinateOutOfBounds);
+    }
     compose_grouped(&outer.as_flat_layout()?, &inner.as_grouped_layout()?)
 }
 
@@ -257,6 +269,24 @@ impl<A: LayoutMap, B: LayoutMap> LayoutMap for Composition<A, B> {
         // If either side is non-affine or divisibility fails, normalized is None:
         // composition is still valid pointwise without an affine form.
         Ok(self.normalized)
+    }
+
+    fn address_range(&self) -> Result<Option<(isize, isize)>> {
+        if let Some(layout) = &self.normalized {
+            return layout.address_range();
+        }
+        let n = self.size()?;
+        if n <= 0 {
+            return Ok(None);
+        }
+        let first = self.index(0)?;
+        let (mut min, mut max) = (first, first);
+        for i in 1..n {
+            let a = self.index(i)?;
+            min = min.min(a);
+            max = max.max(a);
+        }
+        Ok(Some((min, max)))
     }
 
     fn is_injective(&self) -> Result<bool> {
