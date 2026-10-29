@@ -3,6 +3,20 @@
 //! [`IntTuple`] stores a head item and a tail ending in [`Nil`]. A head may
 //! itself be a tuple, so top-level modes and flattened integer leaves are
 //! distinct: `(2, (3, 4))` has two modes and three leaves.
+//!
+//! ```
+//! use noodle_cute::{Int, int_tuple};
+//! use noodle_cute::tuple::{Flatten, Item};
+//!
+//! let tuple = int_tuple![Int::<2>, (3isize, 4isize)];
+//! assert_eq!(tuple.rank(), 2);
+//! assert_eq!(tuple.mode_span(1)?, (1, 2));
+//! assert_eq!(tuple.product()?, 24);
+//! let flat = tuple.flatten();
+//! assert_eq!(flat.rank(), 3);
+//! assert_eq!(flat.leaf(2)?, 4);
+//! # Ok::<(), noodle_cute::Error>(())
+//! ```
 
 use core::fmt::Debug;
 use core::marker::PhantomData;
@@ -268,7 +282,9 @@ impl<H, T> IntTuple<H, T> {
 /// Appending another tuple joins the chains while preserving concrete types
 /// and nested heads. Appending to [`Nil`] returns `rhs` unchanged.
 pub trait Append<R> {
+    /// The chain obtained by replacing the terminal `Nil` with `R`.
     type Output;
+    /// Consumes this chain and attaches `rhs` after its last head.
     fn append(self, rhs: R) -> Self::Output;
 }
 
@@ -291,7 +307,9 @@ impl<H, T: Append<R>, R> Append<R> for IntTuple<H, T> {
 /// Leaf types are preserved. A bare integer becomes a singleton tuple, and
 /// [`Nil`] remains empty.
 pub trait Flatten {
+    /// A flat tuple chain retaining the original leaf types and order.
     type Output;
+    /// Consumes the structure and concatenates its flattened heads.
     fn flatten(self) -> Self::Output;
 }
 
@@ -326,7 +344,9 @@ where
 /// Unlike [`Item::product`], this uses multiplication operators without a zero
 /// pre-scan or checked errors; runtime overflow follows Rust's overflow settings.
 pub trait Product {
+    /// The static or runtime integer representation of the result.
     type Output;
+    /// Consumes the structure and multiplies its leaves using integer operators.
     fn product_typed(self) -> Self::Output;
 }
 

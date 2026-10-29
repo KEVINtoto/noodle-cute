@@ -10,29 +10,11 @@
 //! stores flat runtime leaves, while [`GroupedLayout`] also records top-level
 //! mode boundaries. Only the runtime metadata is bounded by [`MAX_RANK`].
 
-use core::fmt::Debug;
-use core::ops::Mul;
+use core::ops::Range;
 
-use crate::int::{DynInt, Int, Integer, NON_NEGATIVE, add, mul};
+use crate::int::{DynInt, Int, NON_NEGATIVE, add, mul};
 use crate::tuple::{Item, Nil, Tuple};
 use crate::{Assert, Error, IntTuple, Result, True};
-
-/// Maximum number of leaves or top-level modes in fixed runtime metadata.
-///
-/// Typed layouts and tuples have no rank limit imposed by this constant, but
-/// exporting them through [`Layout::to_dyn`] or [`LayoutMap::as_affine`] can
-/// return [`Error::CapacityExceeded`].
-pub const MAX_RANK: usize = 32;
-
-/// Selects an entire top-level mode or fixes it at one bounded coordinate.
-/// Used by [`DynLayout::slice`]; strided ranges are not supported.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Slice {
-    /// Retains the mode, preserving its order relative to other retained modes.
-    All,
-    /// Fixes the mode at this coordinate and removes it from the output shape.
-    Index(isize),
-}
 
 /// Builds a recursive shape tuple from static or runtime integer leaves.
 ///
@@ -76,12 +58,6 @@ impl<H: Shape, T: Tuple + Shape> Shape for IntTuple<H, T> {}
 /// A scalar has size one; a zero extent makes the domain empty. Arithmetic
 /// that cannot be represented as an `isize` returns [`Error::Overflow`].
 pub trait LayoutMap: Clone {
-    /// Returns the number of elements in the logical domain.
-    ///
-    /// Scalars have size one and layouts with a zero extent have size zero.
-    /// Invalid extents or an overflowing product return an error.
-    fn size(&self) -> Result<isize>;
-
     /// Returns the number of top-level modes, counting each nested tuple as one.
     /// This can differ from the total number of integer leaves.
     fn rank(&self) -> usize;
@@ -91,6 +67,12 @@ pub trait LayoutMap: Clone {
     /// A nested mode's extent is the product of its leaf extents; an empty mode
     /// has extent one. An invalid axis returns [`Error::AxisOutOfBounds`].
     fn extent(&self, axis: usize) -> Result<isize>;
+
+    /// Returns the number of elements in the logical domain.
+    ///
+    /// Scalars have size one and layouts with a zero extent have size zero.
+    /// Invalid extents or an overflowing product return an error.
+    fn size(&self) -> Result<isize>;
 
     /// Maps a left-major linear index in `[0, size)` to a signed address.
     ///
@@ -118,7 +100,18 @@ pub trait LayoutMap: Clone {
     /// logical domain this agrees with [`LayoutMap::index`]. Negative indices,
     /// or extensions a map cannot represent, return
     /// [`Error::CoordinateOutOfBounds`].
-    fn index_extended(&self, linear: isize) -> Result<isize>;
+    ///
+    /// Default implementation uses the affine layout if linear index is out of
+    /// the logical domain.
+    fn index_extended(&self, linear: isize) -> Result<isize> {
+        if linear >= 0 && linear < self.size()? {
+            return self.index(linear);
+        }
+        match self.as_affine()? {
+            Some(layout) => layout.index_extended(linear),
+            None => Err(Error::CoordinateOutOfBounds),
+        }
+    }
 
     /// Maps one nonnegative extended coordinate per top-level mode.
     ///
@@ -127,21 +120,49 @@ pub trait LayoutMap: Clone {
     /// extension never carries into the next top-level mode. A wrong coordinate
     /// count returns [`Error::StructureMismatch`]. An empty mode accepts only
     /// coordinate zero.
-    fn index_extended_of_coord(&self, coord: &[isize]) -> Result<isize>;
-
-    /// Exports flat runtime affine leaves and their top-level grouping.
     ///
-    /// Returns `None` when no affine representation is available. Exporting a
-    /// typed layout can return [`Error::CapacityExceeded`] even when its direct
-    /// indexing operations succeed, because runtime metadata uses fixed arrays.
-    fn as_affine(&self) -> Result<Option<GroupedLayout>>;
+    /// Default implementation checks for nonnegative coordinates within extents
+    /// and falls back to the affine layout if available.
+    fn index_extended_of_coord(&self, coord: &[isize]) -> Result<isize> {
+        if coord.len() != self.rank() {
+            return Err(Error::StructureMismatch);
+        }
+        if coord.len() == self.rank()
+            && coord
+                .iter()
+                .enumerate()
+                .all(|(a, &c)| c >= 0 && self.extent(a).is_ok_and(|e| c < e))
+        {
+            return self.index_of_coord(coord);
+        }
+        match self.as_affine()? {
+            Some(layout) if layout.rank() == self.rank() => layout.index_extended_of_coord(coord),
+            Some(_) => Err(Error::StructureMismatch),
+            None => Err(Error::CoordinateOutOfBounds),
+        }
+    }
 
     /// Returns the inclusive bounds `(min, max)` of reachable addresses.
     ///
     /// Empty domains return `None`. The interval may contain holes and does not
     /// imply injectivity. Affine layouts compute the bounds from the signed
     /// contribution of each leaf without enumerating the domain.
-    fn address_range(&self) -> Result<Option<(isize, isize)>>;
+    ///
+    /// Default implementation uses linear scanning.
+    fn address_range(&self) -> Result<Option<(isize, isize)>> {
+        let size = self.size()?;
+        if size == 0 {
+            return Ok(None);
+        }
+        let mut min = self.index(0)?;
+        let mut max = min;
+        for i in 1..size {
+            let address = self.index(i)?;
+            min = min.min(address);
+            max = max.max(address);
+        }
+        Ok(Some((min, max)))
+    }
 
     /// Returns the address span `max - min + 1`, including padding holes.
     ///
@@ -175,11 +196,112 @@ pub trait LayoutMap: Clone {
     /// a stride-separation proof, then compare address pairs if the proof is
     /// inconclusive. The fallback takes `O(size^2)` time.
     fn is_injective(&self) -> Result<bool>;
+
+    /// Exports flat runtime affine leaves and their top-level grouping.
+    ///
+    /// Returns `None` when no affine representation is available. Exporting a
+    /// typed layout can return [`Error::CapacityExceeded`] even when its direct
+    /// indexing operations succeed, because runtime metadata uses fixed arrays.
+    fn as_affine(&self) -> Result<Option<GroupedLayout>>;
+}
+
+/// Layouts admitting a flat affine representation (hierarchy may be erased).
+/// Implementations must export metadata that preserves the mapping from logical
+/// linear indices to addresses.
+pub trait AffineLayoutMap: LayoutMap {
+    /// Same as [`LayoutMap::rank`].
+    fn affine_rank(&self) -> usize;
+
+    /// Returns the extent of flat leaf `leaf`, numbered head-first and
+    /// depth-first across all top-level modes.
+    ///
+    /// Unlike [`LayoutMap::extent`], nested modes are not multiplied together.
+    /// An invalid leaf returns [`Error::AxisOutOfBounds`].
+    fn shape(&self, leaf: usize) -> Result<isize>;
+
+    /// Returns the signed address stride of flat leaf `leaf`.
+    ///
+    /// Uses the same leaf numbering and errors as [`AffineLayoutMap::shape`].
+    fn stride(&self, leaf: usize) -> Result<isize>;
+
+    /// Returns the range of flat leaf indices for this layout.
+    ///
+    /// The range is half-open, starting at zero and ending at the number of leaves.
+    fn leaves(&self) -> Range<usize>;
+
+    /// Returns the start index and length of the flat leaf span for top-level mode `axis`.
+    ///
+    /// An invalid axis returns [`Error::AxisOutOfBounds`].
+    fn mode_span(&self, axis: usize) -> Result<(usize, usize)>;
+
+    /// Returns the flat shape/stride metadata; conversion fails when a static
+    /// layout's leaf count exceeds `MAX_RANK`.
+    fn as_flat_layout(&self) -> Result<DynLayout>;
+
+    /// Returns flat leaves with their top-level grouping, used when CuTe
+    /// algebra distributes over top-level modes (right-distributivity).
+    fn as_grouped_layout(&self) -> Result<GroupedLayout>;
+}
+
+impl<T: AffineLayoutMap> LayoutMap for T {
+    fn rank(&self) -> usize {
+        self.affine_rank()
+    }
+
+    fn extent(&self, axis: usize) -> Result<isize> {
+        let (start, len) = self.mode_span(axis)?;
+        checked_size(self, start..start + len)
+    }
+
+    fn size(&self) -> Result<isize> {
+        checked_size(self, self.leaves())
+    }
+
+    fn index(&self, linear: isize) -> Result<isize> {
+        affine_index(self, self.leaves(), linear)
+    }
+
+    fn index_extended(&self, linear: isize) -> Result<isize> {
+        self.size()?;
+        affine_index_extended(self, self.leaves(), linear)
+    }
+
+    fn index_extended_of_coord(&self, coord: &[isize]) -> Result<isize> {
+        if coord.len() != self.affine_rank() {
+            return Err(Error::StructureMismatch);
+        }
+        self.size()?;
+        let mut result = 0;
+        for (axis, &c) in coord.iter().enumerate() {
+            let (start, len) = self.mode_span(axis)?;
+            let part = affine_index_extended(self, start..start + len, c)?;
+            result = add(result, part)?;
+        }
+        Ok(result)
+    }
+
+    fn address_range(&self) -> Result<Option<(isize, isize)>> {
+        affine_address_range(self, self.leaves())
+    }
+
+    fn is_injective(&self) -> Result<bool> {
+        let proof = affine_injective(self, self.leaves())?;
+        // The fast proof uses a sufficient condition. Fall back to exact
+        // enumeration when it cannot decide an irregular stride pattern.
+        match proof {
+            Some(injective) => Ok(injective),
+            None => is_injective_by_enumeration(self),
+        }
+    }
+
+    fn as_affine(&self) -> Result<Option<GroupedLayout>> {
+        self.as_grouped_layout().map(Some)
+    }
 }
 
 /// Checks every pair of logical indices for equal addresses in `O(size^2)` time.
 /// Used when the affine stride-separation proof is inconclusive.
-pub(crate) fn injective_by_enumeration<L: LayoutMap>(layout: &L) -> Result<bool> {
+pub(crate) fn is_injective_by_enumeration<L: LayoutMap>(layout: &L) -> Result<bool> {
     let n = layout.size()?;
     for i in 0..n {
         for j in 0..i {
@@ -217,23 +339,103 @@ pub(crate) fn coord_to_linear<L: LayoutMap>(layout: &L, coord: &[isize]) -> Resu
     Ok(index)
 }
 
+#[allow(dead_code)]
+/// Convert one logical linear coordinate to flat top-level coordinates.
+/// The leftmost axis varies fastest; `out` must have length `rank`, and `linear`
+/// must lie in `[0, size)`. Each nested mode produces one top-level linear
+/// coordinate rather than separate coordinates for its leaves.
+pub(crate) fn linear_to_coord<L: LayoutMap>(
+    layout: &L,
+    mut linear: isize,
+    coord: &mut [isize],
+) -> Result<()> {
+    if coord.len() < layout.rank() {
+        return Err(Error::StructureMismatch);
+    }
+    if linear < 0 || linear >= layout.size()? {
+        return Err(Error::CoordinateOutOfBounds);
+    }
+    for (a, c) in coord.iter_mut().enumerate() {
+        let s = layout.extent(a)?;
+        *c = linear % s;
+        linear /= s;
+    }
+    Ok(())
+}
+
+/// Creates a left-major compact identity map whose logical indices equal addresses.
+/// The same construction constraints as [`DynLayout::left`] apply.
+/// Note: this is the *linearized* identity. CuTe `make_identity_layout(shape)`
+/// maps a coordinate to the coordinate tuple itself (ArithmeticTuple strides
+/// `E<i>`); the coordinate-valued counterpart here is `identity_tensor`.
+pub fn identity_layout(shape: &[isize]) -> Result<DynLayout> {
+    DynLayout::left(shape)
+}
+
+/// CuTe `Layout::get_flat_coord(index)`: computes each leaf coordinate as
+/// `(index / stride) % shape`, then combines leaves within each top-level mode
+/// in left-major order and writes the coordinates to `out[..rank]`.
+///
+/// This inverts compact layouts. Unit extents have coordinate zero. `index`
+/// must be nonnegative; non-unit leaves with nonpositive strides return
+/// [`Error::Unsupported`]. This is not a general inverse for padded or overlapping
+/// layouts, and it does not check whether `index` is a reachable address.
+///
+/// ```
+/// use noodle_cute::layout::{DynLayout, get_flat_coord};
+///
+/// let layout = DynLayout::right(&[2, 3])?;
+/// let mut coord = [0; 2];
+/// get_flat_coord(&layout, 4, &mut coord)?;
+/// assert_eq!(coord, [1, 1]);
+/// # Ok::<(), noodle_cute::Error>(())
+/// ```
+pub fn get_flat_coord<L: AffineLayoutMap>(
+    layout: &L,
+    index: isize,
+    coord: &mut [isize],
+) -> Result<()> {
+    layout.size()?;
+    let rank = layout.affine_rank();
+    if coord.len() < rank {
+        return Err(Error::StructureMismatch);
+    }
+    if index < 0 {
+        return Err(Error::CoordinateOutOfBounds);
+    }
+    for (m, o) in coord[..rank].iter_mut().enumerate() {
+        let (start, len) = layout.mode_span(m)?;
+        let (mut c, mut scale) = (0, 1);
+        for i in start..start + len {
+            let (s, d) = (layout.shape(i)?, layout.stride(i)?);
+            if s != 1 {
+                if s <= 0 || d <= 0 {
+                    return Err(Error::Unsupported);
+                }
+                c = add(c, mul((index / d) % s, scale)?)?;
+            }
+            scale = mul(scale, s)?;
+        }
+        *o = c;
+    }
+    Ok(())
+}
+
 //-----------------------------------------------------------------------------
-// These affine algorithms access shape and stride by leaf index, so both
-// `Layout` and `DynLayout` can use them. Typed layouts call them directly,
-// without converting to fixed-capacity runtime metadata.
+// These affine algorithms access shape and stride by leaf index through
+// `AffineLayoutMap::shape` and `AffineLayoutMap::stride`, so both `Layout` and
+// `DynLayout` can use them. Typed layouts call them directly, without converting
+// to fixed-capacity runtime metadata.
 
 /// Validates all extents, then computes their product with checked arithmetic.
 ///
 /// A zero extent makes the size zero, but must not hide another negative extent.
 /// Check for zero before multiplying so an empty domain cannot overflow its
 /// logical size. The product of an empty range is one.
-pub(crate) fn checked_size(
-    leaves: core::ops::Range<usize>,
-    shape: impl Fn(usize) -> Result<isize>,
-) -> Result<isize> {
+pub(crate) fn checked_size<L: AffineLayoutMap>(layout: &L, leaves: Range<usize>) -> Result<isize> {
     let mut zero = false;
     for i in leaves.clone() {
-        let s = shape(i)?;
+        let s = layout.shape(i)?;
         if s < 0 {
             return Err(Error::InvalidShape);
         }
@@ -244,7 +446,7 @@ pub(crate) fn checked_size(
     }
     let mut n = 1;
     for i in leaves {
-        n = mul(n, shape(i)?)?;
+        n = mul(n, layout.shape(i)?)?;
     }
     Ok(n)
 }
@@ -254,19 +456,18 @@ pub(crate) fn checked_size(
 /// Validates `linear` against the checked size before dividing by extents, so
 /// empty domains are rejected without division by zero. Flattening nested modes
 /// in leaf order preserves the same logical traversal.
-pub(crate) fn affine_index(
-    leaves: core::ops::Range<usize>,
-    shape: impl Fn(usize) -> Result<isize>,
-    stride: impl Fn(usize) -> Result<isize>,
+pub(crate) fn affine_index<L: AffineLayoutMap>(
+    layout: &L,
+    leaves: Range<usize>,
     mut linear: isize,
 ) -> Result<isize> {
-    if linear < 0 || linear >= checked_size(leaves.clone(), &shape)? {
+    if linear < 0 || linear >= checked_size(layout, leaves.clone())? {
         return Err(Error::CoordinateOutOfBounds);
     }
     let mut result = 0;
     for i in leaves {
-        let s = shape(i)?;
-        result = add(result, mul(linear % s, stride(i)?)?)?;
+        let s = layout.shape(i)?;
+        result = add(result, mul(linear % s, layout.stride(i)?)?)?;
         linear /= s;
     }
     Ok(result)
@@ -278,10 +479,9 @@ pub(crate) fn affine_index(
 /// quotient, without consulting its extent. Negative indices and nonpositive
 /// leading extents are rejected. A mode without leaves accepts only index zero.
 /// Callers validate the shape separately; all address arithmetic is checked.
-pub(crate) fn affine_index_extended(
+pub(crate) fn affine_index_extended<L: AffineLayoutMap>(
+    layout: &L,
     leaves: core::ops::Range<usize>,
-    shape: impl Fn(usize) -> Result<isize>,
-    stride: impl Fn(usize) -> Result<isize>,
     mut linear: isize,
 ) -> Result<isize> {
     if linear < 0 {
@@ -297,31 +497,30 @@ pub(crate) fn affine_index_extended(
     let last = leaves.end - 1;
     let mut result = 0;
     for i in leaves.start..last {
-        let s = shape(i)?;
+        let s = layout.shape(i)?;
         if s <= 0 {
             return Err(Error::CoordinateOutOfBounds);
         }
-        result = add(result, mul(linear % s, stride(i)?)?)?;
+        result = add(result, mul(linear % s, layout.stride(i)?)?)?;
         linear /= s;
     }
-    add(result, mul(linear, stride(last)?)?)
+    add(result, mul(linear, layout.stride(last)?)?)
 }
 
 /// Computes inclusive address bounds by summing each leaf's signed endpoint.
 /// Negative strides contribute to the minimum and positive strides to the
 /// maximum. An empty domain has no reachable addresses and returns `None`.
-pub(crate) fn affine_address_range(
+pub(crate) fn affine_address_range<L: AffineLayoutMap>(
+    layout: &L,
     leaves: core::ops::Range<usize>,
-    shape: impl Fn(usize) -> Result<isize>,
-    stride: impl Fn(usize) -> Result<isize>,
 ) -> Result<Option<(isize, isize)>> {
-    if checked_size(leaves.clone(), &shape)? == 0 {
+    if checked_size(layout, leaves.clone())? == 0 {
         return Ok(None);
     }
     let mut min = 0;
     let mut max = 0;
     for i in leaves {
-        let delta = mul(shape(i)? - 1, stride(i)?)?;
+        let delta = mul(layout.shape(i)? - 1, layout.stride(i)?)?;
         min = add(min, delta.min(0))?;
         max = add(max, delta.max(0))?;
     }
@@ -338,12 +537,11 @@ pub(crate) fn affine_address_range(
 ///
 /// `Some(true)` is a successful proof; `Some(false)` identifies a nontrivial
 /// zero-stride leaf. `None` is inconclusive and requires exact enumeration.
-pub(crate) fn affine_injective(
+pub(crate) fn affine_injective<L: AffineLayoutMap>(
+    layout: &L,
     leaves: core::ops::Range<usize>,
-    shape: impl Fn(usize) -> Result<isize>,
-    stride: impl Fn(usize) -> Result<isize>,
 ) -> Result<Option<bool>> {
-    if checked_size(leaves.clone(), &shape)? <= 1 {
+    if checked_size(layout, leaves.clone())? <= 1 {
         return Ok(Some(true));
     }
     let mut span = 0isize;
@@ -352,10 +550,10 @@ pub(crate) fn affine_injective(
         let mut next = None;
         for i in leaves.clone() {
             // Unit extents cannot introduce overlap.
-            if shape(i)? <= 1 {
+            if layout.shape(i)? <= 1 {
                 continue;
             }
-            let d = stride(i)?;
+            let d = layout.stride(i)?;
             if d == 0 {
                 return Ok(Some(false));
             }
@@ -373,129 +571,9 @@ pub(crate) fn affine_injective(
         if d <= span {
             return Ok(None);
         }
-        span = add(span, mul(shape(i)? - 1, d)?)?;
+        span = add(span, mul(layout.shape(i)? - 1, d)?)?;
         prev = Some((abs, i));
     }
-}
-
-//-----------------------------------------------------------------------------
-// Compact stride construction.
-
-/// Constructs typed compact layouts with the leftmost leaf varying fastest.
-/// Also serves as the direction marker for [`Compact`].
-#[derive(Clone, Copy, Debug)]
-pub struct LayoutLeft;
-
-/// Constructs typed compact layouts with the rightmost leaf varying fastest.
-/// Also serves as the direction marker for [`Compact`].
-#[derive(Clone, Copy, Debug)]
-pub struct LayoutRight;
-
-/// Builds compact strides while preserving tuple structure and static arithmetic.
-///
-/// `Dir` is [`LayoutLeft`] or [`LayoutRight`] and determines the order in which
-/// leaf extents multiply the running stride. The result is
-/// `(stride_tree, start * product_of_extents)`. This low-level operation uses
-/// ordinary integer multiplication; use the direction marker's `make` method
-/// for checked layout construction.
-pub trait Compact<Dir, Start: Integer>: Item {
-    /// Stride tree with the same nested structure as the shape.
-    type Stride: Item<Profile = Self::Profile>;
-    /// Running stride after all extents have been multiplied into `Start`.
-    type End: Integer;
-    /// Assigns strides beginning at `start` and returns the final running stride.
-    fn compact(self, start: Start) -> (Self::Stride, Self::End);
-}
-
-// Leaves and empty tuples are direction-independent; only `IntTuple` changes
-// its recursive evaluation order with the direction marker.
-impl<I, Dir, Start> Compact<Dir, Start> for I
-where
-    I: Integer + Debug + Mul<Start>,
-    <I as Mul<Start>>::Output: Integer,
-    Start: Integer + Debug,
-{
-    type Stride = Start;
-    type End = <I as Mul<Start>>::Output;
-    fn compact(self, start: Start) -> (Start, Self::End) {
-        (start, self * start)
-    }
-}
-
-impl<Dir, Start: Integer> Compact<Dir, Start> for Nil {
-    type Stride = Nil;
-    type End = Start;
-    fn compact(self, start: Start) -> (Nil, Start) {
-        (Nil, start)
-    }
-}
-
-impl<H, T, Start> Compact<LayoutLeft, Start> for IntTuple<H, T>
-where
-    Start: Integer,
-    H: Compact<LayoutLeft, Start>,
-    T: Tuple + Compact<LayoutLeft, H::End>,
-    T::Stride: Tuple,
-{
-    type Stride = IntTuple<H::Stride, T::Stride>;
-    type End = T::End;
-    fn compact(self, start: Start) -> (Self::Stride, Self::End) {
-        let (h, end) = self.0.compact(start);
-        let (t, end) = self.1.compact(end);
-        (IntTuple(h, t), end)
-    }
-}
-
-impl<H, T, Start> Compact<LayoutRight, Start> for IntTuple<H, T>
-where
-    Start: Integer,
-    T: Tuple + Compact<LayoutRight, Start>,
-    H: Compact<LayoutRight, T::End>,
-    T::Stride: Tuple,
-{
-    type Stride = IntTuple<H::Stride, T::Stride>;
-    type End = H::End;
-    fn compact(self, start: Start) -> (Self::Stride, Self::End) {
-        let (t, end) = self.1.compact(start);
-        let (h, end) = self.0.compact(end);
-        (IntTuple(h, t), end)
-    }
-}
-
-impl LayoutLeft {
-    /// Builds a compact layout with left-to-right cumulative strides.
-    ///
-    /// Validates extents and partial products before constructing strides,
-    /// retaining static values in their types. The first leaf has stride one.
-    pub fn make<S: Shape + Compact<Self, Int<1>>>(shape: S) -> Result<Layout<S, S::Stride>> {
-        make_compact(shape, 0..S::LEAVES)
-    }
-}
-
-impl LayoutRight {
-    /// Builds a compact layout with right-to-left cumulative strides.
-    ///
-    /// Checks extents and partial products for overflow. The last leaf has
-    /// stride one; logical linear indices still use left-major order.
-    pub fn make<S: Shape + Compact<Self, Int<1>>>(shape: S) -> Result<Layout<S, S::Stride>> {
-        make_compact(shape, (0..S::LEAVES).rev())
-    }
-}
-
-// Typed stride construction uses ordinary multiplication. Preflight partial
-// products in the same leaf order so overflow before a zero extent returns an
-// error rather than panicking, even when the final logical size is zero.
-fn make_compact<Dir, S: Shape + Compact<Dir, Int<1>>>(
-    shape: S,
-    order: impl Iterator<Item = usize>,
-) -> Result<Layout<S, S::Stride>> {
-    static_layout::shape_size(&shape)?;
-    let mut scale = 1;
-    for i in order {
-        scale = mul(scale, shape.leaf(i)?)?;
-    }
-    let (stride, _) = shape.clone().compact(Int);
-    Layout::new(shape, stride)
 }
 
 mod dynamic_layout;

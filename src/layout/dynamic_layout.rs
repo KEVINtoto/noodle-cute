@@ -1,15 +1,20 @@
-use crate::{Error, Result};
+use crate::{Error, Result, Slice};
 
-use super::{
-    LayoutMap, MAX_RANK, Slice, add, affine_address_range, affine_index, affine_index_extended,
-    affine_injective, checked_size, injective_by_enumeration, mul,
-};
+use super::{AffineLayoutMap, LayoutMap, add, mul};
+
+/// Maximum number of leaves or top-level modes in fixed runtime metadata.
+///
+/// Typed layouts and tuples have no rank limit imposed by this constant, but
+/// exporting them through [`AffineLayoutMap::as_flat_layout`] or [`LayoutMap::as_affine`] can
+/// return [`Error::CapacityExceeded`].
+pub const MAX_RANK: usize = 32;
 
 /// An allocation-free affine layout with runtime extents and strides.
 ///
-/// Every axis is a leaf, and at most [`MAX_RANK`] leaves can be stored. An empty
-/// shape describes a scalar with size 1 and address 0; any zero extent makes the
-/// logical domain empty. Only the first `rank` entries of each array are active.
+/// Every axis is a leaf (i.e., flattened, not hierarchical), and at most
+/// [`MAX_RANK`] leaves can be stored. An empty shape describes a scalar
+/// with size 1 and address 0; any zero extent makes the logical domain empty.
+/// Only the first `rank` entries of each array are active.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DynLayout {
     pub(crate) shape: [isize; MAX_RANK],
@@ -33,6 +38,17 @@ impl DynLayout {
     /// Construction checks for overflow in the logical size and reachable
     /// address bounds. Zero and negative strides are allowed; overlapping
     /// addresses are accepted and can be checked with `LayoutMap::is_injective`.
+    ///
+    /// ```
+    /// use noodle_cute::layout::{DynLayout, LayoutMap};
+    ///
+    /// let reversed = DynLayout::new(&[3], &[-2])?;
+    /// assert_eq!(reversed.index(2)?, -4);
+    /// assert_eq!(reversed.address_range()?, Some((-4, 0)));
+    /// let empty = DynLayout::new(&[0], &[1])?;
+    /// assert_eq!(empty.address_range()?, None);
+    /// # Ok::<(), noodle_cute::Error>(())
+    /// ```
     pub fn new(shape: &[isize], stride: &[isize]) -> Result<Self> {
         if shape.len() != stride.len() {
             return Err(Error::StructureMismatch);
@@ -67,14 +83,14 @@ impl DynLayout {
         if shape.len() > MAX_RANK {
             return Err(Error::CapacityExceeded);
         }
-        checked_size(0..shape.len(), |i| Ok(shape[i]))?;
+        // Report a negative extent before any partial-product overflow.
+        if shape.iter().any(|&s| s < 0) {
+            return Err(Error::InvalidShape);
+        }
         let mut strides = [0; MAX_RANK];
         let mut scale = 1;
         for j in 0..shape.len() {
             let i = if right { shape.len() - 1 - j } else { j };
-            if shape[i] < 0 {
-                return Err(Error::InvalidShape);
-            }
             strides[i] = scale;
             scale = mul(scale, shape[i])?;
         }
@@ -82,12 +98,12 @@ impl DynLayout {
     }
 
     /// Returns the active leaf extents in logical axis order.
-    pub fn shape(&self) -> &[isize] {
+    pub fn shapes(&self) -> &[isize] {
         &self.shape[..self.rank]
     }
 
     /// Returns the signed address strides corresponding to `Self::shape`.
-    pub fn stride(&self) -> &[isize] {
+    pub fn strides(&self) -> &[isize] {
         &self.stride[..self.rank]
     }
 
@@ -99,6 +115,16 @@ impl DynLayout {
     /// Fixed coordinates are checked and their offset is computed even when a
     /// retained axis is empty. Out-of-bounds coordinates and offset overflow
     /// return errors.
+    ///
+    /// ```
+    /// use noodle_cute::{Slice, layout::{DynLayout, LayoutMap}};
+    ///
+    /// let layout = DynLayout::left(&[2, 3])?;
+    /// let (column, offset) = layout.slice(&[Slice::All, Slice::Index(2)])?;
+    /// assert_eq!(offset, 4);
+    /// assert_eq!(offset + column.index(1)?, layout.index_of_coord(&[1, 2])?);
+    /// # Ok::<(), noodle_cute::Error>(())
+    /// ```
     pub fn slice(&self, selectors: &[Slice]) -> Result<(Self, isize)> {
         if selectors.len() != self.rank {
             return Err(Error::StructureMismatch);
@@ -129,6 +155,20 @@ impl DynLayout {
     ///
     /// The logical size and mapping on `[0, size)` are preserved. The extended
     /// mapping can change when a trailing size-1 leaf is removed.
+    ///
+    /// ```
+    /// use noodle_cute::layout::{DynLayout, LayoutMap};
+    ///
+    /// let layout = DynLayout::new(&[2, 3, 1], &[1, 2, 99])?;
+    /// let compact = layout.coalesce()?;
+    /// assert_eq!(compact.shapes(), &[6]);
+    /// assert_eq!(compact.strides(), &[1]);
+    /// assert_eq!(layout.index(5)?, compact.index(5)?);
+    /// // Removing the trailing unit axis changes extension beyond the domain.
+    /// assert_eq!(layout.index_extended(6)?, 99);
+    /// assert_eq!(compact.index_extended(6)?, 6);
+    /// # Ok::<(), noodle_cute::Error>(())
+    /// ```
     pub fn coalesce(&self) -> Result<Self> {
         let mut out = Self::scalar();
         for a in 0..self.rank {
@@ -159,10 +199,10 @@ impl DynLayout {
     /// CuTe `detail::coalesce_x`: coalesces leaves while retaining the stride
     /// that controls extension beyond the logical domain.
     ///
-    /// A trailing size-1 leaf is assigned a placeholder extent of 2, because
-    /// extended indexing never reads the final leaf's extent. Thus
-    /// `(2,1):(2,8)` becomes `(2,2):(2,8)` instead of `2:2`. The placeholder can
-    /// change the logical size; this helper is intended for extended indexing.
+    /// A trailing size-1 leaf retains its actual extent and stride unless it
+    /// merges with a preceding leaf. Thus `(2,1):(2,8)` remains unchanged,
+    /// while `(2,1):(1,2)` becomes `2:1`. Both logical size and the extended
+    /// mapping are preserved for nonzero-rank layouts.
     /// A rank-0 scalar is normalized to `1:0`, which additionally accepts
     /// positive extended indices and maps them to address 0.
     #[allow(dead_code)]
@@ -175,11 +215,11 @@ impl DynLayout {
         // order until both metadata arrays are reversed below.
         let mut out = Self::scalar();
         out.rank = 1;
-        out.shape[0] = if self.shape[r - 1] == 1 {
-            2
-        } else {
-            self.shape[r - 1]
-        };
+        // CuTe's recursive `bw_coalesce` uses extent 2 to distinguish a trailing
+        // size-1 leaf from its empty accumulator. Here rank = 1 already retains
+        // that leaf, so keep its actual extent to avoid artificial overflow in
+        // merged extents or address bounds; extended indexing ignores its extent.
+        out.shape[0] = self.shape[r - 1];
         out.stride[0] = self.stride[r - 1];
         for a in (0..r - 1).rev() {
             let (s, d) = (self.shape[a], self.stride[a]);
@@ -221,72 +261,43 @@ impl DynLayout {
     }
 }
 
-impl LayoutMap for DynLayout {
-    fn size(&self) -> Result<isize> {
-        checked_size(0..self.rank, |a| Ok(self.shape[a]))
-    }
-
-    fn rank(&self) -> usize {
+impl AffineLayoutMap for DynLayout {
+    fn affine_rank(&self) -> usize {
         self.rank
     }
 
-    fn extent(&self, a: usize) -> Result<isize> {
-        self.shape().get(a).copied().ok_or(Error::AxisOutOfBounds)
+    // Each axis is a single leaf, so leaf and axis indices coincide.
+    fn shape(&self, leaf: usize) -> Result<isize> {
+        self.shapes()
+            .get(leaf)
+            .copied()
+            .ok_or(Error::AxisOutOfBounds)
     }
 
-    fn index(&self, linear: isize) -> Result<isize> {
-        affine_index(
-            0..self.rank,
-            |a| Ok(self.shape[a]),
-            |a| Ok(self.stride[a]),
-            linear,
-        )
+    fn stride(&self, leaf: usize) -> Result<isize> {
+        self.strides()
+            .get(leaf)
+            .copied()
+            .ok_or(Error::AxisOutOfBounds)
     }
 
-    fn index_extended(&self, linear: isize) -> Result<isize> {
-        self.size()?;
-        affine_index_extended(
-            0..self.rank,
-            |i| Ok(self.shape[i]),
-            |i| Ok(self.stride[i]),
-            linear,
-        )
+    fn leaves(&self) -> core::ops::Range<usize> {
+        0..self.rank
     }
 
-    fn index_extended_of_coord(&self, coord: &[isize]) -> Result<isize> {
-        self.size()?;
-        if coord.len() != self.rank {
-            return Err(Error::StructureMismatch);
+    fn mode_span(&self, axis: usize) -> Result<(usize, usize)> {
+        if axis >= self.rank {
+            return Err(Error::AxisOutOfBounds);
         }
-        // Each top-level axis consists of a single leaf, which is therefore
-        // its mode's final leaf. Extended coordinates are never reduced modulo
-        // the corresponding extent.
-        let mut result = 0;
-        for (a, &c) in coord.iter().enumerate() {
-            if c < 0 {
-                return Err(Error::CoordinateOutOfBounds);
-            }
-            result = add(result, mul(c, self.stride[a])?)?;
-        }
-        Ok(result)
+        Ok((axis, 1))
     }
 
-    fn as_affine(&self) -> Result<Option<GroupedLayout>> {
-        GroupedLayout::from_flat(*self).map(Some)
+    fn as_flat_layout(&self) -> Result<DynLayout> {
+        Ok(*self)
     }
 
-    fn address_range(&self) -> Result<Option<(isize, isize)>> {
-        affine_address_range(0..self.rank, |a| Ok(self.shape[a]), |a| Ok(self.stride[a]))
-    }
-
-    fn is_injective(&self) -> Result<bool> {
-        let proof = affine_injective(0..self.rank, |a| Ok(self.shape[a]), |a| Ok(self.stride[a]))?;
-        // The fast proof uses a sufficient condition. Fall back to exact
-        // enumeration when it cannot decide an irregular stride pattern.
-        match proof {
-            Some(injective) => Ok(injective),
-            None => injective_by_enumeration(self),
-        }
+    fn as_grouped_layout(&self) -> Result<GroupedLayout> {
+        GroupedLayout::from_flat(*self)
     }
 }
 
@@ -313,6 +324,18 @@ impl GroupedLayout {
     /// `flat.rank()`, and there may be at most `MAX_RANK` modes. A mode with no
     /// leaves represents an empty tuple with extent 1. This constructor always
     /// records a tuple shape, including when there is just one mode.
+    ///
+    /// ```
+    /// use noodle_cute::layout::{DynLayout, GroupedLayout, LayoutMap};
+    ///
+    /// let flat = DynLayout::left(&[2, 3, 4])?;
+    /// let grouped = GroupedLayout::new(flat, &[2, 1])?;
+    /// assert_eq!(grouped.rank(), 2);
+    /// assert_eq!(grouped.extent(0)?, 6);
+    /// assert_eq!(grouped.index_of_coord(&[5, 2])?, 17);
+    /// assert_eq!(grouped.flat().index(17)?, 17);
+    /// # Ok::<(), noodle_cute::Error>(())
+    /// ```
     pub fn new(flat: DynLayout, groups: &[usize]) -> Result<Self> {
         if groups.len() > MAX_RANK {
             return Err(Error::CapacityExceeded);
@@ -348,13 +371,13 @@ impl GroupedLayout {
     }
 
     /// Returns leaf extents; use `LayoutMap::extent` for top-level mode sizes.
-    pub fn shape(&self) -> &[isize] {
-        self.flat.shape()
+    pub fn shapes(&self) -> &[isize] {
+        self.flat.shapes()
     }
 
     /// Returns the signed address stride of each flat leaf.
-    pub fn stride(&self) -> &[isize] {
-        self.flat.stride()
+    pub fn strides(&self) -> &[isize] {
+        self.flat.strides()
     }
 
     /// Iterates over the leaf count of each top-level mode.
@@ -367,8 +390,35 @@ impl GroupedLayout {
         self.integral
     }
 
-    /// Returns the starting leaf index and leaf count of a top-level mode.
-    pub(crate) fn mode_span(&self, axis: usize) -> Result<(usize, usize)> {
+    /// Returns the flat sublayout of top-level mode `axis`.
+    /// An empty mode becomes a rank-0 scalar; an invalid axis returns an error.
+    pub fn mode(&self, axis: usize) -> Result<DynLayout> {
+        let (start, len) = self.mode_span(axis)?;
+        DynLayout::new(
+            &self.flat.shapes()[start..start + len],
+            &self.flat.strides()[start..start + len],
+        )
+    }
+}
+
+impl AffineLayoutMap for GroupedLayout {
+    fn affine_rank(&self) -> usize {
+        self.rank
+    }
+
+    fn shape(&self, leaf: usize) -> Result<isize> {
+        self.flat.shape(leaf)
+    }
+
+    fn stride(&self, leaf: usize) -> Result<isize> {
+        self.flat.stride(leaf)
+    }
+
+    fn leaves(&self) -> core::ops::Range<usize> {
+        self.flat.leaves()
+    }
+
+    fn mode_span(&self, axis: usize) -> Result<(usize, usize)> {
         if axis >= self.rank {
             return Err(Error::AxisOutOfBounds);
         }
@@ -376,65 +426,11 @@ impl GroupedLayout {
         Ok((start, self.groups[axis] as usize))
     }
 
-    /// Returns the flat sublayout of top-level mode `axis`.
-    /// An empty mode becomes a rank-0 scalar; an invalid axis returns an error.
-    pub fn mode(&self, axis: usize) -> Result<DynLayout> {
-        let (start, len) = self.mode_span(axis)?;
-        DynLayout::new(
-            &self.flat.shape()[start..start + len],
-            &self.flat.stride()[start..start + len],
-        )
-    }
-}
-impl LayoutMap for GroupedLayout {
-    fn size(&self) -> Result<isize> {
-        self.flat.size()
+    fn as_flat_layout(&self) -> Result<DynLayout> {
+        Ok(self.flat)
     }
 
-    fn rank(&self) -> usize {
-        self.rank
-    }
-
-    fn extent(&self, axis: usize) -> Result<isize> {
-        let (start, len) = self.mode_span(axis)?;
-        checked_size(start..start + len, |i| Ok(self.flat.shape[i]))
-    }
-
-    fn index(&self, linear: isize) -> Result<isize> {
-        self.flat.index(linear)
-    }
-
-    fn index_extended(&self, linear: isize) -> Result<isize> {
-        self.flat.index_extended(linear)
-    }
-
-    fn index_extended_of_coord(&self, coord: &[isize]) -> Result<isize> {
-        if coord.len() != self.rank {
-            return Err(Error::StructureMismatch);
-        }
-        let mut result = 0;
-        for (axis, &c) in coord.iter().enumerate() {
-            let (start, len) = self.mode_span(axis)?;
-            let part = affine_index_extended(
-                start..start + len,
-                |i| Ok(self.flat.shape[i]),
-                |i| Ok(self.flat.stride[i]),
-                c,
-            )?;
-            result = add(result, part)?;
-        }
-        Ok(result)
-    }
-
-    fn as_affine(&self) -> Result<Option<GroupedLayout>> {
-        Ok(Some(*self))
-    }
-
-    fn address_range(&self) -> Result<Option<(isize, isize)>> {
-        self.flat.address_range()
-    }
-
-    fn is_injective(&self) -> Result<bool> {
-        self.flat.is_injective()
+    fn as_grouped_layout(&self) -> Result<GroupedLayout> {
+        Ok(*self)
     }
 }
