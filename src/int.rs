@@ -222,6 +222,6 @@ pub(crate) fn product_slice(values: &[isize]) -> Result<isize> {
 #[macro_export]
 macro_rules! i {
     ($n:expr) => {
-        Int::<$n>
+        $crate::Int::<$n>
     };
 }
