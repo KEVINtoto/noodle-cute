@@ -2,7 +2,8 @@
 
 use crate::int::{ceil_div, mul};
 use crate::layout::{
-    AffineLayoutMap, DynLayout, GroupedLayout, LayoutMap, MAX_RANK, is_injective_by_enumeration,
+    AffineLayoutMap, DynLayout, GroupedLayout, LayoutMap, MAX_RANK, affine_injective,
+    is_injective_by_enumeration,
 };
 use crate::{Error, Result};
 
@@ -293,16 +294,22 @@ impl<A: LayoutMap, B: LayoutMap> LayoutMap for Composition<A, B> {
         if let Some(layout) = &self.normalized {
             return layout.is_injective();
         }
-        // The outer layout guarantees injectivity only on its own logical domain;
-        // if inner enters the extended domain, fall back to pairwise comparison.
-        let within = match self.inner.address_range()? {
-            Some((_, max)) => max < self.outer.size()?,
-            None => true,
+        // Fast path when `outer` has a cheap stride-separation proof on its logical domain;
+        // if `outer` is non-affine, inconclusive, or exceeded by `inner`, enumerate the composed domain.
+        let outer_proven = match self.outer.as_affine() {
+            Ok(Some(a)) => affine_injective(&a, a.leaves())? == Some(true),
+            Ok(None) | Err(Error::CapacityExceeded) => false,
+            Err(e) => return Err(e),
         };
-        if within && self.outer.is_injective()? {
-            self.inner.is_injective()
-        } else {
-            is_injective_by_enumeration(self)
+        if outer_proven {
+            let within = match self.inner.address_range()? {
+                Some((_, max)) => max < self.outer.size()?,
+                None => true,
+            };
+            if within {
+                return self.inner.is_injective();
+            }
         }
+        is_injective_by_enumeration(self)
     }
 }

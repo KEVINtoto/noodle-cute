@@ -908,6 +908,13 @@ fn composition_injectivity_covers_normalized_within_domain_and_extended_fallback
     assert_eq!(picks_distinct.is_injective(), Ok(true));
     let picks_alias = composition(non_inj_outer, dyn_layout(&[2], &[1])).unwrap();
     assert_eq!(picks_alias.is_injective(), Ok(false));
+
+    // When `outer`'s stride-separation proof is inconclusive, `is_injective` enumerates
+    // the small composed domain rather than scanning all elements of `outer`.
+    let huge_inconclusive_outer = dyn_layout(&[1_000_000, 2], &[2, 3]);
+    let tiny_comp = composition(huge_inconclusive_outer, TableMap(&[0, 1])).unwrap();
+    assert!(!tiny_comp.is_normalized());
+    assert_eq!(tiny_comp.is_injective(), Ok(true));
 }
 
 #[test]
@@ -1579,6 +1586,21 @@ fn dense_enumerated_inverses_invert_non_affine_bijections_and_broadcast_surjecti
     );
 
     // Sparse holes, non-zero minimum addresses, negative addresses, and endpoint overflow.
+    // Dense affine bijections use the O(leaves^2) stride-separation proof without enumeration,
+    // and sparse maps with `address_end > domain_size` fail immediately by pigeonhole principle.
+    let huge_identity = dyn_layout(&[1_000_000], &[1]);
+    assert_eq!(
+        dense_left_inverse(huge_identity).unwrap().size(),
+        Ok(1_000_000)
+    );
+    assert_eq!(
+        dense_right_inverse(huge_identity).unwrap().size(),
+        Ok(1_000_000)
+    );
+    assert_eq!(
+        dense_right_inverse(dyn_layout(&[1_000_000], &[2])).err(),
+        Some(Error::NotSurjective)
+    );
     assert_eq!(
         dense_left_inverse(dyn_layout(&[3], &[2])).err(),
         Some(Error::NotSurjective)

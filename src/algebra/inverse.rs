@@ -1,7 +1,9 @@
 //! Inverse algorithms for affine layouts.
 
 use crate::int::{add, mul};
-use crate::layout::{AffineLayoutMap, DynLayout, GroupedLayout, LayoutMap, MAX_RANK};
+use crate::layout::{
+    AffineLayoutMap, DynLayout, GroupedLayout, LayoutMap, MAX_RANK, affine_injective,
+};
 use crate::{Error, Result};
 
 use super::Leaves;
@@ -234,7 +236,8 @@ pub fn dense_left_inverse<L: LayoutMap>(layout: L) -> Result<Inverse<L>> {
 /// are supported: the smallest logical preimage is selected for each address.
 ///
 /// Unlike CuTe's `right_inverse`, sparse codomains return [`Error::NotSurjective`] rather than truncating
-/// to a contiguous prefix. Construction linearly scans the domain for each reachable address (`O(cosize * size)`).
+/// to a contiguous prefix. Dense affine bijections are verified using the stride-separation proof;
+/// other maps linearly scan the domain for each reachable address (`O(cosize * size)`).
 ///
 /// # Examples
 ///
@@ -254,21 +257,33 @@ pub fn dense_left_inverse<L: LayoutMap>(layout: L) -> Result<Inverse<L>> {
 /// - Returns [`Error::NotSurjective`] if any address in `[0, max]` is not covered by `layout`.
 /// - Returns [`Error::Overflow`] if address calculation overflows.
 pub fn dense_right_inverse<L: LayoutMap>(layout: L) -> Result<Inverse<L>> {
+    let domain_size = layout.size()?;
     let size = match layout.address_range()? {
         None => 0,
         Some((0, max)) => add(max, 1)?,
         Some(_) => return Err(Error::NotSurjective),
     };
-    for address in 0..size {
-        let mut found = false;
-        for i in 0..layout.size()? {
-            if layout.index(i)? == address {
-                found = true;
-                break;
+    if size > domain_size {
+        return Err(Error::NotSurjective);
+    }
+    // When the codomain and domain have equal size, any injective map onto [0, size) is a bijection.
+    let proven_bijection = match layout.as_affine() {
+        Ok(Some(a)) if size == domain_size => affine_injective(&a, a.leaves())? == Some(true),
+        Ok(_) | Err(Error::CapacityExceeded) => false,
+        Err(e) => return Err(e),
+    };
+    if !proven_bijection {
+        for address in 0..size {
+            let mut found = false;
+            for i in 0..domain_size {
+                if layout.index(i)? == address {
+                    found = true;
+                    break;
+                }
             }
-        }
-        if !found {
-            return Err(Error::NotSurjective);
+            if !found {
+                return Err(Error::NotSurjective);
+            }
         }
     }
     Ok(Inverse { layout, size })
