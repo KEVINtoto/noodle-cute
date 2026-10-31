@@ -33,6 +33,7 @@ mod slice;
 pub mod tuple;
 
 pub use int::{DynInt, Int, Integer};
+pub use layout::Layout;
 pub use slice::Slice;
 pub use tuple::{IntTuple, Nil};
 
@@ -98,3 +99,24 @@ pub struct Assert<const B: bool>;
 pub trait True {}
 // Only `Assert<true>` satisfies this bound, so invalid static extents fail trait checking.
 impl True for Assert<true> {}
+
+/// 可由类型唯一确定的值；用于全静态布局代数的结果构造。
+#[doc(hidden)]
+pub trait StaticValue: Copy {
+    const VALUE: Self;
+}
+impl<const N: isize> StaticValue for Int<N> {
+    const VALUE: Self = Int;
+}
+impl StaticValue for Nil {
+    const VALUE: Self = Nil;
+}
+impl<H: StaticValue, T: StaticValue> StaticValue for IntTuple<H, T> {
+    const VALUE: Self = IntTuple(H::VALUE, T::VALUE);
+}
+impl<S: StaticValue, D: StaticValue> StaticValue for Layout<S, D> {
+    const VALUE: Self = Layout {
+        shape: S::VALUE,
+        stride: D::VALUE,
+    };
+}

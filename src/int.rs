@@ -191,8 +191,8 @@ pub(crate) fn mul(a: isize, b: isize) -> Result<isize> {
 #[allow(dead_code)]
 /// Computes ceiling division without forming the potentially overflowing `a + b - 1`.
 /// The caller must ensure `a >= 0` and `b > 0`.
-pub(crate) fn ceil_div(a: isize, b: isize) -> isize {
-    a / b + isize::from(a % b != 0)
+pub(crate) const fn ceil_div(a: isize, b: isize) -> isize {
+    a / b + (a % b != 0) as isize
 }
 
 #[allow(dead_code)]

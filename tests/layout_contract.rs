@@ -273,6 +273,33 @@ fn coalesce_merges_static_contiguous_axes_and_preserves_dynamic_axes() {
 }
 
 #[test]
+fn typed_coalesce_handles_empty_singleton_and_broadcast_layouts() {
+    let scalar = Layout::new(Nil, Nil).unwrap().coalesce().unwrap();
+    let _: Layout<Int<1>, Int<0>> = scalar;
+    assert_eq!(scalar.index(0), Ok(0));
+
+    let unit = Layout::new(Int::<1>, Int::<8>).unwrap().coalesce().unwrap();
+    let _: Layout<Int<1>, Int<0>> = unit;
+    assert_eq!(unit.index(0), Ok(0));
+
+    let dynamic_unit = Layout::new(DynInt(1), Int::<8>)
+        .unwrap()
+        .coalesce()
+        .unwrap();
+    let _: Layout<IntTuple<DynInt, Nil>, IntTuple<Int<8>, Nil>> = dynamic_unit;
+    assert_eq!(dynamic_unit.shape.0, DynInt(1));
+
+    let broadcast = Layout::new(shape![Int::<2>, Int::<3>], stride![Int::<0>, Int::<0>])
+        .unwrap()
+        .coalesce()
+        .unwrap();
+    let _: Layout<IntTuple<Int<6>, Nil>, IntTuple<Int<0>, Nil>> = broadcast;
+    for i in 0..6 {
+        assert_eq!(broadcast.index(i), Ok(0));
+    }
+}
+
+#[test]
 fn runtime_layout_addresses_and_injectivity_match_coordinate_enumeration() {
     // Enumerate empty, padded, broadcast, and reversed layouts with a direct address formula.
     for m in 0..5 {

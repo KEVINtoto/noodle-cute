@@ -198,12 +198,8 @@ impl<H: Item, T: Tuple> Item for IntTuple<H, T> {
 }
 
 impl<H: Item, T: Tuple> Tuple for IntTuple<H, T> {
-    const LEN: usize = 1 + T::LEN;
-    const MAX_DEPTH: usize = if H::DEPTH > T::MAX_DEPTH {
-        H::DEPTH
-    } else {
-        T::MAX_DEPTH
-    };
+    const LEN: usize = <Self as Item>::RANK;
+    const MAX_DEPTH: usize = <Self as Item>::DEPTH - 1;
 }
 
 // Compile-time mode access.
@@ -231,7 +227,7 @@ const IS_ZERO<const N: usize>: bool = N == 0;
 const SUB_1<const N: usize>: usize = N.saturating_sub(1);
 
 /// Dispatch marker: `true` selects the head; `false` continues into the tail.
-pub struct GetHead<const B: bool>;
+pub use crate::Assert as GetHead;
 
 /// Implements one head-or-tail step of compile-time tuple access.
 pub trait Step<H, T, const INDEX: usize> {
@@ -334,6 +330,38 @@ where
     type Output = <H::Output as Append<T::Output>>::Output;
     fn flatten(self) -> Self::Output {
         self.0.flatten().append(self.1.flatten())
+    }
+}
+
+/// 将非空 tuple 的唯一模式取出；含多个模式时保留原 tuple。
+///
+/// 不递归展平内部模式，Nil 没有实现；composition 的收尾阶段复用此操作。
+///
+/// ```
+/// use noodle_cute::{Int, int_tuple};
+/// use noodle_cute::tuple::Unwrap;
+/// let leaf: Int<2> = int_tuple![Int::<2>].unwrap();
+/// assert_eq!(leaf.value(), 2);
+/// let nested = int_tuple![(Int::<2>, Int::<3>)];
+/// assert_eq!(nested.unwrap(), int_tuple![Int::<2>, Int::<3>]);
+/// let pair = int_tuple![Int::<2>, Int::<3>];
+/// assert_eq!(pair.unwrap(), pair);
+/// ```
+#[doc(hidden)]
+pub trait Unwrap {
+    type Output;
+    fn unwrap(self) -> Self::Output;
+}
+impl<H> Unwrap for IntTuple<H, Nil> {
+    type Output = H;
+    fn unwrap(self) -> H {
+        self.0
+    }
+}
+impl<H, TH, TT> Unwrap for IntTuple<H, IntTuple<TH, TT>> {
+    type Output = Self;
+    fn unwrap(self) -> Self {
+        self
     }
 }
 

@@ -1,7 +1,4 @@
 //! Typed affine layouts with static or mixed static/runtime leaves.
-//!
-//! Type-level coalescing uses only facts encoded in integer types. Intermediate
-//! fold results use [`Layout`] directly and are validated when the fold finishes.
 
 use core::fmt::Debug;
 use core::ops::Mul;
@@ -42,6 +39,22 @@ pub struct Layout<S, D> {
     pub shape: S,
     /// Signed address increments with the same nested profile as `shape`.
     pub stride: D,
+}
+
+/// 类型化代数结果的 shape/stride 接口，支持尚未校验的中间布局。
+#[doc(hidden)]
+pub trait LayoutParts {
+    type Shape;
+    type Stride;
+    /// 返回布局值，不执行校验或归一。
+    fn into_layout(self) -> Layout<Self::Shape, Self::Stride>;
+}
+impl<S, D> LayoutParts for Layout<S, D> {
+    type Shape = S;
+    type Stride = D;
+    fn into_layout(self) -> Self {
+        self
+    }
 }
 
 impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
@@ -263,286 +276,4 @@ fn make_compact<Dir, S: Shape + Compact<Dir, Int<1>>>(
     }
     let (stride, _) = shape.clone().compact(Int);
     Layout::new(shape, stride)
-}
-
-//-----------------------------------------------------------------------------
-// Type-level coalescing.
-
-/// Selects a coalescing action from facts known at compile time.
-///
-/// The fold changes types only using static facts: a runtime extent equal to one
-/// remains in the output tuple. Action codes are [`DISCARD`] for a static unit
-/// extent, [`RETAIN`] to keep a leaf, and [`MERGE`] to merge it with the folded
-/// tail's head.
-#[doc(hidden)]
-pub struct Decision<const N: u8>;
-
-/// Drops a static unit extent.
-#[doc(hidden)]
-pub const DISCARD: u8 = 0;
-/// Keeps the leaf as a separate mode.
-#[doc(hidden)]
-pub const RETAIN: u8 = 1;
-/// Merges the leaf with the folded tail's head.
-#[doc(hidden)]
-pub const MERGE: u8 = 2;
-
-/// Selects whether a leaf is discarded or retained when the folded tail is empty.
-#[doc(hidden)]
-pub const fn unit_decision(s: Option<isize>) -> u8 {
-    if matches!(s, Some(1)) {
-        DISCARD
-    } else {
-        RETAIN
-    }
-}
-
-/// Selects whether to discard, retain, or merge a leaf with the folded tail's head.
-#[doc(hidden)]
-pub const fn merge_decision(s: Option<isize>, d: Option<isize>, next: Option<isize>) -> u8 {
-    if matches!(s, Some(1)) {
-        return DISCARD;
-    }
-    // Merge only when static values prove `s * d == next_stride` without
-    // overflow. Coincidental equality between runtime values cannot change types.
-    match (s, d, next) {
-        (Some(a), Some(b), Some(c)) => match a.checked_mul(b) {
-            Some(v) if v == c => MERGE,
-            _ => RETAIN,
-        },
-        _ => RETAIN,
-    }
-}
-
-// Reuse these constants in bounds and associated-type projections so generic
-// const expressions refer to identical definitions.
-#[doc(hidden)]
-pub const UNIT_DECISION<S: Integer>: u8 = unit_decision(S::STATIC);
-#[doc(hidden)]
-pub const MERGE_DECISION<S: Integer, D: Integer, TD: Integer>: u8 =
-    merge_decision(S::STATIC, D::STATIC, TD::STATIC);
-
-/// Prepends a shape/stride leaf `(s, d)` to an empty folded tail.
-#[doc(hidden)]
-pub trait PrependToEmpty<S, D> {
-    type Output;
-    fn apply(s: S, d: D) -> Self::Output;
-}
-
-impl<S, D> PrependToEmpty<S, D> for Decision<DISCARD> {
-    type Output = Layout<Nil, Nil>;
-    fn apply(_: S, _: D) -> Self::Output {
-        Layout {
-            shape: Nil,
-            stride: Nil,
-        }
-    }
-}
-
-impl<S, D> PrependToEmpty<S, D> for Decision<RETAIN> {
-    type Output = Layout<IntTuple<S, Nil>, IntTuple<D, Nil>>;
-    fn apply(s: S, d: D) -> Self::Output {
-        Layout {
-            shape: IntTuple(s, Nil),
-            stride: IntTuple(d, Nil),
-        }
-    }
-}
-
-/// Prepends `(s, d)` to a folded tail. Type parameters:
-/// - `S`, `D`: types of the new shape and stride leaves being prepended.
-/// - `TS`, `TD`: types of the tail's first shape and stride leaves.
-/// - `TSR`, `TDR`: types of the remaining shape and stride tuples of the tail
-///   after its first leaf.
-#[doc(hidden)]
-pub trait PrependToNonempty<S, D, TS, TSR, TD, TDR> {
-    type Output;
-    fn apply(s: S, d: D, tail: Layout<IntTuple<TS, TSR>, IntTuple<TD, TDR>>) -> Self::Output;
-}
-
-impl<S, D, TS, TSR, TD, TDR> PrependToNonempty<S, D, TS, TSR, TD, TDR> for Decision<DISCARD> {
-    type Output = Layout<IntTuple<TS, TSR>, IntTuple<TD, TDR>>;
-    fn apply(_: S, _: D, tail: Self::Output) -> Self::Output {
-        tail
-    }
-}
-
-impl<S, D, TS, TSR, TD, TDR> PrependToNonempty<S, D, TS, TSR, TD, TDR> for Decision<RETAIN> {
-    type Output = Layout<IntTuple<S, IntTuple<TS, TSR>>, IntTuple<D, IntTuple<TD, TDR>>>;
-    fn apply(s: S, d: D, tail: Layout<IntTuple<TS, TSR>, IntTuple<TD, TDR>>) -> Self::Output {
-        Layout {
-            shape: IntTuple(s, tail.shape),
-            stride: IntTuple(d, tail.stride),
-        }
-    }
-}
-
-impl<S: Mul<TS>, D, TS, TSR, TD, TDR> PrependToNonempty<S, D, TS, TSR, TD, TDR>
-    for Decision<MERGE>
-{
-    type Output = Layout<IntTuple<S::Output, TSR>, IntTuple<D, TDR>>;
-    fn apply(s: S, d: D, tail: Layout<IntTuple<TS, TSR>, IntTuple<TD, TDR>>) -> Self::Output {
-        Layout {
-            shape: IntTuple(s * tail.shape.0, tail.shape.1),
-            stride: IntTuple(d, tail.stride.1),
-        }
-    }
-}
-
-/// Dispatches the prepend action using the static extent and stride metadata.
-///
-/// `S`/`D` are the new shape/stride leaf types. For a nonempty tail, `TS`/`TD`
-/// are its first shape/stride leaf types and `TSR`/`TDR` the remaining tuples.
-#[doc(hidden)]
-pub trait Prepend<S, D> {
-    type Output;
-    fn prepend(self, s: S, d: D) -> Self::Output;
-}
-
-impl<S: Integer, D> Prepend<S, D> for Layout<Nil, Nil>
-where
-    Decision<{ UNIT_DECISION::<S> }>: PrependToEmpty<S, D>,
-{
-    type Output = <Decision<{ UNIT_DECISION::<S> }> as PrependToEmpty<S, D>>::Output;
-    fn prepend(self, s: S, d: D) -> Self::Output {
-        <Decision<{ UNIT_DECISION::<S> }> as PrependToEmpty<S, D>>::apply(s, d)
-    }
-}
-
-impl<S: Integer, D: Integer, TS, TSR, TD: Integer, TDR> Prepend<S, D>
-    for Layout<IntTuple<TS, TSR>, IntTuple<TD, TDR>>
-where
-    Decision<{ MERGE_DECISION::<S, D, TD> }>: PrependToNonempty<S, D, TS, TSR, TD, TDR>,
-{
-    type Output = <Decision<{ MERGE_DECISION::<S, D, TD> }> as PrependToNonempty<
-        S,
-        D,
-        TS,
-        TSR,
-        TD,
-        TDR,
-    >>::Output;
-    fn prepend(self, s: S, d: D) -> Self::Output {
-        <Decision<{ MERGE_DECISION::<S, D, TD> }> as PrependToNonempty<
-            S,
-            D,
-            TS,
-            TSR,
-            TD,
-            TDR,
-        >>::apply(s, d, self)
-    }
-}
-
-/// Coalesces a flattened layout at the type level.
-///
-/// The result can still be empty when the input is empty or every extent is a
-/// static one; [`FinishCoalesce`] normalizes that case.
-#[doc(hidden)]
-pub trait CoalesceFold {
-    type Output;
-    fn fold(self) -> Self::Output;
-}
-
-impl CoalesceFold for Layout<Nil, Nil> {
-    type Output = Self;
-    fn fold(self) -> Self {
-        self
-    }
-}
-
-// `S`/`D` are the first shape/stride leaf types; `TSR`/`TDR` are the remaining
-// shape/stride tuples, folded first and then prepended with `(S, D)`.
-impl<S, D, TSR, TDR> CoalesceFold for Layout<IntTuple<S, TSR>, IntTuple<D, TDR>>
-where
-    Layout<TSR, TDR>: CoalesceFold,
-    <Layout<TSR, TDR> as CoalesceFold>::Output: Prepend<S, D>,
-{
-    type Output = <<Layout<TSR, TDR> as CoalesceFold>::Output as Prepend<S, D>>::Output;
-    // Fold right to left so each leaf is compared with the head of the
-    // already-coalesced tail.
-    fn fold(self) -> Self::Output {
-        Layout {
-            shape: self.shape.1,
-            stride: self.stride.1,
-        }
-        .fold()
-        .prepend(self.shape.0, self.stride.0)
-    }
-}
-
-/// Validates the folded layout and normalizes an empty result to `1:0`.
-#[doc(hidden)]
-pub trait FinishCoalesce {
-    type Output: LayoutMap;
-    fn finish(self) -> Result<Self::Output>;
-}
-
-impl FinishCoalesce for Layout<Nil, Nil> {
-    type Output = Layout<Int<1>, Int<0>>;
-    // An empty input or removal of every static unit extent yields a single
-    // logical element at address zero.
-    fn finish(self) -> Result<Self::Output> {
-        Layout::new(Int, Int)
-    }
-}
-
-// `S`/`D` are the first shape/stride leaf types; `TSR`/`TDR` the remaining tuples.
-impl<S, TSR, D, TDR> FinishCoalesce for Layout<IntTuple<S, TSR>, IntTuple<D, TDR>>
-where
-    IntTuple<S, TSR>: Shape,
-    IntTuple<D, TDR>: Item<Profile = <IntTuple<S, TSR> as Item>::Profile>,
-{
-    type Output = Self;
-    fn finish(self) -> Result<Self> {
-        Layout::new(self.shape, self.stride)
-    }
-}
-
-/// The exact typed layout produced by static coalescing of a shape/stride pair.
-pub type CoalescedLayout<S, D> = <<Layout<
-    <S as Flatten>::Output,
-    <D as Flatten>::Output,
-> as CoalesceFold>::Output as FinishCoalesce>::Output;
-
-impl<S: Shape + Flatten, D: Item<Profile = S::Profile> + Flatten> Layout<S, D>
-where
-    Layout<S::Output, D::Output>: CoalesceFold,
-    <Layout<S::Output, D::Output> as CoalesceFold>::Output: FinishCoalesce,
-{
-    /// Flattens and coalesces while preserving the logical linear address map.
-    ///
-    /// Removes static unit extents and merges adjacent leaves only when their
-    /// static values prove `shape * stride == next_stride`. Static result leaves
-    /// remain encoded in their types; runtime values never alter the tuple
-    /// profile. An empty result is normalized to the scalar layout `1:0`.
-    /// Shape and merged-extent arithmetic is checked before the fold, and the
-    /// resulting layout is validated before it is returned.
-    pub fn coalesce(&self) -> Result<CoalescedLayout<S, D>> {
-        self.size()?;
-        // The type fold uses ordinary integer operators. Preflight the exact
-        // dynamic products it can create so even giant empty shapes return a
-        // checked error rather than panicking during a proven static merge.
-        let mut next_shape = None;
-        let mut next_stride = None;
-        for i in (0..S::LEAVES).rev() {
-            let shape_static = self.shape.leaf_static(i)?;
-            if shape_static == Some(1) {
-                continue;
-            }
-            let stride_static = self.stride.leaf_static(i)?;
-            let value = self.shape.leaf(i)?;
-            let merge = match (shape_static, stride_static, next_stride) {
-                (Some(a), Some(b), Some(c)) => a.checked_mul(b) == Some(c),
-                _ => false,
-            };
-            next_shape = Some(if merge {
-                mul(value, next_shape.unwrap_or(1))?
-            } else {
-                value
-            });
-            next_stride = stride_static;
-        }
-        self.clone().flatten().fold().finish()
-    }
 }

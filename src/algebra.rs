@@ -11,11 +11,17 @@ use crate::int::{add, mul};
 use crate::layout::{DynLayout, GroupedLayout, LayoutMap, MAX_RANK, is_injective_by_enumeration};
 use crate::{Error, Result, Slice};
 
+mod coalesce;
 pub mod complement;
 pub mod composition;
 pub mod divide;
 pub mod inverse;
 pub mod product;
+
+pub use coalesce::{StaticCoalesce, CoalescedLayout, static_coalesce, static_coalesce_extended};
+pub use composition::{
+    StaticCompose, StaticComposition, TypedCompose, TypedComposition, static_composition,
+};
 
 /// Fixed-capacity leaf buffer for assembling flat layout results in CuTe algebra.
 #[derive(Clone, Copy)]
