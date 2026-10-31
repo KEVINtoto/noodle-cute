@@ -14,7 +14,7 @@ use noodle_cute::layout::{
     AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutLeft, LayoutMap, LayoutRight, MAX_RANK,
 };
 use noodle_cute::tuple::{Flatten, Item, Product};
-use noodle_cute::{Error, IntTuple, Nil, shape, stride};
+use noodle_cute::{Error, IntTuple, Nil, Slice, shape, stride};
 
 // Flattened shape and stride are (2, 2, 3):(1, 6, 2), with top-level groups [2, 1].
 macro_rules! nested {
@@ -588,5 +588,25 @@ fn grouped_extended_coordinates_check_only_requested_address_arithmetic() {
     assert_eq!(
         with_empty_mode.index_extended_of_coord(&[1, 0, 0]),
         Err(Error::CoordinateOutOfBounds)
+    );
+}
+
+#[test]
+fn layout_equality_ignores_inactive_storage() {
+    // Slicing away a leading axis and building the same leaves directly must compare equal.
+    let (column, _) = DynLayout::new(&[2, 3], &[1, 2])
+        .unwrap()
+        .slice(&[Slice::Index(1), Slice::All])
+        .unwrap();
+    assert_eq!(column, DynLayout::new(&[3], &[2]).unwrap());
+    assert_ne!(column, DynLayout::new(&[3], &[1]).unwrap());
+    let grouped = GroupedLayout::new(DynLayout::left(&[2, 3]).unwrap(), &[2]).unwrap();
+    assert_eq!(
+        grouped,
+        GroupedLayout::new(DynLayout::left(&[2, 3]).unwrap(), &[2]).unwrap()
+    );
+    assert_ne!(
+        grouped,
+        GroupedLayout::new(DynLayout::left(&[2, 3]).unwrap(), &[1, 1]).unwrap()
     );
 }

@@ -15,11 +15,18 @@ pub const MAX_RANK: usize = 32;
 /// [`MAX_RANK`] leaves can be stored. An empty shape describes a scalar
 /// with size 1 and address 0; any zero extent makes the logical domain empty.
 /// Only the first `rank` entries of each array are active.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq)]
 pub struct DynLayout {
     pub(crate) shape: [isize; MAX_RANK],
     pub(crate) stride: [isize; MAX_RANK],
     pub(crate) rank: usize,
+}
+
+// Entries past `rank` are storage, not layout data.
+impl PartialEq for DynLayout {
+    fn eq(&self, other: &Self) -> bool {
+        self.shapes() == other.shapes() && self.strides() == other.strides()
+    }
 }
 
 impl DynLayout {
@@ -218,12 +225,20 @@ impl AffineLayoutMap for DynLayout {
 /// of leaves and the number of top-level modes are bounded by `MAX_RANK`.
 /// The `integral` flag distinguishes a CuTe integer shape from a tuple shape;
 /// an integral shape has exactly one mode containing one leaf.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq)]
 pub struct GroupedLayout {
     pub(crate) flat: DynLayout,
     pub(crate) groups: [u8; MAX_RANK],
     pub(crate) rank: usize,
     pub(crate) integral: bool,
+}
+
+impl PartialEq for GroupedLayout {
+    fn eq(&self, other: &Self) -> bool {
+        self.flat == other.flat
+            && self.groups().eq(other.groups())
+            && self.integral == other.integral
+    }
 }
 
 impl GroupedLayout {

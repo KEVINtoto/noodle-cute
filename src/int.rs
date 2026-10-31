@@ -4,6 +4,11 @@
 //! `Int` with a [`DynInt`] or `isize` produces a `DynInt`, as does arithmetic
 //! involving `DynInt`. Operators follow Rust's integer arithmetic rules.
 //!
+//! Unlike CuTe, a static zero does not absorb a runtime operand: `Int<0> * DynInt` is a
+//! `DynInt`, while CuTe's `_0 * x` is `_0`. The operator impls choose one output type per
+//! operand kind rather than dispatching on `N`, which keeps their outputs concrete types;
+//! the layout algebra applies CuTe's static-zero rules itself where they change a result type.
+//!
 //! ```
 //! use noodle_cute::{DynInt, Int};
 //!

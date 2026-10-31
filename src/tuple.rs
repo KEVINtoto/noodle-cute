@@ -301,7 +301,8 @@ impl<H, T: Append<R>, R> Append<R> for IntTuple<H, T> {
 /// Flattens nested heads into one tuple chain in head-first, depth-first order.
 ///
 /// Leaf types are preserved. A bare integer becomes a singleton tuple, and
-/// [`Nil`] remains empty.
+/// [`Nil`] remains empty. This is CuTe's `flatten_to_tuple`; CuTe's `flatten`
+/// instead returns a bare integer unchanged.
 pub trait Flatten {
     /// A flat tuple chain retaining the original leaf types and order.
     type Output;
@@ -336,6 +337,7 @@ where
 /// 将非空 tuple 的唯一模式取出；含多个模式时保留原 tuple。
 ///
 /// 不递归展平内部模式，Nil 没有实现；composition 的收尾阶段复用此操作。
+/// CuTe 的 `unwrap` 会递归拆除单元素 tuple；这里的调用方只传入扁平 tuple，因此只拆一层。
 ///
 /// ```
 /// use noodle_cute::{Int, int_tuple};

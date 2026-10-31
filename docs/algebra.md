@@ -305,6 +305,8 @@ const C: R = static_composition(
 
 三条路径统一从右向左折叠。类型层严格采用 CuTe 的静态性条件：当前 shape/stride 与累积布局的首个 shape/stride 均为静态值，才能依据 `s*d == next_stride` 合并。例如 `(Int<2>, DynInt(3)):(Int<1>, Int<2>)` 保留为两轴，而对应的 `DynLayout` 可以合并为 `6:1`。
 
+As in CuTe, a static zero factor makes the product static: `x * _0` is `_0` even for a dynamic `x`, so `(DynInt(3), Int<4>):(Int<0>, Int<0>)` merges into `12:_0` (with a dynamic extent) exactly like upstream `bw_coalesce`.
+
 ```rust
 use noodle_cute::{DynInt, Int, IntTuple, Nil, shape, stride};
 use noodle_cute::algebra::{static_coalesce, static_coalesce_extended};
@@ -436,7 +438,7 @@ if flat.size()? == 0 {
 }
 ```
 
-`size == 0` 意味着某个轴长度为 0，布局不访问任何地址，"空隙"此时无意义，直接报 `Unsupported`。
+`size == 0` 意味着某个轴长度为 0，布局不访问任何地址，"空隙"此时无意义，直接报 `Unsupported`。 This is a deliberate `Result` in place of upstream undefined behavior: a zero extent makes the next stride `s * d` zero, and upstream's `ceil_div(cotarget, new_stride)` then divides by zero.
 
 #### 10.2 filter 掉广播轴
 
@@ -787,9 +789,6 @@ order[..flat.rank()].sort_unstable_by_key(|&a| (flat.strides()[a], a));   // ③
 ### 19. `right_inverse`：贪心拼接连续地址前缀
 
 ```rust
-if layout.size()? == 0 {
-    return Err(Error::Unsupported);
-}
 let mut current = 1;
 for &a in sorted_order {
     let (s, d) = (shape(a), stride(a));
@@ -801,9 +800,9 @@ for &a in sorted_order {
 leaves.layout()?.coalesce()
 ```
 
-空布局（`size == 0`）不产生任何可达地址，与 `left_inverse`、`complement_prefix` 一样在入口直接返回 `Err(Unsupported)`。
+An empty layout (`size == 0`) is not rejected: like upstream, the fold simply runs on its coalesced leaves, e.g. `right_inverse(0:1) = 0:1` and `right_inverse(0:2) = 1:0`. `left_inverse` does the same (`left_inverse(0:1) = 0:1`). Only `complement` rejects empty layouts, because upstream divides by zero there.
 
-非空布局下，`current` 的含义与 [第 9 节](#9-核心不变量current)相同：**从地址 0 开始、已被无洞覆盖的跨度**，初值 1（只占住地址 0）。
+`current` 的含义与 [第 9 节](#9-核心不变量current)相同：**从地址 0 开始、已被无洞覆盖的跨度**，初值 1（只占住地址 0）。
 
 算法贪心地问：有没有叶子的步长**恰好等于** `current`？
 
@@ -923,7 +922,7 @@ L            right_inverse    left_inverse
 
 `LeftFold` 根据已排序的静态 stride 计算 `gap = d/covered`，结果 stride 来自原逻辑前缀积；动态 shape 只影响前缀积、重叠检查及最后的 extent。与运行时受检入口一致，负 stride、非广播重叠和不可整除被拒绝；动态重叠返回 `NonInjective`，乘积溢出返回 `Overflow`。这是比上游准逆路径更严格的输入检查。广播仍按准逆处理，不声称恢复所有广播坐标。
 
-收尾复用 `CoalesceFold` / `FinishCoalesce` 和 `UnwrapLayout`，单模式结果恢复为整数 profile。空 tuple 按标量约定返回 `1:0`，零域不求结构逆。静态零域、静态非法整除或运算溢出在实例化时拒绝；全静态常量入口与其他静态代数一样，不执行最终运行时大小及地址范围校验。类型化路径不经过固定容量数组，输入和输出均可超过 `MAX_RANK`。
+收尾复用 `CoalesceFold` / `FinishCoalesce` 和 `UnwrapLayout`，单模式结果恢复为整数 profile。空 tuple 按标量约定返回 `1:0`；empty layouts are inverted like upstream (e.g. `0:_1` gives `0:_1`). 静态非法整除或运算溢出在实例化时拒绝；全静态常量入口与其他静态代数一样，不执行最终运行时大小及地址范围校验。类型化路径不经过固定容量数组，输入和输出均可超过 `MAX_RANK`。
 
 契约集中在 [`tests/inverse_contract.rs`](../tests/inverse_contract.rs)：保留原有结构逆、枚举逆与容量边界测试，并验证常量类型、混合静态性规则、动态错误及 33 模式的独立位反转原像公式。
 

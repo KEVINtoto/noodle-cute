@@ -11,9 +11,10 @@
 //! assert_eq!(inverse.index(3)?, 3);
 //! # Ok::<(), noodle_cute::Error>(())
 //! ```
-//! ```compile_fail
+//! ```
 //! use noodle_cute::{Int, layout::Layout, algebra::static_left_inverse};
-//! let _ = static_left_inverse(Layout { shape: Int::<0>, stride: Int::<1> });
+//! // CuTe: left_inverse(_0:_1) = _0:_1.
+//! const R: Layout<Int<0>, Int<1>> = static_left_inverse(Layout { shape: Int::<0>, stride: Int::<1> });
 //! ```
 //! ```compile_fail
 //! use noodle_cute::{Int, shape, stride, layout::Layout, algebra::static_left_inverse};
@@ -37,12 +38,12 @@ use crate::layout::{
     AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutMap, LayoutParts, MAX_RANK, Shape,
     affine_injective,
 };
-use crate::tuple::{Flatten, Item, Product};
+use crate::tuple::{Flatten, Item};
 use crate::{Assert, Error, Int, IntTuple, Nil, Result, True};
 
 use super::Leaves;
 use super::coalesce::{CoalesceFold, FinishCoalesce};
-use super::complement::{NONEMPTY, Sort, UnwrapLayout};
+use super::complement::{Sort, UnwrapLayout};
 use super::composition::{ComposeProduct, Select, ZERO_STRIDE};
 use super::typed::Checked;
 
@@ -96,13 +97,9 @@ fn sorted_leaves<L: AffineLayoutMap>(layout: &L) -> Result<SortedLeaves> {
 ///
 /// # Errors
 ///
-/// - Returns [`Error::Unsupported`] if `layout` has size 0.
 /// - Returns [`Error::CapacityExceeded`] if leaf capacity is exceeded.
 /// - Returns [`Error::Overflow`] if stride arithmetic overflows.
 pub fn right_inverse<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
-    if layout.size()? == 0 {
-        return Err(Error::Unsupported);
-    }
     let sorted = sorted_leaves(&layout)?;
     let flat = &sorted.flat;
     let mut leaves = Leaves::new();
@@ -137,14 +134,11 @@ pub fn right_inverse<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
 ///
 /// # Errors
 ///
-/// - Returns [`Error::Unsupported`] if `layout` has size 0 or contains negative strides.
+/// - Returns [`Error::Unsupported`] if `layout` contains negative strides.
 /// - Returns [`Error::NotDivisible`] if a stride is not divisible by the covered size.
 /// - Returns [`Error::NonInjective`] if non-broadcast leaves overlap (`stride < prev_shape * prev_stride`).
 /// - Returns [`Error::CapacityExceeded`] or [`Error::Overflow`] on capacity or arithmetic limits.
 pub fn left_inverse<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
-    if layout.size()? == 0 {
-        return Err(Error::Unsupported);
-    }
     let sorted = sorted_leaves(&layout)?;
     let flat = &sorted.flat;
     let rank = flat.rank();
@@ -349,7 +343,7 @@ where
 
 /// 编译期右逆；动态输入使用 Layout::right_inverse。
 ///
-/// 忽略广播、负 stride 和地址链的空隙；静态零域与溢出在实例化时拒绝。
+/// 忽略广播、负 stride 和地址链的空隙；静态溢出在实例化时拒绝。
 /// 常量入口与 static_composition 一样，不执行最终运行时布局校验。
 ///
 /// ```
@@ -391,7 +385,7 @@ impl<S: crate::layout::Shape, D: crate::tuple::Item<Profile = S::Profile>> Layou
     /// 保留类型的右逆，仅使用静态 stride，并只延续静态已知匹配的地址链。
     ///
     /// 动态 shape 可保留为结果叶子，但其后运行时才成立的 stride 等式不会改变结构。
-    /// 零域返回 Unsupported，运行时乘积溢出返回 Overflow，不受 MAX_RANK 限制。
+    /// 运行时乘积溢出返回 Overflow，不受 MAX_RANK 限制。
     pub fn right_inverse(&self) -> Result<TypedInverse<Self>>
     where
         Self: TypedInvert,
@@ -425,9 +419,7 @@ type Flat<S, D> = <Layout<<S as Flatten>::Output, <D as Flatten>::Output> as Coa
 type Inverted<S, D, const LEFT: bool> = <Flat<S, D> as InverseKernel<LEFT>>::Output;
 impl<S, D, const LEFT: bool> TypedInvert<LEFT> for Layout<S, D>
 where
-    S: Shape + Flatten + Product,
-    <S as Product>::Output: Integer,
-    Assert<{ NONEMPTY::<S> }>: True,
+    S: Shape + Flatten,
     D: Item<Profile = S::Profile> + Flatten,
     Layout<<S as Flatten>::Output, D::Output>: CoalesceFold,
     Flat<S, D>: InverseKernel<LEFT>,
@@ -435,9 +427,7 @@ where
 {
     type Output = <Inverted<S, D, LEFT> as Checked>::Output;
     fn invert(self) -> Result<Self::Output> {
-        if self.size()? == 0 {
-            return Err(Error::Unsupported);
-        }
+        self.size()?;
         self.flatten().fold().inverse_kernel()?.checked()
     }
 }

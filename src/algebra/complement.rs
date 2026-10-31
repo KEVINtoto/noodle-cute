@@ -31,6 +31,7 @@ fn complement_step(s: isize, d: isize, current: isize) -> Result<(isize, isize)>
 // when only `1:0` remains after filtering (CuTe special case).
 fn complement_prefix<L: AffineLayoutMap>(layout: &L) -> Result<Option<(Leaves, isize)>> {
     let flat = layout.as_flat_layout()?;
+    // A zero extent makes CuTe's next stride zero, and its cotarget ceil_div then divides by it.
     if flat.size()? == 0 {
         return Err(Error::Unsupported);
     }

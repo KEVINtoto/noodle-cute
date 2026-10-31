@@ -74,7 +74,9 @@ impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
     /// Flattens nested modes in leaf order without changing the linear address map.
     ///
     /// Static leaf values remain encoded in the result type; flattening neither
-    /// merges contiguous leaves nor removes unit extents.
+    /// merges contiguous leaves nor removes unit extents. An integral layout such as
+    /// `4:1` becomes the single-mode tuple `(4):(1)`, whereas CuTe's `flatten`
+    /// keeps it integral; see [`Flatten`].
     pub fn flatten(self) -> Layout<<S as Flatten>::Output, <D as Flatten>::Output>
     where
         S: Flatten,

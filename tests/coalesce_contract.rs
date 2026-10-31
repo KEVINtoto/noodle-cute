@@ -83,6 +83,13 @@ fn mixed_folds_require_a_static_accumulated_shape() {
         assert_eq!(runtime.shapes(), &[2 * n]);
     }
 
+    // CuTe: `3 * _0` is the static `_0`, so bw_coalesce merges (3,_4):(_0,_0) into 12:_0.
+    let broadcast = Layout::new(shape![DynInt(3), Int::<4>], stride![Int::<0>, Int::<0>]).unwrap();
+    let merged: Single<DynInt, Int<0>> = broadcast.coalesce().unwrap();
+    assert_eq!(merged.shape.0, DynInt(12));
+    let merged_extended: Single<DynInt, Int<0>> = broadcast.coalesce_extended().unwrap();
+    assert_eq!(merged_extended, merged);
+
     let empty = Layout::new(
         shape![Int::<{ isize::MAX }>, DynInt(2), Int::<0>],
         stride![Int::<0>, Int::<0>, Int::<1>],

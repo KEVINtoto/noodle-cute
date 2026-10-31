@@ -174,15 +174,16 @@ fn structural_right_and_left_inverses_match_cute_and_satisfy_inverse_identities(
         Ok(dyn_layout(&[5, 2], &[1, 4]))
     );
 
-    // Error bounds for `right_inverse` and `left_inverse`.
-    for empty in [
-        dyn_layout(&[0], &[1]),
-        dyn_layout(&[0], &[2]),
-        dyn_layout(&[0, 2], &[0, 1]),
-    ] {
-        assert_eq!(right_inverse(empty), Err(Error::Unsupported));
-        assert_eq!(left_inverse(empty), Err(Error::Unsupported));
-    }
+    // Empty layouts follow CuTe's right_inverse/left_inverse folds instead of erroring.
+    let unit = dyn_layout(&[0], &[1]);
+    assert_eq!(right_inverse(unit), Ok(unit));
+    assert_eq!(left_inverse(unit), Ok(unit));
+    let gapped = dyn_layout(&[0], &[2]);
+    assert_eq!(right_inverse(gapped), Ok(dyn_layout(&[1], &[0])));
+    assert_eq!(left_inverse(gapped), Ok(dyn_layout(&[2, 0], &[0, 1])));
+    let broadcast = dyn_layout(&[0, 2], &[0, 1]);
+    assert_eq!(right_inverse(broadcast), Ok(dyn_layout(&[2], &[0])));
+    assert_eq!(left_inverse(broadcast), Ok(dyn_layout(&[2], &[0])));
     assert_eq!(
         left_inverse(dyn_layout(&[2], &[-1])),
         Err(Error::Unsupported)
@@ -329,14 +330,18 @@ fn mixed_inverse_errors_broadcasts_and_dynamic_unit_extents_are_checked() {
     let unit = Layout::new(DynInt(1), Int::<1>).unwrap();
     let right: Layout<DynInt, Int<1>> = unit.right_inverse().unwrap();
     assert_eq!(right.shape, DynInt(1));
-    assert_eq!(
-        Layout::new(DynInt(0), Int::<1>).unwrap().right_inverse(),
-        Err(Error::Unsupported)
-    );
-    assert_eq!(
-        Layout::new(DynInt(0), Int::<1>).unwrap().left_inverse(),
-        Err(Error::Unsupported)
-    );
+    // CuTe: right_inverse(0:_1) = 0:_1.
+    let empty: Layout<DynInt, Int<1>> = Layout::new(DynInt(0), Int::<1>)
+        .unwrap()
+        .right_inverse()
+        .unwrap();
+    assert_eq!(empty.shape, DynInt(0));
+    // CuTe: left_inverse(0:_1) = 0:_1.
+    let empty_left: Layout<DynInt, Int<1>> = Layout::new(DynInt(0), Int::<1>)
+        .unwrap()
+        .left_inverse()
+        .unwrap();
+    assert_eq!(empty_left.shape, DynInt(0));
     assert_eq!(
         Layout {
             shape: DynInt(-1),

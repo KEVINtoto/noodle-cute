@@ -50,7 +50,7 @@ Integer values use `isize`, so their range depends on the target platform's poin
 
 `Integer::STATIC` indicates whether the type determines the value. It is `Some(N)` for `Int<N>` and `None` for `DynInt` and `isize`, even when they happen to hold the same value.
 
-`Int` and `DynInt` support `+`, `-`, `*`, `/`, `%`, and unary negation. Arithmetic between two `Int` values produces another `Int`. Operations with a runtime operand and either wrapper produce `DynInt`. These operators follow Rust's integer arithmetic rules and do not return `Result`.
+`Int` and `DynInt` support `+`, `-`, `*`, `/`, `%`, and unary negation. Arithmetic between two `Int` values produces another `Int`. Operations with a runtime operand and either wrapper produce `DynInt`. These operators follow Rust's integer arithmetic rules and do not return `Result`. Unlike CuTe, a static zero does not absorb a runtime operand: `Int::<0>` times a `DynInt` is a `DynInt`, while CuTe returns `_0`. The layout algebra applies CuTe's static-zero rules internally where they affect result types.
 
 ```rust
 use noodle_cute::int::{DynInt, Int, Integer, NON_NEGATIVE};
@@ -88,7 +88,7 @@ Use `int_tuple!` to construct these structures. Commas separate top-level modes,
 | `Tuple` | A tuple-chain interface providing the top-level length `LEN` and the greatest head depth `MAX_DEPTH` |
 | `Get<INDEX>` / `.get::<INDEX>()` | Borrows a top-level mode by a compile-time index, preserving its concrete type and nesting; invalid indices fail to compile |
 | `Append<R>` / `.append(rhs)` | Replaces the tuple chain's terminating `Nil` with `rhs`; passing another tuple concatenates the chains |
-| `Flatten` / `.flatten()` | Flattens the structure in head-first, depth-first order, preserving leaf order and types |
+| `Flatten` / `.flatten()` | Flattens the structure in head-first, depth-first order, preserving leaf order and types; a bare integer becomes a one-element tuple (CuTe `flatten_to_tuple`, not `flatten`) |
 | `Unwrap` / `.unwrap()` | 静态推导辅助操作：取出非空 tuple 的唯一模式；多个模式时保留原 tuple，不递归展平 |
 | `Product` / `.product_typed()` | Computes the product, keeping a static result type when every leaf is static |
 

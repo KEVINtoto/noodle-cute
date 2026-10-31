@@ -51,12 +51,15 @@ pub const fn merge_decision(
     if matches!(s, Some(1)) {
         return DISCARD;
     }
-    // 类型层的 None 表示未知；运行时路径将当前数值全部作为已知值传入。
-    match (s, d, tail_shape, next) {
-        (Some(a), Some(b), Some(_), Some(c)) => match a.checked_mul(b) {
-            Some(v) if v == c => MERGE,
-            _ => RETAIN,
-        },
+    // None means unknown at the type level; the runtime path passes every value as known.
+    // CuTe's `_0 * x` is a static `_0` even when `x` is dynamic.
+    let product = match (s, d) {
+        (Some(0), _) | (_, Some(0)) => Some(0),
+        (Some(a), Some(b)) => a.checked_mul(b),
+        _ => None,
+    };
+    match (product, tail_shape, next) {
+        (Some(p), Some(_), Some(c)) if p == c => MERGE,
         _ => RETAIN,
     }
 }
