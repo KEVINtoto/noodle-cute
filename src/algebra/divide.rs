@@ -1,11 +1,56 @@
-//! Divide algorithms for affine layouts.
+//! 全静态、混合类型与运行时布局的 divide。
+//!
+//! 类型化方法支持整数、布局和嵌套 tuple tiler；空 tuple 保留原布局，部分 tuple
+//! 保留尾部模式。zipped 按 tiler profile 转置，tiled/flat 只解开一层模式。
+//! `*_divide_axes` 是本库的严格整除接口，要求每个顶层模式恰好对应一个整数 tile。
+//! 类型化组合失败直接报错；通用自由函数保留原有惰性组合回退。
+//!
+//! ```
+//! use noodle_cute::{Int, IntTuple, Nil, DynInt, layout::{Layout, LayoutMap}};
+//! use noodle_cute::algebra::static_logical_divide;
+//! type Pair<A, B> = IntTuple<A, IntTuple<B, Nil>>;
+//! const C: Layout<Pair<Int<3>, Int<4>>, Pair<Int<2>, Int<6>>> = static_logical_divide(
+//!     Layout { shape: Int::<12>, stride: Int::<2> }, Int::<3>,
+//! );
+//! let input = Layout::new(DynInt(10), Int::<2>)?;
+//! let result = input.logical_divide(Int::<4>)?;
+//! assert_eq!(result.size()?, 12);
+//! assert_eq!(result.index_of_coord(&[3, 2])?, 22);
+//! # Ok::<(), noodle_cute::Error>(())
+//! ```
+//! ```compile_fail
+//! use noodle_cute::{Int, layout::Layout, algebra::static_logical_divide};
+//! let _ = static_logical_divide(Layout { shape: Int::<8>, stride: Int::<1> }, Int::<0>);
+//! ```
+//! ```compile_fail
+//! use noodle_cute::{Int, int_tuple, layout::Layout};
+//! let input = Layout::new(Int::<8>, Int::<1>).unwrap();
+//! let _ = input.logical_divide(int_tuple![Int::<2>, Int::<2>]);
+//! ```
+//! ```compile_fail
+//! use noodle_cute::{Int, layout::Layout, algebra::static_logical_divide_axes};
+//! let _ = static_logical_divide_axes(Layout { shape: Int::<10>, stride: Int::<1> }, Int::<3>);
+//! ```
+//! ```compile_fail
+//! use noodle_cute::{Int, shape, stride, layout::Layout};
+//! let input = Layout::new(shape![Int::<8>, Int::<6>], stride![Int::<1>, Int::<8>]).unwrap();
+//! let _ = input.logical_divide_axes(shape![Int::<2>]);
+//! ```
+//! ```compile_fail
+//! use noodle_cute::{Int, DynInt, layout::Layout, algebra::static_logical_divide};
+//! let _ = static_logical_divide(Layout { shape: DynInt(8), stride: Int::<1> }, Int::<2>);
+//! ```
 
-use crate::int::{add, mul, product_slice};
-use crate::layout::{AffineLayoutMap, DynLayout, GroupedLayout, LayoutMap, MAX_RANK};
-use crate::{Error, Result};
+use core::ops::Div;
+
+use crate::int::{Integer, add, mul, product_slice};
+use crate::layout::{AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutMap, MAX_RANK};
+use crate::tuple::{Item, Product as TupleProduct};
+use crate::{Assert, Error, Int, IntTuple, Nil, Result, True};
 
 use super::complement::{complement, complement_shape};
 use super::composition::{Composition, composition, composition_layout};
+use super::typed::{IntoModes, ValidateTiler, Wrap};
 use super::{Grouping, Modes, TileRest};
 
 /// Composed layout dividing an original layout via a tile and its complement layout.
@@ -25,8 +70,30 @@ fn divide<A: LayoutMap, B: AffineLayoutMap>(
         Some(affine) => complement_shape(tile.clone(), affine.flat().coalesce()?.shapes())?,
         None => complement(tile.clone(), layout.size()?)?,
     };
-    let inner = TileRest::new(tile, rest, grouping);
-    composition(layout, inner)
+    let mut divided = composition(layout, TileRest::new(tile, rest, grouping))?;
+    // CuTe unpacks tiled/flat groups after composing, so group the composed tile and rest.
+    if divided.normalized.is_some()
+        && let Some(affine) = divided.outer().as_affine()?
+    {
+        let inner = divided.inner();
+        let tiles = top_modes(&composition_layout(&affine, inner.tile())?)?;
+        let rests = top_modes(&composition_layout(&affine, inner.rest())?)?;
+        // A layout tiler's tile_unzip is the identity, so logical matches zipped.
+        let grouping = match grouping {
+            Grouping::Logical => Grouping::Zipped,
+            other => other,
+        };
+        divided.normalized = Some(super::group_modes(&tiles, &rests, grouping)?);
+    }
+    Ok(divided)
+}
+
+fn top_modes(layout: &GroupedLayout) -> Result<Modes> {
+    let mut modes = Modes::new();
+    for axis in 0..layout.rank() {
+        modes.push(&layout.mode(axis)?)?;
+    }
+    Ok(modes)
 }
 
 /// CuTe `logical_divide(layout, tile)`: divides a layout into two top-level groups `(tile, rest)`.
@@ -443,19 +510,7 @@ pub fn logical_divide_modes<L: AffineLayoutMap>(
     tiler: &[DynLayout],
 ) -> Result<GroupedLayout> {
     let (tiles, rests) = divide_modes(layout, tiler)?;
-    let mut out = Modes::new();
-    for m in 0..rests.rank {
-        if m < tiles.rank {
-            // Leaves of tile_m and rest_m are combined into a single top-level mode.
-            let mut both = Modes::new();
-            both.push(&tiles.mode(m)?)?;
-            both.push(&rests.mode(m)?)?;
-            out.push(&both.merged(0..2)?)?;
-        } else {
-            out.push(&rests.mode(m)?)?;
-        }
-    }
-    out.layout()
+    super::group_modes(&tiles, &rests, Grouping::Logical)
 }
 
 /// CuTe `zipped_divide(layout, tiler)`: groups modes into
@@ -482,10 +537,7 @@ pub fn zipped_divide_modes<L: AffineLayoutMap>(
     tiler: &[DynLayout],
 ) -> Result<GroupedLayout> {
     let (tiles, rests) = divide_modes(layout, tiler)?;
-    let mut out = Modes::new();
-    out.push(&tiles.merged(0..tiles.rank)?)?;
-    out.push(&rests.merged(0..rests.rank)?)?;
-    out.layout()
+    super::group_modes(&tiles, &rests, Grouping::Zipped)
 }
 
 /// CuTe `tiled_divide(layout, tiler)`: groups modes into `((tile_0, tile_1, ...), rest_0, rest_1, ...)`.
@@ -511,12 +563,7 @@ pub fn tiled_divide_modes<L: AffineLayoutMap>(
     tiler: &[DynLayout],
 ) -> Result<GroupedLayout> {
     let (tiles, rests) = divide_modes(layout, tiler)?;
-    let mut out = Modes::new();
-    out.push(&tiles.merged(0..tiles.rank)?)?;
-    for m in 0..rests.rank {
-        out.push(&rests.mode(m)?)?;
-    }
-    out.layout()
+    super::group_modes(&tiles, &rests, Grouping::Tiled)
 }
 
 /// CuTe `flat_divide(layout, tiler)`: flattens modes into `(tile_0, tile_1, ..., rest_0, rest_1, ...)`.
@@ -542,12 +589,212 @@ pub fn flat_divide_modes<L: AffineLayoutMap>(
     tiler: &[DynLayout],
 ) -> Result<GroupedLayout> {
     let (tiles, rests) = divide_modes(layout, tiler)?;
-    let mut out = Modes::new();
-    for m in 0..tiles.rank {
-        out.push(&tiles.mode(m)?)?;
-    }
-    for m in 0..rests.rank {
-        out.push(&rests.mode(m)?)?;
-    }
-    out.layout()
+    super::group_modes(&tiles, &rests, Grouping::Flat)
 }
+
+#[doc(hidden)]
+pub struct DivideOp;
+
+#[doc(hidden)]
+pub trait CoalesceTarget {
+    type Shape;
+    fn cotarget(&self) -> Result<Self::Shape>;
+}
+impl<S, D> CoalesceTarget for Layout<S, D>
+where
+    S: crate::layout::Shape + crate::tuple::Flatten,
+    D: crate::tuple::Item<Profile = S::Profile> + crate::tuple::Flatten,
+    Layout<S::Output, D::Output>: super::coalesce::CoalesceFold,
+    <Layout<S::Output, D::Output> as super::coalesce::CoalesceFold>::Output:
+        super::coalesce::FinishCoalesce,
+    super::CoalescedLayout<S, D>: crate::layout::LayoutParts,
+{
+    type Shape = <super::CoalescedLayout<S, D> as crate::layout::LayoutParts>::Shape;
+    fn cotarget(&self) -> Result<Self::Shape> {
+        use crate::layout::LayoutParts;
+        Ok(self.coalesce()?.into_layout().shape)
+    }
+}
+type DivideInner<L, T> =
+    super::typed::Joined<T, super::TypedComplement<T, <L as CoalesceTarget>::Shape>>;
+impl<L, T> super::typed::Binary<L, T> for DivideOp
+where
+    L: CoalesceTarget + super::TypedCompose<DivideInner<L, T>>,
+    T: LayoutMap + Clone + crate::layout::LayoutParts + super::Complement<L::Shape>,
+    super::TypedComplement<T, L::Shape>: crate::layout::LayoutParts,
+    super::TypedComposition<L, DivideInner<L, T>>: crate::layout::LayoutParts,
+{
+    type Output = super::TypedComposition<L, DivideInner<L, T>>;
+    fn run(layout: L, tiler: T) -> Result<Self::Output> {
+        if tiler.size()? == 0 {
+            return Err(Error::InvalidShape);
+        }
+        let rest = tiler.clone().complement_typed(layout.cotarget()?)?;
+        layout.compose(super::typed::join(tiler, rest))
+    }
+}
+
+super::typed::operation_api!(TypedDivide, TypedDivided, StaticDivide, DivideOp, divide_typed, ();
+    (0, logical_divide, static_logical_divide),
+    (1, zipped_divide, static_zipped_divide),
+    (2, tiled_divide, static_tiled_divide),
+    (3, flat_divide, static_flat_divide),
+);
+
+macro_rules! dynamic_divide_methods {
+    ($($name:ident),*) => {$ (
+        impl DynLayout {
+            /// 运行时分块入口，沿用自由函数的补布局、扩展域与错误规则。
+            pub fn $name<T: AffineLayoutMap>(&self, tiler: T) -> Result<Divided<Self, T>> {
+                $name(*self, tiler)
+            }
+        }
+    )*};
+}
+dynamic_divide_methods!(logical_divide, zipped_divide, tiled_divide, flat_divide);
+
+#[doc(hidden)]
+pub struct AxesOp;
+#[doc(hidden)]
+pub const AXIS_VALID<S: TupleProduct, T: Integer>: bool = match (S::Output::STATIC, T::STATIC) {
+    (_, Some(t)) if t <= 0 => false,
+    (Some(s), Some(t)) => s % t == 0,
+    _ => true,
+} where S::Output: Integer;
+
+#[doc(hidden)]
+pub trait StrictAxes<T> {
+    fn strict_axes(&self, tiler: &T) -> Result<()>;
+}
+impl StrictAxes<Nil> for Layout<Nil, Nil> {
+    fn strict_axes(&self, _: &Nil) -> Result<()> {
+        Ok(())
+    }
+}
+impl<S, ST, D, DT, T: Integer, TT> StrictAxes<IntTuple<T, TT>>
+    for Layout<IntTuple<S, ST>, IntTuple<D, DT>>
+where
+    S: crate::layout::Shape + TupleProduct,
+    D: Item<Profile = S::Profile>,
+    <S as TupleProduct>::Output: Integer,
+    Assert<{ AXIS_VALID::<S, T> }>: True,
+    ST: Clone,
+    DT: Clone,
+    Layout<ST, DT>: StrictAxes<TT>,
+{
+    fn strict_axes(&self, tiler: &IntTuple<T, TT>) -> Result<()> {
+        let t = tiler.0.value();
+        if t <= 0 {
+            return Err(Error::InvalidShape);
+        }
+        let s = Layout {
+            shape: self.shape.0.clone(),
+            stride: self.stride.0.clone(),
+        }
+        .size()?;
+        if s % t != 0 {
+            return Err(Error::NotDivisible);
+        }
+        Layout {
+            shape: self.shape.1.clone(),
+            stride: self.stride.1.clone(),
+        }
+        .strict_axes(&tiler.1)
+    }
+}
+#[doc(hidden)]
+pub trait AxesCheck<T> {
+    fn axes_check(&self, tiler: &T) -> Result<()>;
+}
+impl<S: Wrap + Clone, D: Wrap + Clone, T: Wrap + Clone> AxesCheck<T> for Layout<S, D>
+where
+    Layout<S::Output, D::Output>: StrictAxes<T::Output>,
+{
+    fn axes_check(&self, tiler: &T) -> Result<()> {
+        self.clone().into_modes().strict_axes(&tiler.clone().wrap())
+    }
+}
+impl<L: AxesCheck<T>, T> ValidateTiler<L, T> for AxesOp {
+    fn validate(layout: &L, tiler: &T) -> Result<()> {
+        layout.axes_check(tiler)
+    }
+}
+impl<S: Integer + Div<T>, D: Integer, T: Integer>
+    super::typed::Binary<Layout<S, D>, Layout<T, Int<1>>> for AxesOp
+where
+    (): super::composition::ComposeProduct<T, D>,
+{
+    type Output = Layout<
+        super::typed::Pair<T, S::Output>,
+        super::typed::Pair<D, <() as super::composition::ComposeProduct<T, D>>::Output>,
+    >;
+    fn run(layout: Layout<S, D>, tiler: Layout<T, Int<1>>) -> Result<Self::Output> {
+        let next =
+            <() as super::composition::ComposeProduct<T, D>>::product(tiler.shape, layout.stride)?;
+        Ok(super::typed::join(
+            Layout {
+                shape: tiler.shape,
+                stride: layout.stride,
+            },
+            Layout {
+                shape: layout.shape / tiler.shape,
+                stride: next,
+            },
+        ))
+    }
+}
+impl<H, T, D, I> super::typed::Binary<Layout<IntTuple<H, T>, D>, Layout<I, Int<1>>> for AxesOp
+where
+    DivideOp: super::typed::Binary<Layout<IntTuple<H, T>, D>, Layout<I, Int<1>>>,
+{
+    type Output =
+        <DivideOp as super::typed::Binary<Layout<IntTuple<H, T>, D>, Layout<I, Int<1>>>>::Output;
+    fn run(layout: Layout<IntTuple<H, T>, D>, tiler: Layout<I, Int<1>>) -> Result<Self::Output> {
+        DivideOp::run(layout, tiler)
+    }
+}
+impl<D, I> super::typed::Binary<Layout<Nil, D>, Layout<I, Int<1>>> for AxesOp
+where
+    DivideOp: super::typed::Binary<Layout<Nil, D>, Layout<I, Int<1>>>,
+{
+    type Output = <DivideOp as super::typed::Binary<Layout<Nil, D>, Layout<I, Int<1>>>>::Output;
+    fn run(layout: Layout<Nil, D>, tiler: Layout<I, Int<1>>) -> Result<Self::Output> {
+        DivideOp::run(layout, tiler)
+    }
+}
+
+super::typed::operation_api!(TypedDivideAxes, TypedDividedAxes, StaticDivideAxes, AxesOp, divide_axes_typed, AxesOp;
+    (0, logical_divide_axes, static_logical_divide_axes),
+    (1, zipped_divide_axes, static_zipped_divide_axes),
+    (2, tiled_divide_axes, static_tiled_divide_axes),
+    (3, flat_divide_axes, static_flat_divide_axes),
+);
+
+macro_rules! dynamic_divide_axes_methods {
+    ($($name:ident),*) => {$ (
+        impl DynLayout {
+            /// 严格按轴整除；tile 长度须等于 rank，错误条件与同名自由函数一致。
+            pub fn $name(&self, tiler: &[isize]) -> Result<DividedAxes<Self>> { $name(*self, tiler) }
+        }
+    )*};
+}
+dynamic_divide_axes_methods!(
+    logical_divide_axes,
+    zipped_divide_axes,
+    tiled_divide_axes,
+    flat_divide_axes
+);
+macro_rules! dynamic_divide_modes_methods {
+    ($($name:ident),*) => {$ (
+        impl DynLayout {
+            /// 运行时 tuple tiler 分块，保留未被 tiler 覆盖的尾部模式。
+            pub fn $name(&self, tiler: &[DynLayout]) -> Result<GroupedLayout> { $name(self, tiler) }
+        }
+    )*};
+}
+dynamic_divide_modes_methods!(
+    logical_divide_modes,
+    zipped_divide_modes,
+    tiled_divide_modes,
+    flat_divide_modes
+);

@@ -17,10 +17,27 @@ pub mod composition;
 pub mod divide;
 pub mod inverse;
 pub mod product;
+mod typed;
 
-pub use coalesce::{StaticCoalesce, CoalescedLayout, static_coalesce, static_coalesce_extended};
+pub use coalesce::{CoalescedLayout, StaticCoalesce, static_coalesce, static_coalesce_extended};
+pub use complement::{
+    Complement, StaticComplement, TypedComplement, static_complement, static_complement_extended,
+};
 pub use composition::{
     StaticCompose, StaticComposition, TypedCompose, TypedComposition, static_composition,
+};
+
+pub use divide::{
+    StaticDivide, StaticDivideAxes, TypedDivide, TypedDivideAxes, TypedDivided, TypedDividedAxes,
+    static_flat_divide, static_flat_divide_axes, static_logical_divide, static_logical_divide_axes,
+    static_tiled_divide, static_tiled_divide_axes, static_zipped_divide, static_zipped_divide_axes,
+};
+pub use inverse::{
+    StaticInverse, TypedInverse, TypedInvert, static_left_inverse, static_right_inverse,
+};
+pub use product::{
+    StaticProduct, TypedProduct, TypedProductLayout, static_blocked_product, static_flat_product,
+    static_logical_product, static_raked_product, static_tiled_product, static_zipped_product,
 };
 
 /// Fixed-capacity leaf buffer for assembling flat layout results in CuTe algebra.
@@ -366,6 +383,46 @@ impl<T: LayoutMap, R: LayoutMap> LayoutMap for TileRest<T, R> {
             Err(e) => Err(e),
         }
     }
+}
+
+pub(crate) fn group_modes(
+    tiles: &Modes,
+    rests: &Modes,
+    grouping: Grouping,
+) -> Result<GroupedLayout> {
+    let mut out = Modes::new();
+    match grouping {
+        Grouping::Logical => {
+            for m in 0..rests.rank {
+                if m < tiles.rank {
+                    let mut both = Modes::new();
+                    both.push(&tiles.mode(m)?)?;
+                    both.push(&rests.mode(m)?)?;
+                    out.push(&both.merged(0..2)?)?;
+                } else {
+                    out.push(&rests.mode(m)?)?;
+                }
+            }
+        }
+        Grouping::Zipped | Grouping::Tiled => {
+            out.push(&tiles.merged(0..tiles.rank)?)?;
+            if grouping == Grouping::Zipped {
+                out.push(&rests.merged(0..rests.rank)?)?;
+            } else {
+                for m in 0..rests.rank {
+                    out.push(&rests.mode(m)?)?;
+                }
+            }
+        }
+        Grouping::Flat => {
+            for modes in [tiles, rests] {
+                for m in 0..modes.rank {
+                    out.push(&modes.mode(m)?)?;
+                }
+            }
+        }
+    }
+    out.layout()
 }
 
 #[cfg(test)]

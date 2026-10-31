@@ -6,7 +6,7 @@ use noodle_cute::layout::{AffineLayoutMap, DynLayout, GroupedLayout, Layout, Lay
 use noodle_cute::{DynInt, Error, Int, IntTuple, Nil, shape, stride};
 
 mod common;
-use common::{TableMap, assert_grouped, dyn_layout, grouped, values};
+use common::{TableMap, assert_grouped, assert_same_map, dyn_layout, grouped, values};
 
 type Pair<A, B> = IntTuple<A, IntTuple<B, Nil>>;
 type Row = Layout<Pair<Int<4>, Int<6>>, Pair<Int<6>, Int<1>>>;
@@ -293,10 +293,10 @@ fn composition_layout_and_lazy_composition_match_cute_oracle_cases() {
 
         let lazy: Composition<_, _> = composition(c.lhs, c.rhs).unwrap();
         assert!(lazy.is_normalized());
-        assert_eq!(lazy.rank(), c.rhs.rank());
+        assert_eq!(lazy.rank(), eager.rank());
         assert_eq!(lazy.size(), c.rhs.size());
-        for a in 0..c.rhs.rank() {
-            assert_eq!(lazy.extent(a), c.rhs.extent(a));
+        for a in 0..eager.rank() {
+            assert_eq!(lazy.extent(a), eager.extent(a));
         }
         assert_eq!(values(&lazy), values(&eager));
 
@@ -339,21 +339,22 @@ fn composition_preserves_trailing_unit_stride_for_extended_domain() {
 fn composition_distinguishes_integral_shapes_from_single_mode_tuples() {
     let row = dyn_layout(&[4, 6], &[6, 1]);
 
-    // An integral shape (Int<8>) expands its leaves into top-level modes in
-    // `composition_layout`, while `composition` merges them to match inner's rank 1.
+    // CuTe: (4,6):(6,1) o 8:3 = (2,4):(18,1); an integral shape (Int<8>) expands its
+    // leaves into top-level modes in both the eager and the lazy API.
     let integral_rhs = Layout::new(Int::<8>, Int::<3>).unwrap();
     let eager_int = composition_layout(&row, &integral_rhs).unwrap();
     assert_grouped(&eager_int, &[2, 4], &[18, 1], &[1, 1]);
     assert_eq!(eager_int.rank(), 2);
 
     let lazy_int = composition(row, integral_rhs).unwrap();
-    assert_eq!(lazy_int.rank(), 1);
-    assert_eq!(lazy_int.extent(0), Ok(8));
+    assert_eq!(lazy_int.rank(), 2);
+    assert_eq!(lazy_int.extent(0), Ok(2));
+    assert_eq!(lazy_int.extent(1), Ok(4));
     assert_grouped(
         &lazy_int.as_affine().unwrap().unwrap(),
         &[2, 4],
         &[18, 1],
-        &[2],
+        &[1, 1],
     );
 
     // A 1-element tuple `(Int<8>,)` keeps all output leaves inside mode 0 in both APIs.
@@ -393,7 +394,7 @@ fn composition_weak_divisibility_follows_cute_while_not_divisible_falls_back_poi
         &weak_big.as_affine().unwrap().unwrap(),
         &[2, 8],
         &[3, d_big],
-        &[2],
+        &[1, 1],
     );
 
     // Stride divisibility failure (5 >= 4 and 5 % 4 != 0): eager errors, lazy evaluates pointwise.
@@ -529,32 +530,53 @@ fn composition_injectivity_covers_normalized_within_domain_and_extended_fallback
 
 #[test]
 fn composition_reports_negative_indices_invalid_shapes_and_overflow() {
-    assert_eq!(
-        composition(dyn_layout(&[4], &[1]), dyn_layout(&[2], &[-1])).err(),
-        Some(Error::CoordinateOutOfBounds)
-    );
-    assert_eq!(
-        composition_layout(&dyn_layout(&[4], &[1]), &dyn_layout(&[2], &[-1])),
-        Err(Error::CoordinateOutOfBounds)
-    );
-    assert_eq!(
-        composition_layout(&dyn_layout(&[4, 4], &[1, 4]), &dyn_layout(&[2], &[-1])),
-        Err(Error::CoordinateOutOfBounds)
-    );
+    // CuTe composes negative RHS strides through `signum`: an integral LHS scales the stride.
+    let integral = composition(dyn_layout(&[4], &[1]), dyn_layout(&[2], &[-1])).unwrap();
+    assert!(integral.is_normalized());
+    assert_eq!(values(&integral), [0, -1]);
+    let coalesced =
+        composition_layout(&dyn_layout(&[4, 4], &[1, 4]), &dyn_layout(&[2], &[-1])).unwrap();
+    assert_grouped(&coalesced, &[2], &[-1], &[1]);
 
-    // A unit-extent leaf with a non-divisible negative stride has non-negative reachable
-    // addresses [0, 1], but still violates CuTe's stride divisibility check `|-5| >= 4`.
-    assert_eq!(
-        composition_layout(
+    // CuTe: (4,4):(4,1) o 4:-1 = 4:-4 in both runtime and typed APIs.
+    let column = dyn_layout(&[4, 4], &[4, 1]);
+    let reversed = dyn_layout(&[4], &[-1]);
+    assert_grouped(
+        &composition_layout(&column, &reversed).unwrap(),
+        &[4],
+        &[-4],
+        &[1],
+    );
+    let lazy = composition(column, reversed).unwrap();
+    assert_eq!(values(&lazy), [0, -4, -8, -12]);
+    let typed: Layout<Int<4>, Int<-4>> =
+        Layout::new(shape![Int::<4>, Int::<4>], stride![Int::<4>, Int::<1>])
+            .unwrap()
+            .composition(Layout::new(Int::<4>, Int::<-1>).unwrap())
+            .unwrap();
+    assert_same_map(&lazy, &typed);
+
+    // The signed stride condition `-5 < 4` holds, so CuTe gives (1,2):(-2,6).
+    assert_grouped(
+        &composition_layout(
             &dyn_layout(&[4, 6], &[6, 1]),
-            &dyn_layout(&[1, 2], &[-5, 1])
-        ),
-        Err(Error::NotDivisible)
+            &dyn_layout(&[1, 2], &[-5, 1]),
+        )
+        .unwrap(),
+        &[1, 2],
+        &[-2, 6],
+        &[1, 1],
     );
     let unit_neg =
         composition(dyn_layout(&[4, 6], &[6, 1]), dyn_layout(&[1, 2], &[-5, 1])).unwrap();
-    assert!(!unit_neg.is_normalized());
+    assert!(unit_neg.is_normalized());
     assert_eq!(values(&unit_neg), [0, 6]);
+
+    // Pointwise fallback still feeds inner values to outer as logical indices.
+    assert_eq!(
+        composition(TableMap(&[0, 1, 2, 3]), dyn_layout(&[2], &[-1])).err(),
+        Some(Error::CoordinateOutOfBounds)
+    );
 
     // An uncoalesceable leading zero extent in `outer` fails multi-mode composition.
     assert_eq!(

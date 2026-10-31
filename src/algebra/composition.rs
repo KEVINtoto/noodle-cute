@@ -35,14 +35,6 @@ fn compose_leaf(lhs: &DynLayout, s: isize, d: isize, out: &mut Leaves) -> Result
     let (mut rest_shape, mut rest_stride) = (s, d);
     for i in 0..r - 1 {
         let (cs, cd) = (shape[i], stride[i]);
-        if cs <= 0 {
-            return Err(Error::InvalidShape);
-        }
-        // Stride divisibility: statically asserted in CuTe; checked here at runtime.
-        let magnitude = rest_stride.checked_abs().ok_or(Error::Overflow)?;
-        if rest_stride % cs != 0 && magnitude >= cs {
-            return Err(Error::NotDivisible);
-        }
         let step = checked_step(rest_shape, rest_stride, cs)?;
         if !step.skip {
             out.push(step.extent, mul(rest_stride, cd)?)?;
@@ -81,12 +73,11 @@ fn compose_grouped(outer: &DynLayout, rhs: &GroupedLayout) -> Result<GroupedLayo
 
 /// Lazily evaluated layout composition `composition(A, B)(c) = A(B(c))`.
 ///
-/// The output shape is taken from `inner`; `outer` receives linear coordinates and does not
+/// The size is taken from `inner`; `outer` receives linear coordinates and does not
 /// interpret `inner`'s results according to its own address bounds.
 /// Consistent with CuTe, `inner` values may exceed the logical domain of `outer`, in which
 /// case they are evaluated on the extended domain of `outer` (the last leaf does not wrap modulo,
-/// see [`LayoutMap::index_extended`]). `inner` coordinates must be non-negative, and `outer`
-/// must support an extended domain; otherwise, [`Error::CoordinateOutOfBounds`] is returned.
+/// see [`LayoutMap::index_extended`]).
 /// An empty `inner` requires no reachable addresses, allowing composition with an empty `outer`.
 ///
 /// When both sides are affine layouts and satisfy CuTe divisibility conditions, the normalized layout
@@ -98,10 +89,12 @@ fn compose_grouped(outer: &DynLayout, rhs: &GroupedLayout) -> Result<GroupedLayo
 /// padded `logical_divide` relies upon). In the extended domain, `R` and pointwise evaluation
 /// generally differ: `R` extends along the last leaf of each mode, whereas pointwise evaluation
 /// carries across leaves of `A`.
-/// An integral-shaped `B` has a single top-level mode; when caching, leaves of `R` are merged into
-/// a single mode so that its rank matches `B`.
+/// `rank` and `extent` follow `R` as in CuTe: an integral-shaped `B` yields one top-level mode
+/// per leaf of `R`, while a tuple-shaped `B` keeps its top-level modes.
 /// If divisibility conditions are not met ([`Error::NotDivisible`]) or either side is non-affine
-/// (corresponding to CuTe's `ComposedLayout`), evaluation falls back to pointwise mapping.
+/// (corresponding to CuTe's `ComposedLayout`), evaluation falls back to pointwise mapping with
+/// the modes of `inner`. Only this fallback requires nonnegative `inner` addresses and an `outer`
+/// that supports the extended domain; otherwise, [`Error::CoordinateOutOfBounds`] is returned.
 ///
 /// # Examples
 ///
@@ -119,22 +112,12 @@ fn compose_grouped(outer: &DynLayout, rhs: &GroupedLayout) -> Result<GroupedLayo
 ///
 /// # Errors
 ///
-/// - Returns [`Error::CoordinateOutOfBounds`] if `inner` has negative reachable addresses or if `outer` rejects extended coordinates.
+/// - Returns [`Error::CoordinateOutOfBounds`] if the pointwise fallback sees negative `inner` addresses or `outer` rejects extended coordinates.
 /// - Returns [`Error::CapacityExceeded`] if the normalized layout exceeds [`MAX_RANK`] leaves or groups.
 /// - Returns other layout errors if computing address ranges or normalized layouts fails.
 pub fn composition<A: LayoutMap, B: LayoutMap>(outer: A, inner: B) -> Result<Composition<A, B>> {
-    let range = inner.address_range()?;
-    if let Some((min, _)) = range
-        && min < 0
-    {
-        return Err(Error::CoordinateOutOfBounds);
-    }
-
     let normalized = match (outer.as_affine()?, inner.as_affine()?) {
         (Some(a), Some(b)) => match compose_grouped(a.flat(), &b) {
-            Ok(layout) if b.is_integral() => {
-                Some(GroupedLayout::new(*layout.flat(), &[layout.flat().rank()])?)
-            }
             Ok(layout) => Some(layout),
             Err(Error::NotDivisible) => None,
             Err(e) => return Err(e),
@@ -142,9 +125,13 @@ pub fn composition<A: LayoutMap, B: LayoutMap>(outer: A, inner: B) -> Result<Com
         _ => None,
     };
 
+    // Only pointwise evaluation feeds `inner` values to `outer` as logical indices.
     if normalized.is_none()
-        && let Some((_, max)) = range
+        && let Some((min, max)) = inner.address_range()?
     {
+        if min < 0 {
+            return Err(Error::CoordinateOutOfBounds);
+        }
         outer.index_extended(max)?;
     }
 
@@ -181,7 +168,6 @@ pub fn composition<A: LayoutMap, B: LayoutMap>(outer: A, inner: B) -> Result<Com
 ///
 /// # Errors
 ///
-/// - Returns [`Error::CoordinateOutOfBounds`] if `inner` has negative reachable addresses.
 /// - Returns [`Error::NotDivisible`] if stride or shape divisibility conditions fail.
 /// - Returns [`Error::InvalidShape`] if any non-positive extent is encountered.
 /// - Returns [`Error::CapacityExceeded`] if leaf or group counts exceed [`MAX_RANK`].
@@ -190,11 +176,6 @@ pub fn composition_layout<A: AffineLayoutMap, B: AffineLayoutMap>(
     outer: &A,
     inner: &B,
 ) -> Result<GroupedLayout> {
-    if let Some((min, _)) = inner.address_range()?
-        && min < 0
-    {
-        return Err(Error::CoordinateOutOfBounds);
-    }
     compose_grouped(&outer.as_flat_layout()?, &inner.as_grouped_layout()?)
 }
 
@@ -209,7 +190,7 @@ pub fn composition_layout<A: AffineLayoutMap, B: AffineLayoutMap>(
 pub struct Composition<A, B> {
     outer: A,
     inner: B,
-    // Cached CuTe normalized layout when both sides are affine and divisible; rank matches inner.
+    // Cached CuTe normalized layout when both sides are affine and divisible.
     pub(crate) normalized: Option<GroupedLayout>,
 }
 
@@ -236,11 +217,16 @@ impl<A: LayoutMap, B: LayoutMap> LayoutMap for Composition<A, B> {
     }
 
     fn rank(&self) -> usize {
-        self.inner.rank()
+        self.normalized
+            .as_ref()
+            .map_or_else(|| self.inner.rank(), |layout| layout.rank())
     }
 
     fn extent(&self, axis: usize) -> Result<isize> {
-        self.inner.extent(axis)
+        match &self.normalized {
+            Some(layout) => layout.extent(axis),
+            None => self.inner.extent(axis),
+        }
     }
 
     fn index(&self, linear: isize) -> Result<isize> {

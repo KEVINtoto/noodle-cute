@@ -2,7 +2,9 @@
 
 use core::mem::size_of_val;
 
-use noodle_cute::algebra::{StaticCoalesce, CoalescedLayout, static_coalesce, static_coalesce_extended};
+use noodle_cute::algebra::{
+    CoalescedLayout, StaticCoalesce, static_coalesce, static_coalesce_extended,
+};
 use noodle_cute::layout::{AffineLayoutMap, DynLayout, Layout, LayoutMap};
 use noodle_cute::{DynInt, Error, Int, IntTuple, Nil, shape, stride};
 

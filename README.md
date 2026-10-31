@@ -89,6 +89,7 @@ Use `int_tuple!` to construct these structures. Commas separate top-level modes,
 | `Get<INDEX>` / `.get::<INDEX>()` | Borrows a top-level mode by a compile-time index, preserving its concrete type and nesting; invalid indices fail to compile |
 | `Append<R>` / `.append(rhs)` | Replaces the tuple chain's terminating `Nil` with `rhs`; passing another tuple concatenates the chains |
 | `Flatten` / `.flatten()` | Flattens the structure in head-first, depth-first order, preserving leaf order and types |
+| `Unwrap` / `.unwrap()` | 静态推导辅助操作：取出非空 tuple 的唯一模式；多个模式时保留原 tuple，不递归展平 |
 | `Product` / `.product_typed()` | Computes the product, keeping a static result type when every leaf is static |
 
 `Item` provides the structural metadata `RANK`, `DEPTH`, `LEAVES`, and the associated type `Profile`:
@@ -124,6 +125,20 @@ fn main() {
 }
 ```
 
+`tuple::GetHead<B>` 与 `algebra::composition::Select<B>` 共用 `Assert<B>` 布尔分派标记，旧名称及 `GetHead::<true>` / `Select::<false>` 的构造语法保留。`Unwrap` 位于 `tuple` 模块，原 `algebra::composition::Unwrap` 路径继续通过重导出提供；空 tuple 没有 `Unwrap` 实现。
+
+```rust
+use noodle_cute::{Int, int_tuple};
+use noodle_cute::tuple::Unwrap;
+
+let leaf: Int<2> = int_tuple![Int::<2>].unwrap();
+assert_eq!(leaf.value(), 2);
+let pair = int_tuple![Int::<2>, Int::<3>];
+assert_eq!(pair.unwrap(), pair);
+let nested = int_tuple![(Int::<2>, Int::<3>)];
+assert_eq!(nested.unwrap(), pair);
+```
+
 The two product interfaces serve different purposes:
 
 | Interface | Result and arithmetic behavior |
@@ -149,4 +164,15 @@ fn main() {
     let total: Int<120> = joined.product_typed();
     assert_eq!(total.value(), 120);
 }
+```
+
+### layout 的整数范围
+
+layout 的 `size()`、`extent()`、`shape()` 和运行时 `shapes()` 使用 `usize`；stride、坐标和地址使用 `isize`。`DynLayout::new(&[isize], &[isize])` 保留负 shape 检查；`DynLayout::new_unsigned(&[usize], &[isize])` 支持无符号 shape。大小乘积超过 `usize` 或地址/线性编号超过 `isize` 时返回 `Error::Overflow`，不会通过强制转换截断。typed tuple 的 `Item::leaf/product` 仍使用 `isize`。
+
+```rust
+use noodle_cute::layout::{DynLayout, LayoutMap};
+let layout = DynLayout::new_unsigned(&[2usize, 3], &[1isize, -2]).unwrap();
+assert_eq!(layout.size().unwrap(), 6usize);
+assert_eq!(layout.index_of_coord(&[1, 2]).unwrap(), -3isize);
 ```
