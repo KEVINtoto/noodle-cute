@@ -36,14 +36,14 @@
 //! ```
 
 use crate::layout::{
-    AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutMap, LayoutParts, MAX_RANK,
+    AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutBuilder, LayoutMap, LayoutParts,
 };
 use crate::{Error, Int, IntTuple, Nil, Result};
 
 use super::complement::complement_extended;
 use super::composition::{Composition, composition, composition_layout};
 use super::typed::{Arrange, IntoModes, Kind, Split};
-use super::{BLOCKED, Grouping, Leaves, RAKED, TileRest};
+use super::{BLOCKED, Grouping, RAKED, TileRest};
 
 /// Product layout formed by adding a tile address to a rest address mapped through the complement of the tile.
 pub type Produced<A, B> = TileRest<A, Composition<DynLayout, B>>;
@@ -186,9 +186,8 @@ fn rank_product<A: AffineLayoutMap, B: AffineLayoutMap>(
     // Padded 1:0 modes are filtered out by complement, not affecting the complement layout.
     let complement = complement_extended(block)?;
     let unit = DynLayout::new(&[1], &[0])?;
-    let mut leaves = Leaves::new();
-    let mut groups = [0usize; MAX_RANK];
-    for (m, group) in groups.iter_mut().enumerate().take(rank) {
+    let mut out = LayoutBuilder::new();
+    for m in 0..rank {
         let b = if m < block.rank() {
             block.mode(m)?
         } else {
@@ -202,14 +201,11 @@ fn rank_product<A: AffineLayoutMap, B: AffineLayoutMap>(
             unit
         };
         let (first, second) = if raked { (r, b) } else { (b, r) };
-        for part in [first, second] {
-            for (&s, &d) in part.shapes().iter().zip(part.strides()) {
-                leaves.push(s, d)?;
-            }
-        }
-        *group = first.rank() + second.rank();
+        out.push_leaves(&first)?;
+        out.push_leaves(&second)?;
+        out.close_mode()?;
     }
-    GroupedLayout::new(leaves.layout()?, &groups[..rank])
+    out.finish()
 }
 
 /// CuTe `blocked_product(block, tiler)`: rank is `max(block.rank(), tiler.rank())`, where the `m`-th mode is
@@ -236,7 +232,7 @@ fn rank_product<A: AffineLayoutMap, B: AffineLayoutMap>(
 /// # Errors
 ///
 /// - Returns [`Error::NotDivisible`] if mode composition divisibility conditions fail.
-/// - Returns [`Error::CapacityExceeded`] if leaf or group storage exceeds [`MAX_RANK`].
+/// - Returns [`Error::CapacityExceeded`] if leaf or group storage exceeds [`MAX_RANK`](crate::layout::MAX_RANK).
 pub fn blocked_product<A: AffineLayoutMap, B: AffineLayoutMap>(
     block: A,
     tiler: B,
@@ -499,18 +495,20 @@ fn product_modes<L: AffineLayoutMap>(
     if tiler.len() > block.rank() {
         return Err(Error::StructureMismatch);
     }
-    let (mut blocks, mut rests) = (super::Modes::new(), super::Modes::new());
+    let (mut blocks, mut rests) = (LayoutBuilder::new(), LayoutBuilder::new());
     for m in 0..block.rank() {
         let mode = block.mode(m)?;
         if let Some(t) = tiler.get(m) {
             let comp = complement_extended(mode)?;
-            blocks.push(&mode)?;
-            rests.push(composition_layout(&comp, t)?.flat())?;
+            blocks.push_leaves(&mode)?;
+            blocks.close_mode()?;
+            rests.push_leaves(composition_layout(&comp, t)?.flat())?;
         } else {
-            rests.push(&mode)?;
+            rests.push_leaves(&mode)?;
         }
+        rests.close_mode()?;
     }
-    super::group_modes(&blocks, &rests, grouping)
+    super::group_modes(&blocks.finish()?, &rests.finish()?, grouping)
 }
 /// CuTe `logical_product(block, tiler)` with a per-mode tuple tiler: mode `m` becomes
 /// `(block_m, complement(block_m) ∘ tiler[m])`; trailing modes not covered by `tiler` are kept.

@@ -3,13 +3,13 @@
 //!
 //! Each operation is available for typed [`Layout`](crate::layout::Layout)s, which keep static
 //! leaves and nested profiles, and for runtime affine maps through free functions returning
-//! [`DynLayout`] or [`GroupedLayout`] (or lazy views for non-affine maps). Typed results are
+//! [`DynLayout`](crate::layout::DynLayout) or [`GroupedLayout`] (or lazy views for non-affine maps). Typed results are
 //! named by aliases such as [`TypedComposition`]; for fully static inputs
 //! `<Alias as StaticValue>::VALUE` is the result as a constant (see [`crate::StaticValue`]).
 
 use crate::int::{add, mul};
-use crate::layout::{DynLayout, GroupedLayout, LayoutMap, MAX_RANK, is_injective_by_enumeration};
-use crate::{Error, Result, Slice};
+use crate::layout::{GroupedLayout, LayoutBuilder, LayoutMap, is_injective_by_enumeration};
+use crate::{Error, Result};
 
 mod coalesce;
 mod complement;
@@ -52,159 +52,6 @@ pub const FLAT: u8 = 3;
 pub const BLOCKED: u8 = 4;
 /// `KIND` for CuTe `raked_product`: mode `m` is `(rest_m, block_m)`.
 pub const RAKED: u8 = 5;
-
-/// Fixed-capacity leaf buffer for assembling flat layout results in CuTe algebra.
-#[derive(Clone, Copy)]
-struct Leaves {
-    shape: [isize; MAX_RANK],
-    stride: [isize; MAX_RANK],
-    len: usize,
-}
-
-impl Leaves {
-    const fn new() -> Self {
-        Self {
-            shape: [0; MAX_RANK],
-            stride: [0; MAX_RANK],
-            len: 0,
-        }
-    }
-
-    /// Pushes a new leaf shape and stride into the buffer.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::CapacityExceeded`] if `self.len == MAX_RANK`.
-    fn push(&mut self, s: isize, d: isize) -> Result<()> {
-        if self.len == MAX_RANK {
-            return Err(Error::CapacityExceeded);
-        }
-        self.shape[self.len] = s;
-        self.stride[self.len] = d;
-        self.len += 1;
-        Ok(())
-    }
-
-    /// Constructs a [`DynLayout`] from the accumulated leaves.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the accumulated shapes and strides form an invalid layout.
-    fn layout(&self) -> Result<DynLayout> {
-        DynLayout::new(&self.shape[..self.len], &self.stride[..self.len])
-    }
-}
-
-/// Leaf buffer with top-level grouping for assembling per-mode results of tuple-tiler partitioning and division.
-#[derive(Clone, Copy)]
-pub(crate) struct Modes {
-    leaves: Leaves,
-    groups: [usize; MAX_RANK],
-    pub(crate) rank: usize,
-}
-
-impl Modes {
-    pub(crate) const fn new() -> Self {
-        Self {
-            leaves: Leaves::new(),
-            groups: [0; MAX_RANK],
-            rank: 0,
-        }
-    }
-
-    /// Appends a mode layout into the buffer.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::CapacityExceeded`] if appending would exceed [`MAX_RANK`] modes or leaves.
-    pub(crate) fn push(&mut self, mode: &DynLayout) -> Result<()> {
-        if self.rank == MAX_RANK || self.leaves.len + mode.rank() > MAX_RANK {
-            return Err(Error::CapacityExceeded);
-        }
-        for (&s, &d) in mode.shapes().iter().zip(mode.strides()) {
-            self.leaves.push(s, d)?;
-        }
-        self.groups[self.rank] = mode.rank();
-        self.rank += 1;
-        Ok(())
-    }
-
-    /// Retrieves the `m`-th mode as a [`DynLayout`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::AxisOutOfBounds`] if `m >= self.rank`.
-    pub(crate) fn mode(&self, m: usize) -> Result<DynLayout> {
-        if m >= self.rank {
-            return Err(Error::AxisOutOfBounds);
-        }
-        let start = self.groups[..m].iter().sum::<usize>();
-        let end = start + self.groups[m];
-        DynLayout::new(
-            &self.leaves.shape[start..end],
-            &self.leaves.stride[start..end],
-        )
-    }
-
-    /// Merges modes within `range` into a single flat mode (e.g. for zipped/tiled tile or rest groups).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::AxisOutOfBounds`] if `range.start > range.end` or `range.end > self.rank`.
-    pub(crate) fn merged(&self, range: core::ops::Range<usize>) -> Result<DynLayout> {
-        if range.start > range.end || range.end > self.rank {
-            return Err(Error::AxisOutOfBounds);
-        }
-        let start = self.groups[..range.start].iter().sum::<usize>();
-        let end = start + self.groups[range].iter().sum::<usize>();
-        DynLayout::new(
-            &self.leaves.shape[start..end],
-            &self.leaves.stride[start..end],
-        )
-    }
-
-    /// Builds a [`GroupedLayout`] from the accumulated modes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if constructing the layout or grouped layout fails.
-    pub(crate) fn layout(&self) -> Result<GroupedLayout> {
-        GroupedLayout::new(self.leaves.layout()?, &self.groups[..self.rank])
-    }
-}
-
-/// Slices `modes` by `coord`: modes selected by [`Slice::Index`] contribute to the address offset
-/// and are removed, while [`Slice::All`] and omitted trailing modes are retained.
-///
-/// If an error occurs while appending modes to `out`, `out` may be partially updated without rollback.
-/// Callers should discard `out` if an error is returned.
-///
-/// # Errors
-///
-/// - Returns [`Error::StructureMismatch`] if `coord.len() > modes.rank`.
-/// - Returns [`Error::CoordinateOutOfBounds`] if a coordinate index is negative or out of bounds for its mode.
-/// - Returns [`Error::Overflow`] if accumulating the offset overflows.
-/// - Returns [`Error::CapacityExceeded`] if appending to `out` exceeds capacity limits.
-#[allow(dead_code)]
-pub(crate) fn slice_modes(modes: &Modes, coord: &[Slice], out: &mut Modes) -> Result<isize> {
-    if coord.len() > modes.rank {
-        return Err(Error::StructureMismatch);
-    }
-    let mut offset = 0;
-    for m in 0..modes.rank {
-        let mode = modes.mode(m)?;
-        match coord.get(m) {
-            Some(Slice::Index(c)) => {
-                if *c < 0 || *c >= mode.size()? {
-                    return Err(Error::CoordinateOutOfBounds);
-                }
-                offset = add(offset, mode.index(*c)?)?;
-            }
-            Some(Slice::All) | None => out.push(&mode)?,
-        }
-    }
-    Ok(offset)
-}
 
 /// Coordinate hierarchy selected by the divide/product variants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -359,34 +206,7 @@ impl<T: LayoutMap, R: LayoutMap> LayoutMap for TileRest<T, R> {
         let (Some(tile), Some(rest)) = (self.tile.as_affine()?, self.rest.as_affine()?) else {
             return Ok(None);
         };
-        let mut leaves = Leaves::new();
-        for layout in [&tile, &rest] {
-            for (&s, &d) in layout.shapes().iter().zip(layout.strides()) {
-                leaves.push(s, d)?;
-            }
-        }
-        let mut groups = [0usize; MAX_RANK];
-        let mut rank = 0;
-        let mut put = |n: usize| -> Result<()> {
-            *groups.get_mut(rank).ok_or(Error::CapacityExceeded)? = n;
-            rank += 1;
-            Ok(())
-        };
-        match self.grouping {
-            Grouping::Logical | Grouping::Zipped => {
-                put(tile.shapes().len())?;
-                put(rest.shapes().len())?;
-            }
-            Grouping::Tiled => {
-                put(tile.shapes().len())?;
-                rest.groups().try_for_each(&mut put)?;
-            }
-            Grouping::Flat => {
-                tile.groups().try_for_each(&mut put)?;
-                rest.groups().try_for_each(&mut put)?;
-            }
-        }
-        GroupedLayout::new(leaves.layout()?, &groups[..rank]).map(Some)
+        group_tile_rest(&tile, &rest, self.grouping).map(Some)
     }
 
     fn is_injective(&self) -> Result<bool> {
@@ -398,191 +218,53 @@ impl<T: LayoutMap, R: LayoutMap> LayoutMap for TileRest<T, R> {
     }
 }
 
+/// Groups per-mode tile and rest results: logical pairs `(tile_m, rest_m)` in each mode,
+/// zipped/tiled/flat follow CuTe's `tile_unzip` and slicing; rest modes without a tile are kept.
 pub(crate) fn group_modes(
-    tiles: &Modes,
-    rests: &Modes,
+    tiles: &GroupedLayout,
+    rests: &GroupedLayout,
     grouping: Grouping,
 ) -> Result<GroupedLayout> {
-    let mut out = Modes::new();
+    let mut out = LayoutBuilder::new();
     match grouping {
         Grouping::Logical => {
-            for m in 0..rests.rank {
-                if m < tiles.rank {
-                    let mut both = Modes::new();
-                    both.push(&tiles.mode(m)?)?;
-                    both.push(&rests.mode(m)?)?;
-                    out.push(&both.merged(0..2)?)?;
-                } else {
-                    out.push(&rests.mode(m)?)?;
+            for m in 0..rests.rank() {
+                if m < tiles.rank() {
+                    out.push_leaves(&tiles.mode(m)?)?;
                 }
+                out.push_leaves(&rests.mode(m)?)?;
+                out.close_mode()?;
             }
         }
-        Grouping::Zipped | Grouping::Tiled => {
-            out.push(&tiles.merged(0..tiles.rank)?)?;
-            if grouping == Grouping::Zipped {
-                out.push(&rests.merged(0..rests.rank)?)?;
-            } else {
-                for m in 0..rests.rank {
-                    out.push(&rests.mode(m)?)?;
-                }
+        Grouping::Zipped => {
+            for part in [tiles, rests] {
+                out.push_leaves(part.flat())?;
+                out.close_mode()?;
             }
+        }
+        Grouping::Tiled => {
+            out.push_leaves(tiles.flat())?;
+            out.close_mode()?;
+            out.push_modes(rests)?;
         }
         Grouping::Flat => {
-            for modes in [tiles, rests] {
-                for m in 0..modes.rank {
-                    out.push(&modes.mode(m)?)?;
-                }
-            }
+            out.push_modes(tiles)?;
+            out.push_modes(rests)?;
         }
     }
-    out.layout()
+    out.finish()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn leaves_buffer_builds_flat_layouts_and_enforces_max_rank() {
-        let mut leaves = Leaves::new();
-        let empty = leaves.layout().unwrap();
-        assert_eq!(empty.rank(), 0);
-        assert_eq!(empty.size(), Ok(1));
-
-        for i in 0..MAX_RANK {
-            assert_eq!(leaves.push(2, (i == 0) as isize), Ok(()));
-        }
-        assert_eq!(leaves.push(2, 0), Err(Error::CapacityExceeded));
-        let full = leaves.layout().unwrap();
-        assert_eq!(full.rank(), MAX_RANK);
-        assert_eq!(full.shapes(), &[2; MAX_RANK]);
-    }
-
-    #[test]
-    fn modes_buffer_preserves_mode_spans_and_merges_ranges() {
-        let mut modes = Modes::new();
-        let scalar = DynLayout::new(&[], &[]).unwrap();
-        let nested = DynLayout::new(&[2, 3], &[1, 10]).unwrap();
-        let tail = DynLayout::new(&[4], &[60]).unwrap();
-        modes.push(&scalar).unwrap();
-        modes.push(&nested).unwrap();
-        modes.push(&tail).unwrap();
-        assert_eq!(modes.rank, 3);
-        assert_eq!(modes.mode(0), Ok(scalar));
-        assert_eq!(modes.mode(1), Ok(nested));
-        assert_eq!(modes.mode(2), Ok(tail));
-        assert_eq!(modes.mode(3), Err(Error::AxisOutOfBounds));
-        assert_eq!(modes.merged(0..0), Ok(scalar));
-        assert_eq!(modes.merged(1..1), Ok(scalar));
-        assert_eq!(modes.merged(3..3), Ok(scalar));
-        assert_eq!(modes.merged(1..3), DynLayout::new(&[2, 3, 4], &[1, 10, 60]));
-        let reversed = core::ops::Range { start: 2, end: 1 };
-        assert_eq!(modes.merged(reversed), Err(Error::AxisOutOfBounds));
-        assert_eq!(modes.merged(0..4), Err(Error::AxisOutOfBounds));
-
-        let grouped = modes.layout().unwrap();
-        assert_eq!(grouped.rank(), 3);
-        assert_eq!(grouped.extent(0), Ok(1));
-        assert_eq!(grouped.extent(1), Ok(6));
-        assert_eq!(grouped.extent(2), Ok(4));
-
-        // Leaf capacity overflow must not partially mutate `Modes`.
-        let mut partial = Modes::new();
-        let leaves_30 = DynLayout::new(&[1; 30], &[0; 30]).unwrap();
-        partial.push(&leaves_30).unwrap();
-        assert_eq!(
-            partial.push(&DynLayout::new(&[1; 3], &[0; 3]).unwrap()),
-            Err(Error::CapacityExceeded)
-        );
-        assert_eq!(partial.rank, 1);
-        assert_eq!(partial.leaves.len, 30);
-
-        // Zero-leaf scalar modes exercise the mode-count guard independently of leaf capacity.
-        let mut max_modes = Modes::new();
-        for _ in 0..MAX_RANK {
-            assert_eq!(max_modes.push(&scalar), Ok(()));
-        }
-        assert_eq!(max_modes.push(&scalar), Err(Error::CapacityExceeded));
-    }
-
-    #[test]
-    fn slice_modes_accumulates_offsets_retains_unindexed_modes_and_checks_bounds() {
-        let mut modes = Modes::new();
-        modes
-            .push(&DynLayout::new(&[2, 2], &[1, 6]).unwrap())
-            .unwrap();
-        modes.push(&DynLayout::new(&[3], &[2]).unwrap()).unwrap();
-        modes.push(&DynLayout::new(&[2], &[24]).unwrap()).unwrap();
-        let full = modes.layout().unwrap();
-
-        // Mode 0 is fixed at linear coordinate 3 (1 + 6 = 7), mode 1 uses Slice::All,
-        // and mode 2 is retained via an omitted trailing selector.
-        let mut sliced = Modes::new();
-        let offset = slice_modes(&modes, &[Slice::Index(3), Slice::All], &mut sliced).unwrap();
-        assert_eq!(offset, 7);
-        let sub = sliced.layout().unwrap();
-        assert_eq!(sub.rank(), 2);
-        assert_eq!(sub.shapes(), &[3, 2]);
-        assert_eq!(sub.strides(), &[2, 24]);
-        for c2 in 0..2 {
-            for c1 in 0..3 {
-                assert_eq!(
-                    offset + sub.index_of_coord(&[c1, c2]).unwrap(),
-                    full.index_of_coord(&[3, c1, c2]).unwrap()
-                );
-            }
-        }
-
-        // Fixing every mode yields a rank-0 scalar and the exact point address.
-        let mut point = Modes::new();
-        let point_offset = slice_modes(
-            &modes,
-            &[Slice::Index(2), Slice::Index(1), Slice::Index(1)],
-            &mut point,
-        )
-        .unwrap();
-        assert_eq!(point_offset, full.index_of_coord(&[2, 1, 1]).unwrap());
-        assert_eq!(point.rank, 0);
-        assert_eq!(point.layout().unwrap().size(), Ok(1));
-
-        // Validate selector length, coordinate bounds (including empty modes), and overflow.
-        let mut err_out = Modes::new();
-        assert_eq!(
-            slice_modes(&modes, &[Slice::All; 4], &mut err_out),
-            Err(Error::StructureMismatch)
-        );
-        assert_eq!(
-            slice_modes(&modes, &[Slice::Index(-1)], &mut err_out),
-            Err(Error::CoordinateOutOfBounds)
-        );
-        assert_eq!(
-            slice_modes(&modes, &[Slice::Index(4)], &mut err_out),
-            Err(Error::CoordinateOutOfBounds)
-        );
-
-        let mut with_empty = Modes::new();
-        with_empty
-            .push(&DynLayout::new(&[0], &[1]).unwrap())
-            .unwrap();
-        assert_eq!(
-            slice_modes(&with_empty, &[Slice::Index(0)], &mut err_out),
-            Err(Error::CoordinateOutOfBounds)
-        );
-
-        let mut overflowing = Modes::new();
-        overflowing
-            .push(&DynLayout::new(&[2], &[isize::MAX]).unwrap())
-            .unwrap();
-        overflowing
-            .push(&DynLayout::new(&[2], &[1]).unwrap())
-            .unwrap();
-        assert_eq!(
-            slice_modes(
-                &overflowing,
-                &[Slice::Index(1), Slice::Index(1)],
-                &mut err_out
-            ),
-            Err(Error::Overflow)
-        );
-    }
+/// Groups a single layout tiler's `(tile, rest)`; for one layout tiler CuTe's `tile_unzip`
+/// is the identity, so logical matches zipped.
+pub(crate) fn group_tile_rest(
+    tile: &GroupedLayout,
+    rest: &GroupedLayout,
+    grouping: Grouping,
+) -> Result<GroupedLayout> {
+    let grouping = match grouping {
+        Grouping::Logical => Grouping::Zipped,
+        other => other,
+    };
+    group_modes(tile, rest, grouping)
 }

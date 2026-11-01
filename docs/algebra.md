@@ -362,7 +362,7 @@ assert_eq!(c.index(2)?,1);
 # Ok::<(), noodle_cute::Error>(())
 ```
 
-类型化方法检查两侧输入 shape 与结果的大小、地址范围，不经过 `Leaves` 或 `DynLayout`，不受 `MAX_RANK` 限制。It shares the signed `d < cs` stride condition and negative-stride support with the runtime normalization.
+类型化方法检查两侧输入 shape 与结果的大小、地址范围，不经过 `LayoutBuilder` 或 `DynLayout`，不受 `MAX_RANK` 限制。It shares the signed `d < cs` stride condition and negative-stride support with the runtime normalization.
 
 与上游的受检差异：CuTe 对动态参数省略的整除断言，在类型化 Rust 方法中仍执行检查并返回 `NotDivisible`；无法执行的除零返回 `InvalidShape`，动态绝对值或乘积溢出返回 `Overflow`。因此动态 stride 为 0 可在单模式 LHS 上直接缩放，但多模式中需要计算 `ceil(cs/abs(d))` 时返回错误；静态 stride-0 则直接广播。静态输入出现同样的非法运算会在编译期拒绝。空 RHS 保留空 tuple，空 LHS 按本库的 `1:0` 约定扩展。
 
@@ -423,7 +423,7 @@ order[..flat.rank()].sort_unstable_by_key(|&a| (flat.strides()[a], a));
 ### 10. `complement_prefix` 逐步拆解
 
 ```rust
-fn complement_prefix<L: AffineLayoutMap>(layout: &L) -> Result<Option<(Leaves, isize)>>
+fn complement_prefix<L: AffineLayoutMap>(layout: &L) -> Result<Option<(LayoutBuilder, isize)>>
 ```
 
 这是 `complement_shape` 与 `complement_extended` 共享的前半段，返回 `(前缀叶子, 下一条步长)`。
@@ -478,7 +478,7 @@ for (a, slot) in order.iter_mut().enumerate().take(flat.rank()) {
 #### 10.5 主循环：逐个补空隙
 
 ```rust
-let mut prefix = Leaves::new();
+let mut prefix = LayoutBuilder::new();
 let mut current = 1;
 for &a in &order[..flat.rank()] {
     let (s, d) = (flat.shape(a)?, flat.stride(a)?);
@@ -498,7 +498,7 @@ for &a in &order[..flat.rank()] {
 | `gap == 1` | `d == current`，严丝合缝，**没有空隙** | 跳过，不占叶子容量 |
 | `gap > 1` | 存在空隙，长度 `gap`、间距 `current` | `push(gap, current)` |
 
-`gap > 1` 才 push 不只是省事：`Leaves` 是定长 `MAX_RANK` 缓冲区，省下的每个槽位都能降低触碰 `CapacityExceeded` 的风险；而且长度为 1 的叶子最终也会被 `coalesce` 去掉。
+`gap > 1` 才 push 不只是省事：`LayoutBuilder` 是定长 `MAX_RANK` 缓冲区，省下的每个槽位都能降低触碰 `CapacityExceeded` 的风险；而且长度为 1 的叶子最终也会被 `coalesce` 去掉。
 
 **floor 除法是刻意的**：当 `d` 不被 `current` 整除时，算法选择向下取整而非报错，代价是结果可能与原布局在空洞处重叠。这是为了对齐 CuTe 的行为，不是缺陷，详见 [14.1](#141-算法不保证什么)。
 
@@ -605,19 +605,22 @@ complement_extended(4:2) = (2,1):(1,8)
 
 `prefix.size() == 1` 的短路分支处理"没有任何内部空隙"的情况，直接返回 `1:current`。
 
-### 13. `Leaves`：定长叶子缓冲区
+### 13. `LayoutBuilder`: fixed-capacity result buffer
 
-定义在 [`src/algebra.rs`](../src/algebra.rs)，由 `complement`、`composition`、`inverse` 共用。
+Defined in [`src/layout/dynamic_layout.rs`](../src/layout/dynamic_layout.rs) and shared by every runtime algebra operation.
 
 ```rust
-struct Leaves {
+pub(crate) struct LayoutBuilder {
     shape: [isize; MAX_RANK],
     stride: [isize; MAX_RANK],
-    len: usize,
+    leaves: usize,
+    groups: [usize; MAX_RANK],
+    modes: usize,
+    closed: usize,
 }
 ```
 
-这是个定长、栈上、`Copy` 的叶子收集器，溢出时返回 `Err(CapacityExceeded)` 而不是 panic。整个 crate 走 no-alloc 路线，不能用 `Vec`，这也解释了 [10.5](#105-主循环逐个补空隙) 与 [11.3](#113-收尾与特例) 两处主动跳过长度为 1 的叶子的做法。
+It is a fixed-size, stack-allocated, `Copy` collector that returns `Err(CapacityExceeded)` on overflow instead of panicking. `push` / `push_leaves` append leaves to the open mode, `close_mode` ends it (so leaves pushed before one `close_mode` form one mode), and `push_modes` copies every top-level mode of a `GroupedLayout`. `finish_flat` validates the leaves as a `DynLayout`, and `finish` groups them into a `GroupedLayout`. The crate avoids allocation, so it cannot use `Vec`; this is also why [10.5](#105-主循环逐个补空隙) and [11.3](#113-收尾与特例) skip unit-length leaves.
 
 ### 14. 错误与边界
 
@@ -1168,7 +1171,7 @@ CuTe 的 tiler 还可以是一个 tuple：第 m 项只负责分 `L` 的第 m 个
         rest_m = mode_m ∘ rest
 ```
 
-结果放在两个 `Modes` 缓冲区里。`Modes` 是在第 13 节的 `Leaves` 上多记一个"每个模式有几个叶子"的数组：`push` 追加一个模式，`mode(m)` 取出第 m 个模式，`merged(range)` 把一段模式合并成一个顶层模式。
+The results are collected in two `LayoutBuilder`s (section 13), one closed mode per input mode, and finished into two `GroupedLayout`s. `group_modes` then pairs or concatenates their modes for the requested grouping.
 
 然后四个函数只是用不同方式拼装 `tiles` 和 `rests`：
 
@@ -1230,7 +1233,7 @@ CuTe 的 `logical_divide` 在 tuple tiler 下返回深度为 2 的嵌套布局 `
 | `L` 非仿射且 tile 不整除 `size(L)` | `Err(CoordinateOutOfBounds)` | `composition` 值域检查 |
 | `_modes`：tiler 比 rank 长 | `Err(StructureMismatch)` | `divide_modes` |
 | `_modes`：某模式的组合不满足整除条件 | `Err(NotDivisible)` | `composition_layout` |
-| 叶子或模式数超 `MAX_RANK` | `Err(CapacityExceeded)` | `Leaves` / `Modes` |
+| 叶子或模式数超 `MAX_RANK` | `Err(CapacityExceeded)` | `LayoutBuilder` |
 | `L` 为空（如 `0:1`） | 结果 size 为 0 | |
 
 CuTe 在这些地方大多是静态断言或未定义行为。本项目统一改为返回 `Result`。
@@ -1522,7 +1525,7 @@ CuTe 的 `make_tiled_copy` 用 `raked_product(thr, val)` 描述"一个线程块�
 | A non-affine tiler produces negative values | `Err(CoordinateOutOfBounds)` | pointwise `composition` fallback |
 | `size(block) · size(tiler)` 溢出 | `Err(Overflow)` | `product` 末尾的 `result.size()?` |
 | blocked/raked：某模式组合不整除（如 `blocked_product(4:2, 2:3)`） | `Err(NotDivisible)` | `composition_layout` |
-| 叶子超过 `MAX_RANK`（如两个 rank 17 的布局） | `Err(CapacityExceeded)` | `Leaves` |
+| 叶子超过 `MAX_RANK`（如两个 rank 17 的布局） | `Err(CapacityExceeded)` | `LayoutBuilder` |
 
 `blocked_product(4:2, 2:3)` 失败的原因：补布局 `(2,1):(1,8)` 的第 0 模式大小为 2，tiler 步长 3 大于 2 却不是 2 的倍数，触发 [第 3.2 节](#32-compose_leaf) 的 stride 整除条件；CuTe 在这里是整除断言失败。
 

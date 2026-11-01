@@ -190,6 +190,21 @@ pub(crate) fn mul(a: isize, b: isize) -> Result<isize> {
     a.checked_mul(b).ok_or(Error::Overflow)
 }
 
+/// Multiplies values with checked arithmetic; the empty product is one.
+///
+/// Any zero value makes the result zero before a multiplication can overflow.
+pub(crate) fn checked_product<I>(mut values: I) -> Result<isize>
+where
+    I: Iterator<Item = Result<isize>> + Clone,
+{
+    for value in values.clone() {
+        if value? == 0 {
+            return Ok(0);
+        }
+    }
+    values.try_fold(1, |acc, value| mul(acc, value?))
+}
+
 /// Computes ceiling division without forming the potentially overflowing `a + b - 1`.
 /// The caller must ensure `a >= 0` and `b > 0`.
 pub(crate) const fn ceil_div(a: isize, b: isize) -> isize {

@@ -22,7 +22,7 @@ use core::fmt::Debug;
 use core::marker::PhantomData;
 use core::ops::Mul;
 
-use crate::int::{Int, Integer, mul};
+use crate::int::{Int, Integer, checked_product};
 use crate::{Bool, Error, Result};
 
 /// An empty tuple and the terminator of an [`IntTuple`] chain.
@@ -72,17 +72,7 @@ pub trait Item: Clone + Debug {
     /// Any zero leaf makes the result zero. Otherwise, an overflowing
     /// multiplication returns [`Error::Overflow`].
     fn product(&self) -> Result<isize> {
-        for i in 0..Self::LEAVES {
-            // Scan for zero before multiplying so a zero product cannot overflow.
-            if self.leaf(i)? == 0 {
-                return Ok(0);
-            }
-        }
-        let mut result = 1;
-        for i in 0..Self::LEAVES {
-            result = mul(result, self.leaf(i)?)?;
-        }
-        Ok(result)
+        checked_product((0..Self::LEAVES).map(|i| self.leaf(i)))
     }
 
     /// Returns [`Item::RANK`].
@@ -147,27 +137,18 @@ impl<I: Integer + Debug> Item for I {
 }
 
 /// A tuple chain, either [`Nil`] or an [`IntTuple`] with a tuple tail.
-pub trait Tuple: Item {
-    /// Number of heads in the chain, equal to the tuple's top-level rank.
-    const LEN: usize;
-    /// Greatest depth among the heads, or zero for [`Nil`].
-    ///
-    /// This excludes the chain's own tuple level and its terminating [`Nil`].
-    const MAX_DEPTH: usize;
-}
+pub trait Tuple: Item {}
 
-impl Tuple for Nil {
-    const LEN: usize = 0;
-    const MAX_DEPTH: usize = 0;
-}
+impl Tuple for Nil {}
 
 impl<H: Item, T: Tuple> Item for IntTuple<H, T> {
     type Profile = TupleProfile<H::Profile, T::Profile>;
-    const RANK: usize = 1 + T::LEN;
-    const DEPTH: usize = 1 + if H::DEPTH > T::MAX_DEPTH {
+    const RANK: usize = 1 + T::RANK;
+    // A tail's depth counts its own tuple level, which this tuple already adds.
+    const DEPTH: usize = 1 + if H::DEPTH > T::DEPTH - 1 {
         H::DEPTH
     } else {
-        T::MAX_DEPTH
+        T::DEPTH - 1
     };
     const LEAVES: usize = H::LEAVES + T::LEAVES;
 
@@ -197,10 +178,7 @@ impl<H: Item, T: Tuple> Item for IntTuple<H, T> {
     }
 }
 
-impl<H: Item, T: Tuple> Tuple for IntTuple<H, T> {
-    const LEN: usize = <Self as Item>::RANK;
-    const MAX_DEPTH: usize = <Self as Item>::DEPTH - 1;
-}
+impl<H: Item, T: Tuple> Tuple for IntTuple<H, T> {}
 
 // Compile-time mode access.
 

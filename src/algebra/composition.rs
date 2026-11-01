@@ -6,21 +6,20 @@
 
 use crate::int::{Integer, ceil_div, mul};
 use crate::layout::{
-    AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutMap, LayoutParts, MAX_RANK, Shape,
-    affine_injective, is_injective_by_enumeration,
+    AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutBuilder, LayoutMap, LayoutParts,
+    Shape, address_range_by_scan, affine_injective, is_injective_by_enumeration,
 };
 use crate::tuple::Unwrap;
 use crate::tuple::{Append, Flatten, Item};
 use crate::{Bool, DynInt, Error, Int, IntTuple, Nil, Result};
 
-use super::Leaves;
 use super::coalesce::CoalesceFold;
 
 // CuTe `composition_impl` for one integral rhs mode `s:d` against a coalesced lhs.
 // When the rhs crosses an lhs mode boundary with a stride that does not divide the lhs mode extent
 // (CuTe's weak divisibility condition), CuTe restarts at the new mode rather than wrapping around,
 // so the result may differ from pointwise evaluation `lhs_ext(s:d (i))`.
-fn compose_leaf(lhs: &DynLayout, s: isize, d: isize, out: &mut Leaves) -> Result<()> {
+fn compose_leaf(lhs: &DynLayout, s: isize, d: isize, out: &mut LayoutBuilder) -> Result<()> {
     let r = lhs.rank();
     let (shape, stride) = (lhs.shapes(), lhs.strides());
     // A stride-0 rhs does not read lhs; an integral lhs directly scales the stride (the extended domain extends naturally here).
@@ -30,7 +29,7 @@ fn compose_leaf(lhs: &DynLayout, s: isize, d: isize, out: &mut Leaves) -> Result
     if r == 1 {
         return out.push(s, mul(d, stride[0])?);
     }
-    let start = out.len;
+    let start = out.leaf_count();
     let (mut rest_shape, mut rest_stride) = (s, d);
     for i in 0..r - 1 {
         let (cs, cd) = (shape[i], stride[i]);
@@ -41,7 +40,7 @@ fn compose_leaf(lhs: &DynLayout, s: isize, d: isize, out: &mut Leaves) -> Result
         rest_shape = step.rest;
         rest_stride = step.stride;
     }
-    if out.len == start || rest_shape != 1 {
+    if out.leaf_count() == start || rest_shape != 1 {
         out.push(rest_shape, mul(rest_stride, stride[r - 1])?)?;
     }
     Ok(())
@@ -52,22 +51,20 @@ fn compose_leaf(lhs: &DynLayout, s: isize, d: isize, out: &mut Leaves) -> Result
 // the extended domain and must not be discarded.
 fn compose_grouped(outer: &DynLayout, rhs: &GroupedLayout) -> Result<GroupedLayout> {
     let lhs = outer.coalesce_extended()?;
-    let mut out = Leaves::new();
+    let mut out = LayoutBuilder::new();
     if rhs.is_integral() {
         compose_leaf(&lhs, rhs.shape(0)?, rhs.stride(0)?, &mut out)?;
-        return GroupedLayout::from_flat(out.layout()?);
+        return GroupedLayout::from_flat(out.finish_flat()?);
     }
-    let mut groups = [0usize; MAX_RANK];
     let mut leaf = 0;
-    for (axis, count) in rhs.groups().enumerate() {
-        let start = out.len;
+    for count in rhs.groups() {
         for _ in 0..count {
             compose_leaf(&lhs, rhs.shape(leaf)?, rhs.stride(leaf)?, &mut out)?;
             leaf += 1;
         }
-        groups[axis] = out.len - start;
+        out.close_mode()?;
     }
-    GroupedLayout::new(out.layout()?, &groups[..rhs.rank()])
+    out.finish()
 }
 
 /// Lazily evaluated layout composition `composition(A, B)(c) = A(B(c))`.
@@ -112,7 +109,7 @@ fn compose_grouped(outer: &DynLayout, rhs: &GroupedLayout) -> Result<GroupedLayo
 /// # Errors
 ///
 /// - Returns [`Error::CoordinateOutOfBounds`] if the pointwise fallback sees negative `inner` addresses or `outer` rejects extended coordinates.
-/// - Returns [`Error::CapacityExceeded`] if the normalized layout exceeds [`MAX_RANK`] leaves or groups.
+/// - Returns [`Error::CapacityExceeded`] if the normalized layout exceeds [`MAX_RANK`](crate::layout::MAX_RANK) leaves or groups.
 /// - Returns other layout errors if computing address ranges or normalized layouts fails.
 pub fn composition<A: LayoutMap, B: LayoutMap>(outer: A, inner: B) -> Result<Composition<A, B>> {
     let normalized = match (outer.as_affine()?, inner.as_affine()?) {
@@ -169,7 +166,7 @@ pub fn composition<A: LayoutMap, B: LayoutMap>(outer: A, inner: B) -> Result<Com
 ///
 /// - Returns [`Error::NotDivisible`] if stride or shape divisibility conditions fail.
 /// - Returns [`Error::InvalidShape`] if any non-positive extent is encountered.
-/// - Returns [`Error::CapacityExceeded`] if leaf or group counts exceed [`MAX_RANK`].
+/// - Returns [`Error::CapacityExceeded`] if leaf or group counts exceed [`MAX_RANK`](crate::layout::MAX_RANK).
 /// - Returns [`Error::Overflow`] if stride arithmetic overflows.
 pub fn composition_layout<A: AffineLayoutMap, B: AffineLayoutMap>(
     outer: &A,
@@ -261,18 +258,7 @@ impl<A: LayoutMap, B: LayoutMap> LayoutMap for Composition<A, B> {
         if let Some(layout) = &self.normalized {
             return layout.address_range();
         }
-        let n = self.size()?;
-        if n <= 0 {
-            return Ok(None);
-        }
-        let first = self.index(0)?;
-        let (mut min, mut max) = (first, first);
-        for i in 1..n {
-            let a = self.index(i)?;
-            min = min.min(a);
-            max = max.max(a);
-        }
-        Ok(Some((min, max)))
+        address_range_by_scan(self)
     }
 
     fn is_injective(&self) -> Result<bool> {

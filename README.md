@@ -83,7 +83,7 @@ Use `int_tuple!` to construct these structures. Commas separate top-level modes,
 | Interface | Purpose |
 | --- | --- |
 | `Item` | A shared interface for integer leaves and tuples, providing structural metadata, leaf queries, and a checked product |
-| `Tuple` | A tuple-chain interface providing the top-level length `LEN` and the greatest head depth `MAX_DEPTH` |
+| `Tuple` | A marker for tuple chains (`Nil` or an `IntTuple` with a tuple tail), used to keep integer leaves out of the tail position |
 | `Get<INDEX>` / `.get::<INDEX>()` | Borrows a top-level mode by a compile-time index, preserving its concrete type and nesting; invalid indices fail to compile |
 | `Append<R>` / `.append(rhs)` | Replaces the tuple chain's terminating `Nil` with `rhs`; passing another tuple concatenates the chains |
 | `Flatten` / `.flatten()` | Flattens the structure in head-first, depth-first order, preserving leaf order and types; a bare integer becomes a one-element tuple (CuTe `flatten_to_tuple`, not `flatten`) |
@@ -96,7 +96,7 @@ Use `int_tuple!` to construct these structures. Commas separate top-level modes,
 - `LEAVES` is the total number of integer leaves across all levels.
 - `Profile` describes the nested structure using `NilProfile`, `LeafProfile`, and `TupleProfile`, independently of leaf values or integer types.
 
-A bare integer has rank `1`, depth `0`, and one leaf. `Nil` has rank `0`, depth `1`, and no leaves. A nonempty flat tuple has depth `1`. `Tuple::MAX_DEPTH` excludes the current tuple level and the terminating `Nil`; it is `0` for an empty chain.
+A bare integer has rank `1`, depth `0`, and one leaf. `Nil` has rank `0`, depth `1`, and no leaves. A nonempty flat tuple has depth `1`.
 
 Queries use zero-based indices. `leaf(index)` reads a leaf in flattened order, `leaf_static(index)` queries its static value, and `mode_span(axis)` returns a top-level mode's `(start, leaf_count)` in the flattened sequence. Out-of-range indices return `Error::AxisOutOfBounds`.
 

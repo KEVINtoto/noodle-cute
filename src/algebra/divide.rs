@@ -32,12 +32,12 @@
 //! const C: TypedDivided<Layout<DynInt, Int<1>>, Int<2>> = StaticValue::VALUE;
 //! ```
 
-use crate::layout::{AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutMap};
+use crate::layout::{AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutBuilder, LayoutMap};
 use crate::{Error, Result};
 
 use super::complement::{complement, complement_shape};
 use super::composition::{Composition, composition, composition_layout};
-use super::{Grouping, Modes, TileRest};
+use super::{Grouping, TileRest};
 
 /// Composed layout dividing an original layout via a tile and its complement layout.
 pub type Divided<A, B> = Composition<A, TileRest<B, DynLayout>>;
@@ -62,24 +62,11 @@ fn divide<A: LayoutMap, B: AffineLayoutMap>(
         && let Some(affine) = divided.outer().as_affine()?
     {
         let inner = divided.inner();
-        let tiles = top_modes(&composition_layout(&affine, inner.tile())?)?;
-        let rests = top_modes(&composition_layout(&affine, inner.rest())?)?;
-        // A layout tiler's tile_unzip is the identity, so logical matches zipped.
-        let grouping = match grouping {
-            Grouping::Logical => Grouping::Zipped,
-            other => other,
-        };
-        divided.normalized = Some(super::group_modes(&tiles, &rests, grouping)?);
+        let tile = composition_layout(&affine, inner.tile())?;
+        let rest = composition_layout(&affine, inner.rest())?;
+        divided.normalized = Some(super::group_tile_rest(&tile, &rest, grouping)?);
     }
     Ok(divided)
-}
-
-fn top_modes(layout: &GroupedLayout) -> Result<Modes> {
-    let mut modes = Modes::new();
-    for axis in 0..layout.rank() {
-        modes.push(&layout.mode(axis)?)?;
-    }
-    Ok(modes)
 }
 
 /// CuTe `logical_divide(layout, tile)`: divides a layout into two top-level groups `(tile, rest)`.
@@ -191,19 +178,20 @@ pub fn flat_divide<A: LayoutMap, B: AffineLayoutMap>(layout: A, tile: B) -> Resu
 
 // CuTe `logical_divide` for tuple tilers: mode m is divided by tiler[m],
 // returning tile modes and rest modes; rest modes are followed by uncovered trailing modes.
-pub(crate) fn divide_modes<L: AffineLayoutMap>(
+fn divide_modes<L: AffineLayoutMap>(
     layout: &L,
     tiler: &[DynLayout],
-) -> Result<(Modes, Modes)> {
+) -> Result<(GroupedLayout, GroupedLayout)> {
     let layout = layout.as_grouped_layout()?;
     if tiler.len() > layout.rank() {
         return Err(Error::StructureMismatch);
     }
-    let (mut tiles, mut rests) = (Modes::new(), Modes::new());
+    let (mut tiles, mut rests) = (LayoutBuilder::new(), LayoutBuilder::new());
     for m in 0..layout.rank() {
         let mode = layout.mode(m)?;
         let Some(t) = tiler.get(m) else {
-            rests.push(&mode)?;
+            rests.push_leaves(&mode)?;
+            rests.close_mode()?;
             continue;
         };
         if t.size()? <= 0 {
@@ -211,10 +199,12 @@ pub(crate) fn divide_modes<L: AffineLayoutMap>(
         }
         // Same as single-tiler logical_divide: rest is the complement of the tiler relative to the coalesced mode shape.
         let rest = complement_shape(*t, mode.coalesce()?.shapes())?;
-        tiles.push(composition_layout(&mode, t)?.flat())?;
-        rests.push(composition_layout(&mode, &rest)?.flat())?;
+        tiles.push_leaves(composition_layout(&mode, t)?.flat())?;
+        tiles.close_mode()?;
+        rests.push_leaves(composition_layout(&mode, &rest)?.flat())?;
+        rests.close_mode()?;
     }
-    Ok((tiles, rests))
+    Ok((tiles.finish()?, rests.finish()?))
 }
 
 /// CuTe `logical_divide(layout, tiler)` with a per-mode tuple tiler (an integer `n` corresponds to `n:1`).

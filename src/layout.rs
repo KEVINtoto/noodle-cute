@@ -12,7 +12,7 @@
 
 use core::ops::Range;
 
-use crate::int::{DynInt, Int, NON_NEGATIVE, add, mul};
+use crate::int::{DynInt, Int, NON_NEGATIVE, add, checked_product, mul};
 use crate::tuple::{Item, Nil, Tuple};
 use crate::{Bool, Error, IntTuple, Result, True};
 
@@ -119,11 +119,10 @@ pub trait LayoutMap: Clone {
         if coord.len() != self.rank() {
             return Err(Error::StructureMismatch);
         }
-        if coord.len() == self.rank()
-            && coord
-                .iter()
-                .enumerate()
-                .all(|(a, &c)| c >= 0 && self.extent(a).is_ok_and(|e| c < e))
+        if coord
+            .iter()
+            .enumerate()
+            .all(|(a, &c)| c >= 0 && self.extent(a).is_ok_and(|e| c < e))
         {
             return self.index_of_coord(coord);
         }
@@ -142,18 +141,7 @@ pub trait LayoutMap: Clone {
     ///
     /// Default implementation uses linear scanning.
     fn address_range(&self) -> Result<Option<(isize, isize)>> {
-        let size = self.size()?;
-        if size == 0 {
-            return Ok(None);
-        }
-        let mut min = self.index(0)?;
-        let mut max = min;
-        for i in 1..size {
-            let address = self.index(i)?;
-            min = min.min(address);
-            max = max.max(address);
-        }
-        Ok(Some((min, max)))
+        address_range_by_scan(self)
     }
 
     /// Returns the address span `max - min + 1`, including padding holes.
@@ -305,6 +293,22 @@ pub(crate) fn is_injective_by_enumeration<L: LayoutMap>(layout: &L) -> Result<bo
     Ok(true)
 }
 
+/// Computes inclusive address bounds by evaluating every logical index.
+pub(crate) fn address_range_by_scan<L: LayoutMap>(layout: &L) -> Result<Option<(isize, isize)>> {
+    let size = layout.size()?;
+    if size == 0 {
+        return Ok(None);
+    }
+    let mut min = layout.index(0)?;
+    let mut max = min;
+    for i in 1..size {
+        let address = layout.index(i)?;
+        min = min.min(address);
+        max = max.max(address);
+    }
+    Ok(Some((min, max)))
+}
+
 /// Encodes bounded top-level coordinates in left-major logical order.
 ///
 /// Uses extents, not address strides:
@@ -329,30 +333,6 @@ pub(crate) fn coord_to_linear<L: LayoutMap>(layout: &L, coord: &[isize]) -> Resu
         scale = mul(scale, extent)?;
     }
     Ok(index)
-}
-
-#[allow(dead_code)]
-/// Convert one logical linear coordinate to flat top-level coordinates.
-/// The leftmost axis varies fastest; `out` must have length `rank`, and `linear`
-/// must lie in `[0, size)`. Each nested mode produces one top-level linear
-/// coordinate rather than separate coordinates for its leaves.
-pub(crate) fn linear_to_coord<L: LayoutMap>(
-    layout: &L,
-    mut linear: isize,
-    coord: &mut [isize],
-) -> Result<()> {
-    if coord.len() < layout.rank() {
-        return Err(Error::StructureMismatch);
-    }
-    if linear < 0 || linear >= layout.size()? {
-        return Err(Error::CoordinateOutOfBounds);
-    }
-    for (a, c) in coord.iter_mut().enumerate() {
-        let s = layout.extent(a)?;
-        *c = linear % s;
-        linear /= s;
-    }
-    Ok(())
 }
 
 /// CuTe `Layout::get_flat_coord(index)`: computes each leaf coordinate as
@@ -416,22 +396,12 @@ pub fn get_flat_coord<L: AffineLayoutMap>(
 /// Check for zero before multiplying so an empty domain cannot overflow its
 /// logical size. The product of an empty range is one.
 pub(crate) fn checked_size<L: AffineLayoutMap>(layout: &L, leaves: Range<usize>) -> Result<isize> {
-    let mut zero = false;
     for i in leaves.clone() {
-        let s = layout.shape(i)?;
-        if s < 0 {
+        if layout.shape(i)? < 0 {
             return Err(Error::InvalidShape);
         }
-        zero |= s == 0;
     }
-    if zero {
-        return Ok(0);
-    }
-    let mut n = 1;
-    for i in leaves {
-        n = mul(n, layout.shape(i)?)?;
-    }
-    Ok(n)
+    checked_product(leaves.map(|i| layout.shape(i)))
 }
 
 /// Decodes a bounded linear index as left-major mixed-radix leaf coordinates.
@@ -562,6 +532,7 @@ pub(crate) fn affine_injective<L: AffineLayoutMap>(
 mod dynamic_layout;
 mod static_layout;
 
+pub(crate) use dynamic_layout::LayoutBuilder;
 pub use dynamic_layout::{DynLayout, GroupedLayout, MAX_RANK};
 pub(crate) use static_layout::LayoutParts;
 pub use static_layout::{Compact, Layout, LayoutLeft, LayoutRight};

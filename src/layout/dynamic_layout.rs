@@ -136,16 +136,11 @@ impl DynLayout {
         if selectors.len() != self.rank {
             return Err(Error::StructureMismatch);
         }
-        let mut result = Self::scalar();
+        let mut result = LayoutBuilder::new();
         let mut offset = 0;
         for (i, s) in selectors.iter().enumerate() {
             match *s {
-                Slice::All => {
-                    let j = result.rank;
-                    result.rank += 1;
-                    result.shape[j] = self.shape[i];
-                    result.stride[j] = self.stride[i];
-                }
+                Slice::All => result.push(self.shape[i], self.stride[i])?,
                 Slice::Index(c) => {
                     if c < 0 || c >= self.shape[i] {
                         return Err(Error::CoordinateOutOfBounds);
@@ -154,7 +149,7 @@ impl DynLayout {
                 }
             }
         }
-        Ok((result, offset))
+        Ok((result.finish_flat()?, offset))
     }
 
     /// CuTe `filter(layout)`: treats stride-0 leaves as size 1, then coalesces.
@@ -356,5 +351,119 @@ impl AffineLayoutMap for GroupedLayout {
 
     fn as_grouped_layout(&self) -> Result<GroupedLayout> {
         Ok(*self)
+    }
+}
+
+/// Accumulates runtime leaves into top-level modes for algebra results.
+///
+/// `push`/`push_leaves` append leaves to the open mode and `close_mode` ends it, so
+/// consecutive pushes before one `close_mode` merge into a single mode.
+#[derive(Clone, Copy)]
+pub(crate) struct LayoutBuilder {
+    shape: [isize; MAX_RANK],
+    stride: [isize; MAX_RANK],
+    leaves: usize,
+    groups: [usize; MAX_RANK],
+    modes: usize,
+    closed: usize,
+}
+
+impl LayoutBuilder {
+    pub(crate) const fn new() -> Self {
+        Self {
+            shape: [0; MAX_RANK],
+            stride: [0; MAX_RANK],
+            leaves: 0,
+            groups: [0; MAX_RANK],
+            modes: 0,
+            closed: 0,
+        }
+    }
+
+    /// Number of leaves pushed so far.
+    pub(crate) fn leaf_count(&self) -> usize {
+        self.leaves
+    }
+
+    pub(crate) fn push(&mut self, s: isize, d: isize) -> Result<()> {
+        if self.leaves == MAX_RANK {
+            return Err(Error::CapacityExceeded);
+        }
+        self.shape[self.leaves] = s;
+        self.stride[self.leaves] = d;
+        self.leaves += 1;
+        Ok(())
+    }
+
+    pub(crate) fn push_leaves(&mut self, layout: &DynLayout) -> Result<()> {
+        for (&s, &d) in layout.shapes().iter().zip(layout.strides()) {
+            self.push(s, d)?;
+        }
+        Ok(())
+    }
+
+    /// Ends the open mode; a mode may have no leaves.
+    pub(crate) fn close_mode(&mut self) -> Result<()> {
+        if self.modes == MAX_RANK {
+            return Err(Error::CapacityExceeded);
+        }
+        self.groups[self.modes] = self.leaves - self.closed;
+        self.modes += 1;
+        self.closed = self.leaves;
+        Ok(())
+    }
+
+    /// Appends every top-level mode of `layout` as its own mode.
+    pub(crate) fn push_modes(&mut self, layout: &GroupedLayout) -> Result<()> {
+        for axis in 0..layout.rank() {
+            self.push_leaves(&layout.mode(axis)?)?;
+            self.close_mode()?;
+        }
+        Ok(())
+    }
+
+    /// Validates the leaves as a flat layout, ignoring mode boundaries.
+    pub(crate) fn finish_flat(&self) -> Result<DynLayout> {
+        DynLayout::new(&self.shape[..self.leaves], &self.stride[..self.leaves])
+    }
+
+    /// Validates the leaves and groups them by the closed modes.
+    pub(crate) fn finish(&self) -> Result<GroupedLayout> {
+        GroupedLayout::new(self.finish_flat()?, &self.groups[..self.modes])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_groups_closed_modes_and_enforces_capacity() {
+        let mut builder = LayoutBuilder::new();
+        builder.close_mode().unwrap();
+        builder
+            .push_leaves(&DynLayout::new(&[2, 3], &[1, 10]).unwrap())
+            .unwrap();
+        builder.push(4, 60).unwrap();
+        builder.close_mode().unwrap();
+        let grouped = builder.finish().unwrap();
+        assert_eq!(grouped.shapes(), &[2, 3, 4]);
+        assert!(grouped.groups().eq([0, 3]));
+        assert_eq!(
+            builder.finish_flat(),
+            DynLayout::new(&[2, 3, 4], &[1, 10, 60])
+        );
+
+        let mut leaves = LayoutBuilder::new();
+        for _ in 0..MAX_RANK {
+            leaves.push(1, 0).unwrap();
+        }
+        assert_eq!(leaves.push(1, 0), Err(Error::CapacityExceeded));
+
+        let mut modes = LayoutBuilder::new();
+        for _ in 0..MAX_RANK {
+            modes.close_mode().unwrap();
+        }
+        assert_eq!(modes.close_mode(), Err(Error::CapacityExceeded));
     }
 }

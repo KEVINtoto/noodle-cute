@@ -34,13 +34,12 @@ use core::ops::Div;
 
 use crate::int::{Integer, add, mul};
 use crate::layout::{
-    AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutMap, LayoutParts, MAX_RANK, Shape,
-    affine_injective,
+    AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutBuilder, LayoutMap, LayoutParts,
+    MAX_RANK, Shape, affine_injective,
 };
 use crate::tuple::{Flatten, Item};
 use crate::{Bool, Error, Int, IntTuple, Nil, Result, True};
 
-use super::Leaves;
 use super::coalesce::{CoalesceFold, FinishCoalesce};
 use super::complement::{Sort, UnwrapLayout};
 use super::composition::{ComposeProduct, ZERO_STRIDE};
@@ -101,7 +100,7 @@ fn sorted_leaves<L: AffineLayoutMap>(layout: &L) -> Result<SortedLeaves> {
 pub fn right_inverse<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
     let sorted = sorted_leaves(&layout)?;
     let flat = &sorted.flat;
-    let mut leaves = Leaves::new();
+    let mut leaves = LayoutBuilder::new();
     let mut current = 1;
     for &a in &sorted.order[..flat.rank()] {
         let (s, d) = (flat.shape(a)?, flat.stride(a)?);
@@ -110,7 +109,7 @@ pub fn right_inverse<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
             current = mul(s, d)?;
         }
     }
-    leaves.layout()?.coalesce()
+    leaves.finish_flat()?.coalesce()
 }
 
 /// CuTe `left_inverse(layout)`: returns a layout `R` such that `R(layout(i)) == i` for `i < size(layout)`.
@@ -168,13 +167,13 @@ pub fn left_inverse<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
         len += 1;
     }
     shape[len] = flat.shape(sorted.order[rank - 1])?;
-    let mut leaves = Leaves::new();
+    let mut leaves = LayoutBuilder::new();
     // Without leading holes (min stride 1), the initial 1:0 is eliminated by coalesce; skip it to prevent overflow on full-capacity layouts.
     let start = usize::from(len > 0 && shape[0] == 1);
     for i in start..=len {
         leaves.push(shape[i], stride[i])?;
     }
-    leaves.layout()?.coalesce()
+    leaves.finish_flat()?.coalesce()
 }
 
 /// An enumerated inverse mapping: logical coordinates represent original addresses,

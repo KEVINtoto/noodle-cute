@@ -97,7 +97,7 @@ One marker type, the crate-private `Bool<B>`, carries compile-time conditions bo
 
 [`algebra/complement.rs`](../src/algebra/complement.rs) holds the static, mixed, and runtime paths. `Complement<C,EXTENDED>` derives `TypedComplement`, whose fully static value is read through `StaticValue`. `LayoutParts` carries the intermediate layouts of filtering, sorting, the prefix, and the tail; the public methods validate the result with `Layout::new`.
 
-The algorithm reuses `Flatten` / `Append` / `Unwrap`, coalesce's `Prepend` / `CoalesceFold` / `FinishCoalesce`, integer multiplication/division and `ceil_div`, and composition's `StepNumber` / `ZERO_STRIDE` / `ComposeProduct` dispatch. `complement_step` checks each gap and next stride for both the typed and runtime paths. Typed sorting follows upstream's requirement of static strides for multi-mode layouts; runtime sorting uses `Leaves` and `MAX_RANK` arrays.
+The algorithm reuses `Flatten` / `Append` / `Unwrap`, coalesce's `Prepend` / `CoalesceFold` / `FinishCoalesce`, integer multiplication/division and `ceil_div`, and composition's `StepNumber` / `ZERO_STRIDE` / `ComposeProduct` dispatch. `complement_step` checks each gap and next stride for both the typed and runtime paths. Typed sorting follows upstream's requirement of static strides for multi-mode layouts; runtime sorting uses `LayoutBuilder` and `MAX_RANK` arrays.
 
 Tests live in [`tests/complement_contract.rs`](../tests/complement_contract.rs). Entry points, type-preservation rules, and upstream deviations are described in [layout algebra §14.2](algebra.md#142-全静态混合与运行时入口).
 
@@ -107,7 +107,7 @@ Tests live in [`tests/complement_contract.rs`](../tests/complement_contract.rs).
 
 [`typed.rs`](../src/algebra/typed.rs) is the internal module shared by divide and product: `Transform` dispatches on integer, layout, or nested-tuple tilers, `Unzip` collects tile/rest by the upstream guide, `Regroup` selects the zipped/tiled/flat profile, and `Checked` runs the final `Layout::new`. Each operation only implements `Binary` for a single tiler and reuses composition and complement; the public methods and result types come from one internal macro.
 
-`CoalesceTarget` in [`divide.rs`](../src/algebra/divide.rs) keeps the type of `shape(coalesce(L))`. In `product.rs`, blocked/raked pad the tiler with `1:0` modes to the block's rank before composing (`ProductOp<true>` with `PadModes`), then `ZipModes` zips block and rest per mode. Runtime tuple products and tuple divides share `group_modes` / `Modes` and produce a one-level `GroupedLayout`; runtime single-tiler divide regroups the composed tile and rest so tiled/flat unpack the composed modes like upstream.
+`CoalesceTarget` in [`divide.rs`](../src/algebra/divide.rs) keeps the type of `shape(coalesce(L))`. In `product.rs`, blocked/raked pad the tiler with `1:0` modes to the block's rank before composing (`ProductOp<true>` with `PadModes`), then `ZipModes` zips block and rest per mode. Runtime tuple products and tuple divides share `group_modes` / `LayoutBuilder` and produce a one-level `GroupedLayout`; runtime single-tiler divide regroups the composed tile and rest so tiled/flat unpack the composed modes like upstream.
 
 Fully static results read through `StaticValue` skip the final runtime size, address-range, and tiler checks; mixed methods keep dynamic fields and validate inputs and results before returning `Result`. Typed paths never go through runtime arrays, so their inputs and outputs may exceed `MAX_RANK`; runtime entry points keep the fixed capacity and the lazy maps.
 
@@ -186,7 +186,7 @@ The fully static result type comes from `CoalesceFold<EXTENDED>` and its value f
 
 `AffineLayout` 提供扁平元数据 `as_flat_layout` 和分组元数据 `as_grouped_layout`。`LayoutMap::as_affine` 则是通用映射上的可选能力，返回 `Option<GroupedLayout>`；`None` 表示当前没有已知的仿射表示。
 
-`algebra.rs` 的 `Leaves` 以固定数组收集 shape/stride，`Modes` 再保存各顶层模式含多少叶子，`group_modes` 供运行时 tuple divide/product 共用分组拼装。这些辅助结构把运行时选择出的结果装入 `DynLayout` 或 `GroupedLayout`，不会为每次代数操作申请堆内存。
+The crate-internal `LayoutBuilder` in `layout/dynamic_layout.rs` collects shape/stride leaves and top-level mode sizes in fixed arrays; `group_modes` in `algebra.rs` assembles the groupings shared by runtime divide/product.这些辅助结构把运行时选择出的结果装入 `DynLayout` 或 `GroupedLayout`，不会为每次代数操作申请堆内存。
 
 ### 5.2 组合算法的入口
 
@@ -216,7 +216,7 @@ fn main() -> noodle_cute::Result<()> {
 
 这组断言直接体现数学 §7 的例外，不能用“组合总是逐点代入”替换实现。
 
-When both sides have only `Int<N>` leaves, `TypedComposition<A, B>` runs the same algorithm during trait resolution:公共模块的 `CoalesceFold<true>` 做 `coalesce_x`；普通 `Layout::coalesce` 使用同一折叠的默认分支，两者共用 `Prepend` 的丢弃/合并规则，`ComposeTree` 按 inner 的树递归，`Fold` 的每一步数值由 `const fn step` 计算并以泛型常量写回类型。结果是零大小、可放进 `const` 的 `Layout`，不经过 `Leaves`/`DynLayout`；整除、溢出和 profile 错误都在实例化时编译失败。细节见[布局代数 7.1 节](algebra.md#71-fully-static-results)。
+When both sides have only `Int<N>` leaves, `TypedComposition<A, B>` runs the same algorithm during trait resolution:公共模块的 `CoalesceFold<true>` 做 `coalesce_x`；普通 `Layout::coalesce` 使用同一折叠的默认分支，两者共用 `Prepend` 的丢弃/合并规则，`ComposeTree` 按 inner 的树递归，`Fold` 的每一步数值由 `const fn step` 计算并以泛型常量写回类型。结果是零大小、可放进 `const` 的 `Layout`，不经过 `LayoutBuilder`/`DynLayout`；整除、溢出和 profile 错误都在实例化时编译失败。细节见[布局代数 7.1 节](algebra.md#71-fully-static-results)。
 
 全静态、混合及运行时 composition 都在 [`src/algebra/composition.rs`](../src/algebra/composition.rs) 中实现。A fully static result is read as `<TypedComposition<A,B> as StaticValue>::VALUE`; `Layout::composition` returns `Result<TypedComposition<A,B>>`; both share `ComposeTree` / `Fold` / `Finish` 的类型递归，阶段结果统一为 `Output: LayoutParts`。混合路径的 `TypedStep` 仅在相关参数静态已知时生成 `Int<N>`，否则生成 `DynInt`；运行时单位模式不会改变输出树。静态零乘动态值与静态零分子除动态值沿用 CuTe 的特殊规则。
 

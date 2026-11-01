@@ -4,7 +4,7 @@
 //! that tuple operations preserve leaf order, types, and static values.
 
 use noodle_cute::int::{DynInt, Int};
-use noodle_cute::tuple::{Append, Flatten, Item, Product, Tuple};
+use noodle_cute::tuple::{Append, Flatten, Item, Product};
 use noodle_cute::{Error, IntTuple, Nil, int_tuple};
 
 #[test]
@@ -12,8 +12,6 @@ fn nil_is_the_empty_leaf_free_tuple() {
     assert_eq!(Nil::RANK, 0);
     assert_eq!(Nil::DEPTH, 1);
     assert_eq!(Nil::LEAVES, 0);
-    assert_eq!(<Nil as Tuple>::LEN, 0);
-    assert_eq!(<Nil as Tuple>::MAX_DEPTH, 0);
     assert_eq!(Nil.rank(), 0);
     assert_eq!(Nil.depth(), 1);
 

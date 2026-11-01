@@ -5,12 +5,13 @@
 
 use core::ops::{Div, Mul};
 
-use crate::int::{Integer, ceil_div, mul};
-use crate::layout::{AffineLayoutMap, DynLayout, Layout, LayoutMap, LayoutParts, MAX_RANK, Shape};
+use crate::int::{Integer, ceil_div, checked_product, mul};
+use crate::layout::{
+    AffineLayoutMap, DynLayout, Layout, LayoutBuilder, LayoutMap, LayoutParts, MAX_RANK, Shape,
+};
 use crate::tuple::{Append, Flatten, Item, Product, Unwrap};
 use crate::{Bool, Error, Int, IntTuple, Nil, Result, True};
 
-use super::Leaves;
 use super::coalesce::{CoalesceFold, FinishCoalesce, Prepend};
 use super::composition::{ComposeProduct, StepNumber, ZERO_STRIDE};
 
@@ -29,7 +30,7 @@ fn complement_step(s: isize, d: isize, current: isize) -> Result<(isize, isize)>
 // and fills in address gaps one by one.
 // Returns the prefix leaves of the complement layout along with the next stride; returns `None`
 // when only `1:0` remains after filtering (CuTe special case).
-fn complement_prefix<L: AffineLayoutMap>(layout: &L) -> Result<Option<(Leaves, isize)>> {
+fn complement_prefix<L: AffineLayoutMap>(layout: &L) -> Result<Option<(LayoutBuilder, isize)>> {
     let flat = layout.as_flat_layout()?;
     // A zero extent makes CuTe's next stride zero, and its cotarget ceil_div then divides by it.
     if flat.size()? == 0 {
@@ -48,7 +49,7 @@ fn complement_prefix<L: AffineLayoutMap>(layout: &L) -> Result<Option<(Leaves, i
     }
     // Unstable sort by key (stride, index) is equivalent to CuTe's stable sort without allocations.
     order[..flat.rank()].sort_unstable_by_key(|&a| (flat.strides()[a], a));
-    let mut prefix = Leaves::new();
+    let mut prefix = LayoutBuilder::new();
     let mut current = 1;
     for &a in &order[..flat.rank()] {
         let (s, d) = (flat.shape(a)?, flat.stride(a)?);
@@ -95,7 +96,7 @@ pub fn complement_shape<L: AffineLayoutMap>(layout: L, cotarget: &[isize]) -> Re
     }
     let Some((mut leaves, current)) = complement_prefix(&layout)? else {
         // CuTe: complement(1:0, cotarget) = make_layout(coalesce(cotarget))
-        let size = cotarget.iter().try_fold(1, |acc, &c| mul(acc, c))?;
+        let size = checked_product(cotarget.iter().map(|&c| Ok(c)))?;
         return DynLayout::new(&[size], &[1]);
     };
     // CuTe tuple ceil_div: result_i = ceil(a_i / rest), rest = ceil(rest / a_i)
@@ -112,7 +113,7 @@ pub fn complement_shape<L: AffineLayoutMap>(layout: L, cotarget: &[isize]) -> Re
         }
     }
     // Coalesces to 1:0 when all extents are 1, matching CuTe.
-    leaves.layout()?.coalesce()
+    leaves.finish_flat()?.coalesce()
 }
 
 /// CuTe `complement(layout, cotarget)` with an integral cotarget.
@@ -173,16 +174,14 @@ pub fn complement_extended<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
     let Some((leaves, current)) = complement_prefix(&layout)? else {
         return DynLayout::new(&[1], &[1]);
     };
-    let prefix = leaves.layout()?.coalesce()?;
+    let prefix = leaves.finish_flat()?.coalesce()?;
     if prefix.size()? == 1 {
         return DynLayout::new(&[1], &[current]);
     }
-    let mut out = Leaves::new();
-    for (&s, &d) in prefix.shapes().iter().zip(prefix.strides()) {
-        out.push(s, d)?;
-    }
+    let mut out = LayoutBuilder::new();
+    out.push_leaves(&prefix)?;
     out.push(1, current)?;
-    out.layout()
+    out.finish_flat()
 }
 
 /// Result type of the typed complement; `EXTENDED` keeps the terminal repetition stride
