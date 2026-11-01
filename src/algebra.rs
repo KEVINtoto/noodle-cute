@@ -1,44 +1,57 @@
-//! Algebraic algorithms for affine layouts.
+//! Layout algebra matching upstream CUTLASS/CuTe semantics: coalesce, composition,
+//! complement, divide, product, and inverse.
 //!
-//! Provides fundamental layout algebra operations matching upstream CUTLASS/CuTe semantics:
-//! - Layout composition ([`composition`])
-//! - Layout complement ([`complement`])
-//! - Layout division ([`divide`])
-//! - Layout inversion ([`inverse`])
-//! - Layout product ([`product`])
+//! Each operation is available for typed [`Layout`](crate::layout::Layout)s, which keep static
+//! leaves and nested profiles, and for runtime affine maps through free functions returning
+//! [`DynLayout`] or [`GroupedLayout`] (or lazy views for non-affine maps). Typed results are
+//! named by aliases such as [`TypedComposition`]; for fully static inputs
+//! `<Alias as StaticValue>::VALUE` is the result as a constant (see [`crate::StaticValue`]).
 
 use crate::int::{add, mul};
 use crate::layout::{DynLayout, GroupedLayout, LayoutMap, MAX_RANK, is_injective_by_enumeration};
 use crate::{Error, Result, Slice};
 
 mod coalesce;
-pub mod complement;
-pub mod composition;
-pub mod divide;
-pub mod inverse;
-pub mod product;
+mod complement;
+mod composition;
+mod divide;
+mod inverse;
+mod product;
 mod typed;
 
-pub use coalesce::{CoalescedLayout, StaticCoalesce, static_coalesce, static_coalesce_extended};
+pub use coalesce::CoalescedLayout;
 pub use complement::{
-    Complement, StaticComplement, TypedComplement, static_complement, static_complement_extended,
+    Complement, TypedComplement, complement, complement_extended, complement_shape,
 };
 pub use composition::{
-    StaticCompose, StaticComposition, TypedCompose, TypedComposition, static_composition,
+    Composition, TypedCompose, TypedComposition, composition, composition_layout,
 };
-
 pub use divide::{
-    StaticDivide, StaticDivideAxes, TypedDivide, TypedDivideAxes, TypedDivided, TypedDividedAxes,
-    static_flat_divide, static_flat_divide_axes, static_logical_divide, static_logical_divide_axes,
-    static_tiled_divide, static_tiled_divide_axes, static_zipped_divide, static_zipped_divide_axes,
+    Divided, TypedDivide, TypedDivided, flat_divide, flat_divide_modes, logical_divide,
+    logical_divide_modes, tiled_divide, tiled_divide_modes, zipped_divide, zipped_divide_modes,
 };
 pub use inverse::{
-    StaticInverse, TypedInverse, TypedInvert, static_left_inverse, static_right_inverse,
+    Inverse, TypedInverse, TypedInvert, dense_left_inverse, dense_right_inverse, left_inverse,
+    right_inverse,
 };
 pub use product::{
-    StaticProduct, TypedProduct, TypedProductLayout, static_blocked_product, static_flat_product,
-    static_logical_product, static_raked_product, static_tiled_product, static_zipped_product,
+    Produced, TypedProduct, TypedProductLayout, blocked_product, flat_product, flat_product_modes,
+    logical_product, logical_product_modes, raked_product, tiled_product, tiled_product_modes,
+    zipped_product, zipped_product_modes,
 };
+
+/// `KIND` of [`TypedDivided`] and [`TypedProductLayout`]: two groups `(tile, rest)` (CuTe `logical_*`).
+pub const LOGICAL: u8 = 0;
+/// `KIND` for CuTe `zipped_*`: `((tiles...), (rests...))`.
+pub const ZIPPED: u8 = 1;
+/// `KIND` for CuTe `tiled_*`: `((tiles...), rest0, rest1, ...)`.
+pub const TILED: u8 = 2;
+/// `KIND` for CuTe `flat_*`: `(tile0, tile1, ..., rest0, rest1, ...)`.
+pub const FLAT: u8 = 3;
+/// `KIND` for CuTe `blocked_product`: mode `m` is `(block_m, rest_m)`.
+pub const BLOCKED: u8 = 4;
+/// `KIND` for CuTe `raked_product`: mode `m` is `(rest_m, block_m)`.
+pub const RAKED: u8 = 5;
 
 /// Fixed-capacity leaf buffer for assembling flat layout results in CuTe algebra.
 #[derive(Clone, Copy)]

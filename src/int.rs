@@ -106,8 +106,7 @@ impl Integer for isize {
 // to `DynInt`. Native `isize`-to-`isize` operators are provided by Rust itself.
 macro_rules! binary {
     ($trait:ident, $method:ident, $op:tt, $result:ident) => {
-        /// The result of applying this operator to compile-time operands.
-        pub const $result<const A: isize, const B: isize>: isize = A $op B;
+        pub(crate) const $result<const A: isize, const B: isize>: isize = A $op B;
 
         impl<const A: isize, const B: isize> $trait<Int<B>> for Int<A>
         where
@@ -160,8 +159,7 @@ binary!(Mul, mul, *, MUL_RESULT);
 binary!(Div, div, /, DIV_RESULT);
 binary!(Rem, rem, %, REM_RESULT);
 
-/// The negation of a compile-time integer, used as the result type of `-Int<N>`.
-pub const NEG_RESULT<const N: isize>: isize = -N;
+pub(crate) const NEG_RESULT<const N: isize>: isize = -N;
 
 impl<const N: isize> Neg for Int<N>
 where
@@ -180,8 +178,7 @@ impl Neg for DynInt {
     }
 }
 
-/// Whether `N` is nonnegative, for use in compile-time shape constraints.
-pub const NON_NEGATIVE<const N: isize>: bool = N >= 0;
+pub(crate) const NON_NEGATIVE<const N: isize>: bool = N >= 0;
 
 /// Adds two runtime values, returning `Error::Overflow` if the sum cannot fit.
 pub(crate) fn add(a: isize, b: isize) -> Result<isize> {
@@ -193,26 +190,10 @@ pub(crate) fn mul(a: isize, b: isize) -> Result<isize> {
     a.checked_mul(b).ok_or(Error::Overflow)
 }
 
-#[allow(dead_code)]
 /// Computes ceiling division without forming the potentially overflowing `a + b - 1`.
 /// The caller must ensure `a >= 0` and `b > 0`.
 pub(crate) const fn ceil_div(a: isize, b: isize) -> isize {
     a / b + (a % b != 0) as isize
-}
-
-#[allow(dead_code)]
-/// Computes a checked product, treating an empty slice as one and any zero as zero.
-/// This helper does not validate the signs of shape extents.
-pub(crate) fn product_slice(values: &[isize]) -> Result<isize> {
-    // Detect empty domains before multiplying to avoid irrelevant intermediate overflow.
-    if values.contains(&0) {
-        return Ok(0);
-    }
-    let mut n = 1;
-    for &v in values {
-        n = mul(n, v)?;
-    }
-    Ok(n)
 }
 
 /// Creates a compile-time integer.

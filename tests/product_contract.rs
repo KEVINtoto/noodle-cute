@@ -1,13 +1,11 @@
 //! CuTe product 的全静态、混合与运行时契约。
 use noodle_cute::Error;
-use noodle_cute::algebra::composition::composition_layout;
-use noodle_cute::algebra::inverse::right_inverse;
-use noodle_cute::algebra::product::*;
+use noodle_cute::algebra::*;
 use noodle_cute::layout::{AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutMap, MAX_RANK};
 
 pub mod common;
-use common::{TableMap, assert_grouped, assert_same_map, dyn_layout, grouped, values};
-use noodle_cute::{DynInt, Int, IntTuple, Nil, int_tuple, shape, stride};
+use common::{TableMap, assert_grouped, assert_same_map, dyn_layout, grouped, producted, values};
+use noodle_cute::{DynInt, Int, IntTuple, Nil, StaticValue, int_tuple, shape, stride};
 
 type Pair<A, B> = IntTuple<A, IntTuple<B, Nil>>;
 
@@ -16,7 +14,7 @@ type ModePairs<const A: isize, const B: isize, const C: isize, const D: isize> =
 
 #[test]
 fn static_products_are_const_layouts_with_the_terminal_repetition_stride() {
-    const R: Layout<Pair<Int<2>, Int<3>>, Pair<Int<1>, Int<2>>> = static_logical_product(
+    const R: Layout<Pair<Int<2>, Int<3>>, Pair<Int<1>, Int<2>>> = producted::<LOGICAL, _, _>(
         Layout {
             shape: Int::<2>,
             stride: Int::<1>,
@@ -55,13 +53,14 @@ fn rank_sensitive_static_products_pad_unit_modes_and_zip_in_order() {
         shape: Int::<4>,
         stride: Int::<1>,
     };
-    const BLOCKED: Layout<ModePairs<2, 4, 3, 1>, ModePairs<1, 6, 2, 0>> =
-        static_blocked_product(B, T);
-    const RAKED: Layout<ModePairs<4, 2, 1, 3>, ModePairs<6, 1, 0, 2>> = static_raked_product(B, T);
-    assert_eq!(BLOCKED.size(), Ok(24));
-    assert_eq!(RAKED.size(), Ok(24));
-    assert_eq!(BLOCKED, B.blocked_product(T).unwrap());
-    assert_eq!(RAKED, B.raked_product(T).unwrap());
+    const BLOCK: Layout<ModePairs<2, 4, 3, 1>, ModePairs<1, 6, 2, 0>> =
+        producted::<BLOCKED, _, _>(B, T);
+    const RAKE: Layout<ModePairs<4, 2, 1, 3>, ModePairs<6, 1, 0, 2>> =
+        producted::<RAKED, _, _>(B, T);
+    assert_eq!(BLOCK.size(), Ok(24));
+    assert_eq!(RAKE.size(), Ok(24));
+    assert_eq!(BLOCK, B.blocked_product(T).unwrap());
+    assert_eq!(RAKE, B.raked_product(T).unwrap());
     let t = Layout::new(DynInt(4), Int::<1>).unwrap();
     assert_eq!(B.blocked_product(t).unwrap().size(), Ok(24));
 }
@@ -75,7 +74,7 @@ fn product_variants_repeat_tiles_across_cotargetless_complements() {
     let blk = dyn_layout(&[2, 2], &[1, 4]);
     let t23 = grouped(&[2, 3], &[1, 2], &[1, 1]);
 
-    let logical: Product<_, _> = logical_product(blk, t23).unwrap();
+    let logical: Produced<_, _> = logical_product(blk, t23).unwrap();
     let zipped = zipped_product(blk, t23).unwrap();
     let tiled = tiled_product(blk, t23).unwrap();
     let flat = flat_product(blk, t23).unwrap();
@@ -418,9 +417,10 @@ fn static_product_grouping_entries_are_const() {
         shape: Int::<3>,
         stride: Int::<2>,
     };
-    const Z: <A as StaticProduct<T, 1>>::Output = static_zipped_product(A, T);
-    const F: <A as StaticProduct<T, 3>>::Output = static_flat_product(A, T);
-    const TL: <A as StaticProduct<T, 2>>::Output = static_tiled_product(A, T);
+    const Z: TypedProductLayout<A, T, ZIPPED> =
+        <TypedProductLayout<A, T, ZIPPED> as StaticValue>::VALUE;
+    const F: TypedProductLayout<A, T, FLAT> = producted::<FLAT, _, _>(A, T);
+    const TL: TypedProductLayout<A, T, TILED> = producted::<TILED, _, _>(A, T);
     assert_eq!(Z.shape, shape![Int::<4>, Int::<3>]);
     assert_eq!(Z.stride, stride![Int::<2>, Int::<8>]);
     assert_eq!(F.shape, shape![Int::<4>, Int::<3>]);
@@ -438,44 +438,38 @@ fn dynamic_tuple_product_matches_per_mode_cute_formulas() {
         &[2, 2],
     );
     assert_grouped(
-        &block.zipped_product_modes(&tiler).unwrap(),
+        &zipped_product_modes(&block, &tiler).unwrap(),
         &[4, 2, 2, 3],
         &[1, 10, 4, 1],
         &[2, 2],
     );
     assert_grouped(
-        &block.tiled_product_modes(&tiler).unwrap(),
+        &tiled_product_modes(&block, &tiler).unwrap(),
         &[4, 2, 2, 3],
         &[1, 10, 4, 1],
         &[2, 1, 1],
     );
     assert_grouped(
-        &block.flat_product_modes(&tiler).unwrap(),
+        &flat_product_modes(&block, &tiler).unwrap(),
         &[4, 2, 2, 3],
         &[1, 10, 4, 1],
         &[1, 1, 1, 1],
     );
     assert_grouped(
-        &block.logical_product_modes(&tiler[..1]).unwrap(),
+        &logical_product_modes(&block, &tiler[..1]).unwrap(),
         &[4, 2, 2],
         &[1, 4, 10],
         &[2, 1],
     );
     assert_eq!(
-        block.logical_product_modes(&[tiler[0]; 3]),
+        logical_product_modes(&block, &[tiler[0]; 3]),
         Err(Error::StructureMismatch)
     );
     assert_grouped(
-        &block
-            .logical_product_modes(&[dyn_layout(&[2], &[-1])])
-            .unwrap(),
+        &logical_product_modes(&block, &[dyn_layout(&[2], &[-1])]).unwrap(),
         &[4, 2, 2],
         &[1, -4, 10],
         &[2, 1],
-    );
-    assert_eq!(
-        values(&block.logical_product(tiler[0]).unwrap()),
-        values(&logical_product(block, tiler[0]).unwrap())
     );
 }
 
@@ -519,7 +513,7 @@ fn static_product_can_return_more_than_max_rank_leaves() {
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
         25, 26, 27, 28, 29, 30, 31, 32
     );
-    let result = static_flat_product(
+    let result = producted::<FLAT, _, _>(
         Layout {
             shape: Int::<2>,
             stride: Int::<1>,
@@ -540,7 +534,7 @@ fn product_scalar_layout_and_empty_tuple_tilers_keep_distinct_profiles() {
     assert_eq!(scalar.shape, shape![Int::<2>, ()]);
     assert_eq!(block.logical_product(Nil).unwrap(), block);
     let empty = Layout::new(Nil, Nil).unwrap();
-    let rank_product: Layout<Nil, Nil> = static_blocked_product(empty, empty);
+    let rank_product: Layout<Nil, Nil> = producted::<BLOCKED, _, _>(empty, empty);
     assert_eq!(rank_product.size(), Ok(1));
     assert_eq!(rank_product.rank(), 0);
 }

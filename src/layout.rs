@@ -14,7 +14,7 @@ use core::ops::Range;
 
 use crate::int::{DynInt, Int, NON_NEGATIVE, add, mul};
 use crate::tuple::{Item, Nil, Tuple};
-use crate::{Assert, Error, IntTuple, Result, True};
+use crate::{Bool, Error, IntTuple, Result, True};
 
 /// Builds a recursive shape tuple from static or runtime integer leaves.
 ///
@@ -31,21 +31,13 @@ macro_rules! shape { ($($xs:tt)*) => { $crate::int_tuple!($($xs)*) }; }
 #[macro_export]
 macro_rules! stride { ($($xs:tt)*) => { $crate::int_tuple!($($xs)*) }; }
 
-/// Builds a coordinate tuple, preserving any nested modes in its type.
-///
-/// This constructs tuple data without checking coordinate bounds.
-/// [`LayoutMap::index_of_coord`] instead accepts a flat slice containing one
-/// linear coordinate per top-level mode.
-#[macro_export]
-macro_rules! coord { ($($xs:tt)*) => { $crate::int_tuple!($($xs)*) }; }
-
 /// An integer leaf or nested tuple that can serve as a layout shape.
 ///
 /// Negative [`Int`] extents are rejected by trait bounds. Runtime extents are
 /// checked by layout constructors, since this marker alone cannot validate
 /// their values. [`Nil`] denotes a scalar with no axes and size one.
 pub trait Shape: Item {}
-impl<const N: isize> Shape for Int<N> where Assert<{ NON_NEGATIVE::<N> }>: True {}
+impl<const N: isize> Shape for Int<N> where Bool<{ NON_NEGATIVE::<N> }>: True {}
 impl Shape for DynInt {}
 impl Shape for isize {}
 impl Shape for Nil {}
@@ -363,15 +355,6 @@ pub(crate) fn linear_to_coord<L: LayoutMap>(
     Ok(())
 }
 
-/// Creates a left-major compact identity map whose logical indices equal addresses.
-/// The same construction constraints as [`DynLayout::left`] apply.
-/// Note: this is the *linearized* identity. CuTe `make_identity_layout(shape)`
-/// maps a coordinate to the coordinate tuple itself (ArithmeticTuple strides
-/// `E<i>`); the coordinate-valued counterpart here is `identity_tensor`.
-pub fn identity_layout(shape: &[isize]) -> Result<DynLayout> {
-    DynLayout::left(shape)
-}
-
 /// CuTe `Layout::get_flat_coord(index)`: computes each leaf coordinate as
 /// `(index / stride) % shape`, then combines leaves within each top-level mode
 /// in left-major order and writes the coordinates to `out[..rank]`.
@@ -579,5 +562,6 @@ pub(crate) fn affine_injective<L: AffineLayoutMap>(
 mod dynamic_layout;
 mod static_layout;
 
-pub use dynamic_layout::*;
-pub use static_layout::*;
+pub use dynamic_layout::{DynLayout, GroupedLayout, MAX_RANK};
+pub(crate) use static_layout::LayoutParts;
+pub use static_layout::{Compact, Layout, LayoutLeft, LayoutRight};

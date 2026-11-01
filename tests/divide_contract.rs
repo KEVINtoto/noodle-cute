@@ -1,12 +1,11 @@
 //! CuTe divide 的全静态、混合与运行时契约。
 use noodle_cute::Error;
-use noodle_cute::algebra::Grouping;
-use noodle_cute::algebra::divide::*;
+use noodle_cute::algebra::*;
 use noodle_cute::layout::{AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutMap, MAX_RANK};
 
 pub mod common;
-use common::{TableMap, assert_grouped, assert_same_map, dyn_layout, grouped, values};
-use noodle_cute::{DynInt, Int, IntTuple, Nil, int_tuple, shape, stride};
+use common::{TableMap, assert_grouped, assert_same_map, divided, dyn_layout, grouped, values};
+use noodle_cute::{DynInt, Int, IntTuple, Nil, StaticValue, int_tuple, shape, stride};
 
 type Pair<A, B> = IntTuple<A, IntTuple<B, Nil>>;
 
@@ -15,7 +14,7 @@ type ModePairs<const A: isize, const B: isize, const C: isize, const D: isize> =
 
 #[test]
 fn static_single_layout_division_is_a_const_layout() {
-    const R: Layout<Pair<Int<3>, Int<4>>, Pair<Int<2>, Int<6>>> = static_logical_divide(
+    const R: Layout<Pair<Int<3>, Int<4>>, Pair<Int<2>, Int<6>>> = divided::<LOGICAL, _, _>(
         Layout {
             shape: Int::<12>,
             stride: Int::<2>,
@@ -51,33 +50,6 @@ fn tuple_division_preserves_and_transposes_the_full_profile() {
     assert_eq!(mixed.size(), Ok(12));
     assert_eq!(mixed.index_of_coord(&[3, 2]), Ok(22));
 }
-
-#[test]
-fn strict_axes_support_const_mixed_and_zero_extent_inputs() {
-    const R: Layout<ModePairs<2, 4, 3, 2>, ModePairs<1, 2, 8, 24>> = static_logical_divide_axes(
-        Layout {
-            shape: shape![Int::<8>, Int::<6>],
-            stride: stride![Int::<1>, Int::<8>],
-        },
-        shape![Int::<2>, Int::<3>],
-    );
-    assert_eq!(R.size(), Ok(48));
-    let input = Layout::new(shape![DynInt(8), Int::<6>], stride![Int::<1>, DynInt(8)]).unwrap();
-    let result = input
-        .zipped_divide_axes(shape![Int::<2>, DynInt(3)])
-        .unwrap();
-    assert_eq!(result.index_of_coord(&[5, 7]), Ok(47));
-    let empty = Layout::new(Int::<0>, Int::<2>)
-        .unwrap()
-        .logical_divide_axes(Int::<3>)
-        .unwrap();
-    assert_eq!(empty.size(), Ok(0));
-    assert_eq!(empty.as_flat_layout().unwrap().shapes(), &[3, 0]);
-}
-
-// ---------------------------------------------------------------------------
-// 4. Divide (`src/algebra/divide.rs`)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn single_tiler_divides_match_cute_groupings_and_pad_into_extended_domain() {
@@ -213,130 +185,6 @@ fn single_tiler_divides_match_cute_groupings_and_pad_into_extended_domain() {
     assert_eq!(
         logical_divide(base, dyn_layout(&[2, 2], &[2, 3])).err(),
         Some(Error::NonInjective)
-    );
-}
-
-#[test]
-fn divide_axes_variants_preserve_addresses_and_transpose_axis_coordinates() {
-    let base = dyn_layout(&[6, 8], &[11, 1]);
-    let logical: DividedAxes<_> = logical_divide_axes(base, &[2, 4]).unwrap();
-    let zipped = zipped_divide_axes(base, &[2, 4]).unwrap();
-    let tiled = tiled_divide_axes(base, &[2, 4]).unwrap();
-    let flat = flat_divide_axes(base, &[2, 4]).unwrap();
-
-    assert_eq!(*logical.layout(), base);
-    assert_eq!(logical.tile_shape(), &[2, 4]);
-    assert_eq!(logical.rest_shape(), &[3, 2]);
-    assert_eq!(logical.grouping(), Grouping::Logical);
-    assert_eq!(zipped.grouping(), Grouping::Zipped);
-    assert_eq!(tiled.grouping(), Grouping::Tiled);
-    assert_eq!(flat.grouping(), Grouping::Flat);
-
-    assert_eq!(
-        (logical.rank(), zipped.rank(), tiled.rank(), flat.rank()),
-        (2, 2, 3, 4)
-    );
-    assert_eq!(
-        (logical.extent(0), logical.extent(1), logical.extent(2)),
-        (Ok(6), Ok(8), Err(Error::AxisOutOfBounds))
-    );
-    assert_eq!(
-        (zipped.extent(0), zipped.extent(1), zipped.extent(2)),
-        (Ok(8), Ok(6), Err(Error::AxisOutOfBounds))
-    );
-    assert_eq!(
-        (
-            tiled.extent(0),
-            tiled.extent(1),
-            tiled.extent(2),
-            tiled.extent(3)
-        ),
-        (Ok(8), Ok(3), Ok(2), Err(Error::AxisOutOfBounds))
-    );
-    assert_eq!(
-        (
-            flat.extent(0),
-            flat.extent(1),
-            flat.extent(2),
-            flat.extent(3),
-            flat.extent(4)
-        ),
-        (Ok(2), Ok(4), Ok(3), Ok(2), Err(Error::AxisOutOfBounds))
-    );
-
-    for variant in [&logical, &zipped, &tiled, &flat] {
-        assert_eq!(variant.size(), Ok(48));
-        assert_eq!(variant.address_range(), base.address_range());
-        assert_eq!(variant.is_injective(), Ok(true));
-        assert_eq!(variant.as_affine(), Ok(None));
-        assert_eq!(variant.index(-1), Err(Error::CoordinateOutOfBounds));
-        assert_eq!(variant.index(48), Err(Error::CoordinateOutOfBounds));
-    }
-    // Logical preserves linear order; Zipped/Tiled/Flat share tile-first linear order.
-    assert_eq!(values(&logical), values(&base));
-    assert_eq!(values(&zipped), values(&tiled));
-    assert_eq!(values(&tiled), values(&flat));
-
-    for rj in 0..2 {
-        for ri in 0..3 {
-            for tj in 0..4 {
-                for ti in 0..2 {
-                    let expected = (ti + 2 * ri) * 11 + tj + 4 * rj;
-                    assert_eq!(
-                        logical.index_of_coord(&[ti + 2 * ri, tj + 4 * rj]),
-                        Ok(expected)
-                    );
-                    assert_eq!(
-                        zipped.index_of_coord(&[ti + 2 * tj, ri + 3 * rj]),
-                        Ok(expected)
-                    );
-                    assert_eq!(tiled.index_of_coord(&[ti + 2 * tj, ri, rj]), Ok(expected));
-                    assert_eq!(flat.index_of_coord(&[ti, tj, ri, rj]), Ok(expected));
-                }
-            }
-        }
-    }
-
-    // Broadcast injectivity and empty axes propagate cleanly.
-    let broadcast = zipped_divide_axes(dyn_layout(&[4, 6], &[0, 1]), &[2, 3]).unwrap();
-    assert_eq!(broadcast.is_injective(), Ok(false));
-
-    let empty = flat_divide_axes(dyn_layout(&[0, 8], &[1, 1]), &[2, 4]).unwrap();
-    assert_eq!(empty.rest_shape(), &[0, 2]);
-    assert_eq!(empty.size(), Ok(0));
-
-    // Error bounds: rank mismatch, nonpositive tile, indivisibility, and > MAX_RANK.
-    assert_eq!(
-        logical_divide_axes(base, &[2]).err(),
-        Some(Error::StructureMismatch)
-    );
-    assert_eq!(
-        logical_divide_axes(base, &[0, 4]).err(),
-        Some(Error::InvalidShape)
-    );
-    assert_eq!(
-        logical_divide_axes(base, &[-2, 4]).err(),
-        Some(Error::InvalidShape)
-    );
-    assert_eq!(
-        logical_divide_axes(base, &[4, 4]).err(),
-        Some(Error::NotDivisible)
-    );
-
-    let rank_33 = Layout::new(
-        shape![
-            2isize, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-            2, 2, 2, 2, 2, 2
-        ],
-        stride![
-            0isize, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        logical_divide_axes(rank_33, &[1; MAX_RANK + 1]).err(),
-        Some(Error::CapacityExceeded)
     );
 }
 
@@ -497,16 +345,13 @@ fn nested_partial_and_empty_tilers_preserve_the_cute_profile() {
     let empty = input.zipped_divide(Nil).unwrap();
     assert_eq!(empty.extent(0), Ok(1));
     assert_eq!(empty.extent(1), Ok(240));
-    let scalar = Layout::new(Nil, Nil)
-        .unwrap()
-        .logical_divide_axes(Nil)
-        .unwrap();
+    let scalar = Layout::new(Nil, Nil).unwrap().logical_divide(Nil).unwrap();
     assert_eq!(scalar.rank(), 0);
     assert_eq!(scalar.size(), Ok(1));
 }
 
 #[test]
-fn static_grouping_entries_and_axes_entries_are_const() {
+fn static_grouping_entries_are_const() {
     type A = Layout<Pair<Int<8>, Int<6>>, Pair<Int<1>, Int<8>>>;
     type T = Pair<Int<2>, Int<3>>;
     const INPUT: A = Layout {
@@ -514,51 +359,22 @@ fn static_grouping_entries_and_axes_entries_are_const() {
         stride: stride![Int::<1>, Int::<8>],
     };
     const TILER: T = shape![Int::<2>, Int::<3>];
-    const Z: <A as StaticDivide<T, 1>>::Output = static_zipped_divide(INPUT, TILER);
-    const F: <A as StaticDivide<T, 3>>::Output = static_flat_divide(INPUT, TILER);
-    const TILED: <A as StaticDivide<T, 2>>::Output = static_tiled_divide(INPUT, TILER);
-    const AZ: <A as StaticDivideAxes<T, 1>>::Output = static_zipped_divide_axes(INPUT, TILER);
-    const AF: <A as StaticDivideAxes<T, 3>>::Output = static_flat_divide_axes(INPUT, TILER);
-    const AT: <A as StaticDivideAxes<T, 2>>::Output = static_tiled_divide_axes(INPUT, TILER);
+    const Z: TypedDivided<A, T, ZIPPED> = <TypedDivided<A, T, ZIPPED> as StaticValue>::VALUE;
+    const F: TypedDivided<A, T, FLAT> = divided::<FLAT, _, _>(INPUT, TILER);
+    const TL: TypedDivided<A, T, TILED> = divided::<TILED, _, _>(INPUT, TILER);
     assert_eq!(Z.shape, shape![(Int::<2>, Int::<3>), (Int::<4>, Int::<2>)]);
     assert_eq!(F.shape, shape![Int::<2>, Int::<3>, Int::<4>, Int::<2>]);
-    assert_eq!(
-        TILED.shape,
-        shape![(Int::<2>, Int::<3>), Int::<4>, Int::<2>]
-    );
-    assert_eq!((Z, F, TILED), (AZ, AF, AT));
+    assert_eq!(TL.shape, shape![(Int::<2>, Int::<3>), Int::<4>, Int::<2>]);
 }
 
 #[test]
 fn mixed_division_checks_shapes_strict_divisibility_and_composition() {
     let input = Layout::new(DynInt(10), Int::<1>).unwrap();
-    assert_eq!(
-        input.logical_divide_axes(DynInt(3)),
-        Err(Error::NotDivisible)
-    );
-    assert_eq!(
-        input.logical_divide_axes(DynInt(0)),
-        Err(Error::InvalidShape)
-    );
     assert_eq!(input.logical_divide(DynInt(0)), Err(Error::InvalidShape));
     assert_eq!(input.logical_divide(DynInt(-1)), Err(Error::InvalidShape));
     let outer = Layout::new(shape![Int::<4>, Int::<6>], stride![Int::<6>, Int::<1>]).unwrap();
     let bad = Layout::new(DynInt(8), DynInt(5)).unwrap();
     assert_eq!(outer.logical_divide(bad), Err(Error::NotDivisible));
-    let dynamic = dyn_layout(&[8], &[2]);
-    let tile = dyn_layout(&[2], &[1]);
-    assert_eq!(
-        values(&dynamic.logical_divide(tile).unwrap()),
-        values(&logical_divide(dynamic, tile).unwrap())
-    );
-    assert_eq!(
-        dynamic.zipped_divide_modes(&[tile]).unwrap(),
-        zipped_divide_modes(&dynamic, &[tile]).unwrap()
-    );
-    assert_eq!(
-        values(&dynamic.flat_divide_axes(&[2]).unwrap()),
-        [0, 2, 4, 6, 8, 10, 12, 14]
-    );
 }
 
 #[test]
@@ -574,7 +390,7 @@ fn typed_division_can_return_more_than_max_rank_leaves() {
         25, 26, 27, 28, 29, 30, 31, 32
     );
     let input = Layout::new(Int::<7>, Int::<1>).unwrap();
-    let result = static_flat_divide(input, tile);
+    let result = divided::<FLAT, _, _>(input, tile);
     assert_eq!(result.rank(), MAX_RANK + 2);
     assert_eq!(result.as_flat_layout(), Err(Error::CapacityExceeded));
     assert_eq!(result.index(1isize << 33), Ok(1));

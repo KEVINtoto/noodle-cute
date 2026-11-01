@@ -1,11 +1,11 @@
 //! CuTe composition 的规范化、惰性回退与边界契约。
 
-use noodle_cute::algebra::complement::complement_extended;
-use noodle_cute::algebra::composition::{Composition, composition, composition_layout};
+use noodle_cute::algebra::complement_extended;
+use noodle_cute::algebra::{Composition, composition, composition_layout};
 use noodle_cute::layout::{AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutMap};
 use noodle_cute::{DynInt, Error, Int, IntTuple, Nil, shape, stride};
 
-mod common;
+pub mod common;
 use common::{TableMap, assert_grouped, assert_same_map, dyn_layout, grouped, values};
 
 type Pair<A, B> = IntTuple<A, IntTuple<B, Nil>>;
@@ -79,7 +79,7 @@ fn mixed_weak_divisibility_uses_type_known_coalesce_boundaries() {
     let rhs = Layout::new(Int::<8>, Int::<3>).unwrap();
     let typed = lhs.composition(rhs).unwrap();
     assert_eq!(values(&typed), [0, 3, 4, 7, 8, 11, 12, 15]);
-    let runtime = lhs.as_flat_layout().unwrap().composition(&rhs).unwrap();
+    let runtime = composition_layout(&lhs.as_flat_layout().unwrap(), &rhs).unwrap();
     assert_eq!(values(&runtime), [0, 3, 6, 9, 12, 15, 18, 21]);
 }
 
@@ -199,7 +199,7 @@ fn typed_composition_has_no_runtime_leaf_buffer_limit() {
 fn runtime_composition_method_keeps_rhs_grouping() {
     let lhs = dyn_layout(&[4, 6], &[6, 1]);
     let rhs = grouped(&[8], &[3], &[1]);
-    let result = lhs.composition(&rhs).unwrap();
+    let result = composition_layout(&lhs, &rhs).unwrap();
     assert_grouped(&result, &[2, 4], &[18, 1], &[2]);
     assert_eq!(values(&result), [0, 18, 1, 19, 2, 20, 3, 21]);
 }

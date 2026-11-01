@@ -1,7 +1,7 @@
 //! 全静态、混合类型与运行时布局的结构 inverse，以及运行时枚举逆。
 //!
 //! 类型化右逆忽略动态 stride，并只接续静态已知的 stride 链；类型化左逆要求
-//! coalesce 后的 stride 全部静态已知。DynLayout 方法按当前数值计算，不受上述
+//! coalesce 后的 stride 全部静态已知。运行时自由函数按当前数值计算，不受上述
 //! 类型约束。`dense_*_inverse` 是面向任意 LayoutMap 的运行时枚举辅助接口。
 //!
 //! ```
@@ -12,23 +12,22 @@
 //! # Ok::<(), noodle_cute::Error>(())
 //! ```
 //! ```
-//! use noodle_cute::{Int, layout::Layout, algebra::static_left_inverse};
+//! use noodle_cute::{Int, StaticValue, algebra::TypedInverse, layout::Layout};
 //! // CuTe: left_inverse(_0:_1) = _0:_1.
-//! const R: Layout<Int<0>, Int<1>> = static_left_inverse(Layout { shape: Int::<0>, stride: Int::<1> });
+//! const R: Layout<Int<0>, Int<1>> = <TypedInverse<Layout<Int<0>, Int<1>>, true> as StaticValue>::VALUE;
 //! ```
 //! ```compile_fail
-//! use noodle_cute::{Int, shape, stride, layout::Layout, algebra::static_left_inverse};
-//! let _ = static_left_inverse(Layout {
-//!     shape: shape![Int::<2>, Int::<2>], stride: stride![Int::<2>, Int::<3>],
-//! });
+//! use noodle_cute::{Int, IntTuple, Nil, StaticValue, algebra::TypedInverse, layout::Layout};
+//! type Pair<const A: isize, const B: isize> = IntTuple<Int<A>, IntTuple<Int<B>, Nil>>;
+//! const R: TypedInverse<Layout<Pair<2, 2>, Pair<2, 3>>, true> = StaticValue::VALUE;
 //! ```
 //! ```compile_fail
-//! use noodle_cute::{Int, layout::Layout, algebra::static_left_inverse};
-//! let _ = static_left_inverse(Layout { shape: Int::<2>, stride: Int::<-1> });
+//! use noodle_cute::{Int, StaticValue, algebra::TypedInverse, layout::Layout};
+//! const R: TypedInverse<Layout<Int<2>, Int<-1>>, true> = StaticValue::VALUE;
 //! ```
 //! ```compile_fail
-//! use noodle_cute::{Int, layout::Layout, algebra::static_left_inverse};
-//! let _ = static_left_inverse(Layout { shape: Int::<2>, stride: Int::<{isize::MAX}> });
+//! use noodle_cute::{Int, StaticValue, algebra::TypedInverse, layout::Layout};
+//! const R: TypedInverse<Layout<Int<2>, Int<{ isize::MAX }>>, true> = StaticValue::VALUE;
 //! ```
 
 use core::ops::Div;
@@ -39,12 +38,12 @@ use crate::layout::{
     affine_injective,
 };
 use crate::tuple::{Flatten, Item};
-use crate::{Assert, Error, Int, IntTuple, Nil, Result, True};
+use crate::{Bool, Error, Int, IntTuple, Nil, Result, True};
 
 use super::Leaves;
 use super::coalesce::{CoalesceFold, FinishCoalesce};
 use super::complement::{Sort, UnwrapLayout};
-use super::composition::{ComposeProduct, Select, ZERO_STRIDE};
+use super::composition::{ComposeProduct, ZERO_STRIDE};
 use super::typed::Checked;
 
 // Common preparation for CuTe inversion: coalesced flat leaves, prefix products
@@ -85,7 +84,7 @@ fn sorted_leaves<L: AffineLayoutMap>(layout: &L) -> Result<SortedLeaves> {
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::algebra::inverse::right_inverse;
+/// use noodle_cute::algebra::right_inverse;
 /// use noodle_cute::layout::{DynLayout, LayoutMap};
 ///
 /// let layout = DynLayout::new(&[2, 3], &[1, 2])?;
@@ -122,7 +121,7 @@ pub fn right_inverse<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::algebra::inverse::left_inverse;
+/// use noodle_cute::algebra::left_inverse;
 /// use noodle_cute::layout::{DynLayout, LayoutMap};
 ///
 /// let layout = DynLayout::new(&[2, 3], &[1, 2])?;
@@ -238,7 +237,7 @@ impl<L: LayoutMap> LayoutMap for Inverse<L> {
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::algebra::inverse::dense_left_inverse;
+/// use noodle_cute::algebra::dense_left_inverse;
 /// use noodle_cute::layout::{DynLayout, LayoutMap};
 ///
 /// let layout = DynLayout::new(&[3], &[1])?;
@@ -273,7 +272,7 @@ pub fn dense_left_inverse<L: LayoutMap>(layout: L) -> Result<Inverse<L>> {
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::algebra::inverse::dense_right_inverse;
+/// use noodle_cute::algebra::dense_right_inverse;
 /// use noodle_cute::layout::{DynLayout, LayoutMap};
 ///
 /// let layout = DynLayout::new(&[3], &[0])?;
@@ -325,61 +324,31 @@ pub trait TypedInvert<const LEFT: bool = false> {
     type Output: LayoutMap;
     fn invert(self) -> Result<Self::Output>;
 }
-/// 保留静态叶子的结构逆结果。
+/// Result type of the typed structural inverse (right inverse unless `LEFT`), keeping static
+/// leaves.
+///
+/// For fully static inputs, `<TypedInverse<L, LEFT> as StaticValue>::VALUE` is the result as a
+/// constant. The right inverse ignores broadcasts, negative strides, and gaps in the address
+/// chain; the left inverse rejects static negative strides, overlaps, and indivisible strides
+/// at compile time and treats broadcast modes as CuTe's quasi-inverse.
+///
+/// ```
+/// use noodle_cute::{Int, IntTuple, Nil, StaticValue, algebra::TypedInverse, layout::Layout};
+/// type Pair<const A: isize, const B: isize> = IntTuple<Int<A>, IntTuple<Int<B>, Nil>>;
+/// const R: Layout<Int<6>, Int<1>> =
+///     <TypedInverse<Layout<Pair<2, 3>, Pair<1, 2>>> as StaticValue>::VALUE;
+/// const L: Layout<Pair<2, 4>, Pair<0, 1>> =
+///     <TypedInverse<Layout<Int<4>, Int<2>>, true> as StaticValue>::VALUE;
+/// ```
+/// ```compile_fail
+/// use noodle_cute::{DynInt, Int, StaticValue, algebra::TypedInverse, layout::Layout};
+/// const R: TypedInverse<Layout<DynInt, Int<1>>> = StaticValue::VALUE;
+/// ```
+/// ```compile_fail
+/// use noodle_cute::{DynInt, Int, StaticValue, algebra::TypedInverse, layout::Layout};
+/// const L: TypedInverse<Layout<Int<4>, DynInt>, true> = StaticValue::VALUE;
+/// ```
 pub type TypedInverse<L, const LEFT: bool = false> = <L as TypedInvert<LEFT>>::Output;
-/// 全静态结构逆的结果和常量值。
-pub trait StaticInverse<const LEFT: bool = false>: Copy {
-    type Output: crate::StaticValue;
-    const OUTPUT: Self::Output = <Self::Output as crate::StaticValue>::VALUE;
-}
-impl<S: crate::StaticValue, D: crate::StaticValue, const LEFT: bool> StaticInverse<LEFT>
-    for Layout<S, D>
-where
-    Self: TypedInvert<LEFT>,
-    TypedInverse<Self, LEFT>: crate::StaticValue,
-{
-    type Output = TypedInverse<Self, LEFT>;
-}
-
-/// 编译期右逆；动态输入使用 Layout::right_inverse。
-///
-/// 忽略广播、负 stride 和地址链的空隙；静态溢出在实例化时拒绝。
-/// 常量入口与 static_composition 一样，不执行最终运行时布局校验。
-///
-/// ```
-/// use noodle_cute::{Int, shape, stride, layout::Layout};
-/// use noodle_cute::algebra::inverse::static_right_inverse;
-/// const R: Layout<Int<6>, Int<1>> = static_right_inverse(Layout {
-///     shape: shape![Int::<2>, Int::<3>], stride: stride![Int::<1>, Int::<2>],
-/// });
-/// ```
-/// ```compile_fail
-/// use noodle_cute::{Int, DynInt, layout::Layout, algebra::inverse::static_right_inverse};
-/// let _ = static_right_inverse(Layout { shape: DynInt(4), stride: Int::<1> });
-/// ```
-pub const fn static_right_inverse<L: StaticInverse>(_: L) -> L::Output {
-    L::OUTPUT
-}
-
-/// 编译期左逆；静态负 stride、重叠或不可整除在实例化时拒绝。
-///
-/// 广播模式的逆按 CuTe 定义为准逆；空 tuple 采用本库标量约定。
-/// 常量入口不执行最终运行时布局校验。
-///
-/// ```
-/// use noodle_cute::{Int, IntTuple, Nil, layout::Layout};
-/// use noodle_cute::algebra::inverse::static_left_inverse;
-/// const R: Layout<IntTuple<Int<2>, IntTuple<Int<4>, Nil>>,
-///                 IntTuple<Int<0>, IntTuple<Int<1>, Nil>>> =
-///     static_left_inverse(Layout { shape: Int::<4>, stride: Int::<2> });
-/// ```
-/// ```compile_fail
-/// use noodle_cute::{Int, DynInt, layout::Layout, algebra::inverse::static_left_inverse};
-/// let _ = static_left_inverse(Layout { shape: Int::<4>, stride: DynInt(1) });
-/// ```
-pub const fn static_left_inverse<L: StaticInverse<true>>(_: L) -> L::Output {
-    L::OUTPUT
-}
 
 impl<S: crate::layout::Shape, D: crate::tuple::Item<Profile = S::Profile>> Layout<S, D> {
     /// 保留类型的右逆，仅使用静态 stride，并只延续静态已知匹配的地址链。
@@ -404,17 +373,6 @@ impl<S: crate::layout::Shape, D: crate::tuple::Item<Profile = S::Profile>> Layou
         self.clone().invert()
     }
 }
-impl DynLayout {
-    /// 根据当前数值求结构右逆，与自由函数 right_inverse 共用算法。
-    pub fn right_inverse(&self) -> Result<Self> {
-        right_inverse(*self)
-    }
-    /// 根据当前数值求结构左逆，与自由函数 left_inverse 共用算法和错误检查。
-    pub fn left_inverse(&self) -> Result<Self> {
-        left_inverse(*self)
-    }
-}
-
 type Flat<S, D> = <Layout<<S as Flatten>::Output, <D as Flatten>::Output> as CoalesceFold>::Output;
 type Inverted<S, D, const LEFT: bool> = <Flat<S, D> as InverseKernel<LEFT>>::Output;
 impl<S, D, const LEFT: bool> TypedInvert<LEFT> for Layout<S, D>
@@ -432,7 +390,6 @@ where
     }
 }
 
-#[doc(hidden)]
 pub trait FinishInverse {
     type Output: LayoutParts;
     fn finish_inverse(self) -> Result<Self::Output>;
@@ -448,7 +405,6 @@ where
     }
 }
 
-#[doc(hidden)]
 pub trait Attach<P> {
     type Output: LayoutParts;
     fn attach(self, prefix: P) -> Result<Self::Output>;
@@ -489,7 +445,6 @@ where
         })
     }
 }
-#[doc(hidden)]
 pub trait SelectStrides<const LEFT: bool> {
     type Output: LayoutParts;
     fn select_strides(self) -> Self::Output;
@@ -506,15 +461,14 @@ impl SelectStrides<false> for Layout<Nil, Nil> {
         self
     }
 }
-#[doc(hidden)]
 pub const STATIC_STRIDE<D: Integer>: bool = D::STATIC.is_some();
 impl<S, ST, D: Integer, DT> SelectStrides<false> for Layout<IntTuple<S, ST>, IntTuple<D, DT>>
 where
     Layout<ST, DT>: SelectStrides<false>,
-    Select<{ STATIC_STRIDE::<D> }>:
+    Bool<{ STATIC_STRIDE::<D> }>:
         KeepStride<S, D, <Layout<ST, DT> as SelectStrides<false>>::Output>,
 {
-    type Output = <Select<{ STATIC_STRIDE::<D> }> as KeepStride<
+    type Output = <Bool<{ STATIC_STRIDE::<D> }> as KeepStride<
         S,
         D,
         <Layout<ST, DT> as SelectStrides<false>>::Output,
@@ -525,25 +479,24 @@ where
             stride: self.stride.1,
         }
         .select_strides();
-        <Select<{ STATIC_STRIDE::<D> }> as KeepStride<_, _, _>>::keep(
+        <Bool<{ STATIC_STRIDE::<D> }> as KeepStride<_, _, _>>::keep(
             self.shape.0,
             self.stride.0,
             tail,
         )
     }
 }
-#[doc(hidden)]
 pub trait KeepStride<S, D, Tail> {
     type Output: LayoutParts;
     fn keep(s: S, d: D, tail: Tail) -> Self::Output;
 }
-impl<S, D, Tail: LayoutParts> KeepStride<S, D, Tail> for Select<false> {
+impl<S, D, Tail: LayoutParts> KeepStride<S, D, Tail> for Bool<false> {
     type Output = Tail;
     fn keep(_: S, _: D, tail: Tail) -> Tail {
         tail
     }
 }
-impl<S, D, Tail: LayoutParts> KeepStride<S, D, Tail> for Select<true> {
+impl<S, D, Tail: LayoutParts> KeepStride<S, D, Tail> for Bool<true> {
     type Output = Layout<IntTuple<S, Tail::Shape>, IntTuple<D, Tail::Stride>>;
     fn keep(s: S, d: D, tail: Tail) -> Self::Output {
         let tail = tail.into_layout();
@@ -554,10 +507,8 @@ impl<S, D, Tail: LayoutParts> KeepStride<S, D, Tail> for Select<true> {
     }
 }
 
-#[doc(hidden)]
 pub const MATCHES<D: Integer, C: Integer>: bool =
     matches!((D::STATIC, C::STATIC), (Some(d), Some(c)) if d == c);
-#[doc(hidden)]
 pub trait RightFold<C> {
     type Output: LayoutParts;
     fn right_fold(self, current: C) -> Result<Self::Output>;
@@ -571,11 +522,11 @@ impl<C> RightFold<C> for Layout<Nil, Nil> {
 impl<S, P, ST, D: Integer, DT, C: Integer> RightFold<C>
     for Layout<IntTuple<(S, P), ST>, IntTuple<D, DT>>
 where
-    Select<{ MATCHES::<D, C> }>: RightStep<S, P, D, Layout<ST, DT>, C>,
+    Bool<{ MATCHES::<D, C> }>: RightStep<S, P, D, Layout<ST, DT>, C>,
 {
-    type Output = <Select<{ MATCHES::<D, C> }> as RightStep<S, P, D, Layout<ST, DT>, C>>::Output;
+    type Output = <Bool<{ MATCHES::<D, C> }> as RightStep<S, P, D, Layout<ST, DT>, C>>::Output;
     fn right_fold(self, current: C) -> Result<Self::Output> {
-        <Select<{ MATCHES::<D, C> }> as RightStep<_, _, _, _, _>>::run(
+        <Bool<{ MATCHES::<D, C> }> as RightStep<_, _, _, _, _>>::run(
             self.shape.0.0,
             self.shape.0.1,
             self.stride.0,
@@ -587,18 +538,17 @@ where
         )
     }
 }
-#[doc(hidden)]
 pub trait RightStep<S, P, D, Tail, C> {
     type Output: LayoutParts;
     fn run(s: S, p: P, d: D, tail: Tail, current: C) -> Result<Self::Output>;
 }
-impl<S, P, D, Tail: RightFold<C>, C> RightStep<S, P, D, Tail, C> for Select<false> {
+impl<S, P, D, Tail: RightFold<C>, C> RightStep<S, P, D, Tail, C> for Bool<false> {
     type Output = Tail::Output;
     fn run(_: S, _: P, _: D, tail: Tail, c: C) -> Result<Self::Output> {
         tail.right_fold(c)
     }
 }
-impl<S: Integer, P, D: Integer, Tail, C> RightStep<S, P, D, Tail, C> for Select<true>
+impl<S: Integer, P, D: Integer, Tail, C> RightStep<S, P, D, Tail, C> for Bool<true>
 where
     (): ComposeProduct<S, D>,
     Tail: RightFold<NumberProduct<S, D>>,
@@ -617,7 +567,6 @@ where
     }
 }
 
-#[doc(hidden)]
 pub const LEFT_VALID<D: Integer, C: Integer, M: Integer>: bool = match (D::STATIC, C::STATIC) {
     (Some(d), Some(c)) => {
         d > 0
@@ -630,7 +579,6 @@ pub const LEFT_VALID<D: Integer, C: Integer, M: Integer>: bool = match (D::STATI
     }
     _ => false,
 };
-#[doc(hidden)]
 pub trait LeftFold<C, M, P, Last> {
     type Output: LayoutParts;
     fn left_fold(self, covered: C, minimum: M, previous: P, last: Last) -> Result<Self::Output>;
@@ -647,12 +595,12 @@ impl<C, M, P, Last> LeftFold<C, M, P, Last> for Layout<Nil, Nil> {
 impl<S, PP, ST, D: Integer, DT, C, M, P, Last> LeftFold<C, M, P, Last>
     for Layout<IntTuple<(S, PP), ST>, IntTuple<D, DT>>
 where
-    Select<{ ZERO_STRIDE::<D> }>: LeftStep<S, PP, D, Layout<ST, DT>, C, M, P>,
+    Bool<{ ZERO_STRIDE::<D> }>: LeftStep<S, PP, D, Layout<ST, DT>, C, M, P>,
 {
     type Output =
-        <Select<{ ZERO_STRIDE::<D> }> as LeftStep<S, PP, D, Layout<ST, DT>, C, M, P>>::Output;
+        <Bool<{ ZERO_STRIDE::<D> }> as LeftStep<S, PP, D, Layout<ST, DT>, C, M, P>>::Output;
     fn left_fold(self, c: C, m: M, p: P, _: Last) -> Result<Self::Output> {
-        <Select<{ ZERO_STRIDE::<D> }> as LeftStep<_, _, _, _, _, _, _>>::run(
+        <Bool<{ ZERO_STRIDE::<D> }> as LeftStep<_, _, _, _, _, _, _>>::run(
             self.shape.0.0,
             self.shape.0.1,
             self.stride.0,
@@ -666,7 +614,6 @@ where
         )
     }
 }
-#[doc(hidden)]
 pub trait LeftStep<S, PP, D, Tail, C, M, P> {
     type Output: LayoutParts;
     fn run(
@@ -679,7 +626,7 @@ pub trait LeftStep<S, PP, D, Tail, C, M, P> {
         previous: P,
     ) -> Result<Self::Output>;
 }
-impl<S, PP, D, Tail, C, M, P> LeftStep<S, PP, D, Tail, C, M, P> for Select<true>
+impl<S, PP, D, Tail, C, M, P> LeftStep<S, PP, D, Tail, C, M, P> for Bool<true>
 where
     Tail: LeftFold<C, M, P, S>,
 {
@@ -689,9 +636,9 @@ where
     }
 }
 impl<S: Integer, PP, D: Integer + Div<C>, Tail, C: Integer, M: Integer, P>
-    LeftStep<S, PP, D, Tail, C, M, P> for Select<false>
+    LeftStep<S, PP, D, Tail, C, M, P> for Bool<false>
 where
-    Assert<{ LEFT_VALID::<D, C, M> }>: True,
+    Bool<{ LEFT_VALID::<D, C, M> }>: True,
     (): ComposeProduct<S, D>,
     Tail: LeftFold<D, NumberProduct<S, D>, PP, S>,
 {
@@ -718,7 +665,6 @@ where
     }
 }
 
-#[doc(hidden)]
 pub trait InverseKernel<const LEFT: bool> {
     type Output: LayoutParts;
     fn inverse_kernel(self) -> Result<Self::Output>;

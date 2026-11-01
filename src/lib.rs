@@ -91,18 +91,30 @@ impl core::error::Error for Error {}
 /// The result of a checked operation, using this crate's [`Error`] type.
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// Carries a compile-time condition as a type for trait bounds.
-#[doc(hidden)]
-pub struct Assert<const B: bool>;
-/// Marks a compile-time condition that holds.
-#[doc(hidden)]
-pub trait True {}
-// Only `Assert<true>` satisfies this bound, so invalid static extents fail trait checking.
-impl True for Assert<true> {}
+mod marker {
+    /// Carries a compile-time condition as a type for trait bounds and impl dispatch.
+    pub struct Bool<const B: bool>;
+    /// Implemented only by `Bool<true>`, so a false static condition fails trait checking.
+    pub trait True {}
+    impl True for Bool<true> {}
+}
+pub(crate) use marker::{Bool, True};
 
-/// 可由类型唯一确定的值；用于全静态布局代数的结果构造。
-#[doc(hidden)]
+/// A value fully determined by its type.
+///
+/// Every leaf of a fully static `Layout` is an `Int<N>`, so typed algebra results such as
+/// [`algebra::TypedComposition`] can be read as constants:
+///
+/// ```
+/// use noodle_cute::{Int, StaticValue, algebra::TypedComposition, layout::Layout};
+/// const C: Layout<Int<3>, Int<4>> =
+///     <TypedComposition<Layout<Int<8>, Int<2>>, Layout<Int<3>, Int<2>>> as StaticValue>::VALUE;
+/// ```
+///
+/// Unlike the checked methods, a constant read this way skips the final runtime size and
+/// address-range validation; any static arithmetic error is rejected at compile time instead.
 pub trait StaticValue: Copy {
+    /// The value encoded by the type.
     const VALUE: Self;
 }
 impl<const N: isize> StaticValue for Int<N> {

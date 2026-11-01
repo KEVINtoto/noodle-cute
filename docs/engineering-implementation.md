@@ -54,14 +54,16 @@ crate 默认是 `no_std`，不依赖堆分配，也没有外部 Rust 依赖。�
 
 `IntTuple<H,T>` 是递归异构列表：H 是当前模式，T 是同层余下模式，`Nil` 表示结尾。H 可以再次是 `IntTuple`，形成嵌套；T 的链长不增加嵌套深度。
 
-`Node` 提供 `RANK`、`DEPTH`、`LEAVES` 以及叶子访问。`mode_span(axis)` 返回某个顶层模式在扁平叶子序列中的 `(起点,数量)`，使算法能遍历叶子同时保留顶层边界。`Profile` 只记录树的形状，不记录数值或静态性。
+`Item` provides `RANK`, `DEPTH`, `LEAVES`, and leaf access. `mode_span(axis)` returns the `(start, count)` of a top-level mode in the flattened leaf sequence, so algorithms can walk leaves while keeping top-level boundaries. `Profile` records only the tree shape, not values or static-ness.
 
-`Layout<S,D>` 的约束 `D: Node<Profile = S::Profile>` 要求 shape 与 stride 的树形相同；`Layout::at` 对坐标施加同样的约束。`Shape` 对静态叶子使用 `Assert<NON_NEGATIVE<N>>: True`，因此静态负长度无法通过编译；动态负长度在构造时返回 `InvalidShape`。
+The bound `D: Item<Profile = S::Profile>` on `Layout<S,D>` requires shape and stride to have the same tree. `Shape` rejects negative static extents through a crate-private compile-time condition on `Int<N>`; negative dynamic extents return `InvalidShape` at construction.
 
-`shape!`、`stride!`、`coord!` 都展开为同一种列表，括号明确表示嵌套。`get::<I>()` 每层支持编号 0 到 15，这是访问器实现范围，不是类型化 tuple 的总 rank 上限。
+`shape!` and `stride!` both expand to the same tuple list, with parentheses creating nested modes. `get::<I>()` accepts any index the tuple has; invalid indices fail to compile.
 
 ```rust
-use noodle_cute::{coord, shape, stride, DynInt, Int, Layout, LayoutMap};
+use noodle_cute::layout::{Layout, LayoutMap};
+use noodle_cute::tuple::Item;
+use noodle_cute::{DynInt, Int, shape, stride};
 
 fn main() -> noodle_cute::Result<()> {
     let _: Int<14> = Int::<2> + Int::<3> * Int::<4>;
@@ -70,9 +72,8 @@ fn main() -> noodle_cute::Result<()> {
         stride![Int::<4>, (Int::<2>, Int::<1>)],
     )?;
     assert_eq!(layout.rank(), 2);
-    assert_eq!(layout.depth(), 2);
+    assert_eq!(layout.shape.depth(), 2);
     assert_eq!(layout.size()?, 8);
-    assert_eq!(layout.at(coord![1i64, (0i64, 1i64)])?, 5);
     assert_eq!(layout.index_of_coord(&[1, 2])?, 5);
     assert_eq!(layout.index(5)?, 5);
     assert_eq!(core::mem::size_of_val(&layout), 8);
@@ -82,35 +83,35 @@ fn main() -> noodle_cute::Result<()> {
 
 本例只有一个动态字段，所以布局占 8 字节。自动构造 stride 时，依赖动态长度的步长也会成为动态字段；并非“一个动态 shape 叶子永远只增加一个字段”。
 
-### 2.3 静态推导的公共中间接口
+### 2.3 Shared machinery for typed algebra
 
-`LayoutParts` 定义在 [`layout/static_layout.rs`](../src/layout/static_layout.rs)，为 `Layout<S,D>` 统一提供 `Shape`、`Stride` 关联类型和 `into_layout` 转换。它允许表达尚未校验的代数中间布局，转换返回自身，不执行校验或归一。composition 的 `ComposeTree`、`ComposeLeaf`、`Fold`、`FoldStep`、`Finish`、`FinishNonempty` 均使用 `Output: LayoutParts`；中继阶段直接转发 `Output`，避免为同一结果重复推导 `Shape` 与 `Stride`。
+`LayoutParts` in [`layout/static_layout.rs`](../src/layout/static_layout.rs) gives `Layout<S,D>` the associated types `Shape` and `Stride` plus an `into_layout` conversion. It expresses unvalidated intermediate layouts; the conversion returns the layout itself without validation or normalization. The composition stages `ComposeTree`, `ComposeLeaf`, `Fold`, `FoldStep`, `Finish`, and `FinishNonempty` all use `Output: LayoutParts`, and relay stages forward `Output` instead of re-deriving `Shape` and `Stride`.
 
-直接使用这些算法辅助 trait 时，shape/stride 投影应写为 `<T::Output as LayoutParts>::Shape` / `Stride`，代替旧的 `T::Shape` / `T::Stride`。`TypedComposition`、`StaticComposition`、公开组合入口及其具体结果类型保持一致，最终结果仍在公开方法中校验。
+These helper traits are implementation details: the algebra submodules are private, and `noodle_cute::algebra` re-exports only the operations, their typed traits (`TypedCompose`, `Complement`, `TypedDivide`, `TypedProduct`, `TypedInvert`), and the result aliases (`TypedComposition`, `TypedComplement`, `TypedDivided`, `TypedProductLayout`, `TypedInverse`, `CoalescedLayout`). `LayoutParts` is crate-internal.
 
-`tuple::GetHead<B>` 和 `composition::Select<B>` 重导出根模块的 `Assert<B>`，共用布尔分派标记；名称和构造语法保留，但现在表示同一种类型。coalesce 的 `Decision<u8>` 仍独立表示丢弃、保留、合并三态。`Unwrap` 下沉到 `tuple` 模块，原 composition 路径保留重导出。非空 tuple 的 `LEN` 从 `Item::RANK` 推导，`MAX_DEPTH` 从 `Item::DEPTH-1` 推导；`Nil` 保留自己的常量定义。
+One marker type, the crate-private `Bool<B>`, carries compile-time conditions both as `Bool<COND>: True` bounds and as impl dispatch (`Bool<true>` / `Bool<false>`). Typed divide and product select their grouping with `Kind<KIND>`, where `KIND` is one of the public constants `LOGICAL`, `ZIPPED`, `TILED`, `FLAT`, `BLOCKED`, and `RAKED`; coalesce keeps its own `Decision<u8>` for discard/retain/merge. `Unwrap` is a crate-internal tuple helper that removes one level.
 
-整数模块的 `ceil_div` 是 `const fn`，静态推导与运行时路径共用不构造 `a+b-1` 的公式。静态结果构造继续共用 `StaticValue`；`StaticCoalesce` / `StaticCompose` 的 `OUTPUT` 默认取 `Self::Output::VALUE`。普通混合乘法与 composition 的静态零传播仍采用各自的类型规则；GCA 约束与关联类型投影继续引用相同的命名 const。
+`ceil_div` in `int` is a `const fn` shared by type-level and runtime paths and never forms `a+b-1`. Fully static results are read through the public `StaticValue` trait: every leaf of a static `Layout` is an `Int<N>`, so `<TypedComposition<A, B> as StaticValue>::VALUE` (and the other aliases) is the result as a constant. Plain mixed multiplication and the static-zero propagation of composition (`ComposeProduct`) keep their own type rules; generic-const bounds and associated-type projections refer to the same named consts.
 
-### 2.4 complement 的类型化实现
+### 2.4 Typed complement
 
-[`algebra/complement.rs`](../src/algebra/complement.rs) 将全静态、混合与运行时入口放在同一模块。`Complement<C,EXTENDED>` 推导 `TypedComplement`，`StaticComplement::OUTPUT` 复用该结果类型，通过 `StaticValue` 构造常量。`LayoutParts` 承载过滤、排序、前缀和尾部拼接的中间布局，最终在公开方法中使用 `Layout::new` 校验。
+[`algebra/complement.rs`](../src/algebra/complement.rs) holds the static, mixed, and runtime paths. `Complement<C,EXTENDED>` derives `TypedComplement`, whose fully static value is read through `StaticValue`. `LayoutParts` carries the intermediate layouts of filtering, sorting, the prefix, and the tail; the public methods validate the result with `Layout::new`.
 
-算法复用 `Flatten` / `Append` / `Unwrap`、coalesce 的 `Prepend` / `CoalesceFold` / `FinishCoalesce`、整数乘除和 `ceil_div`，以及 composition 已有的 `Select` / `StepNumber` / `ZERO_STRIDE` / `ComposeProduct` 分派与整数构造。`complement_step` 供类型化和运行时路径共同检查每一步的 gap 与下一 stride。类型化排序遵循上游“多模式需静态 stride”的约束；运行时排序继续使用 `Leaves` 和 `MAX_RANK` 数组。
+The algorithm reuses `Flatten` / `Append` / `Unwrap`, coalesce's `Prepend` / `CoalesceFold` / `FinishCoalesce`, integer multiplication/division and `ceil_div`, and composition's `StepNumber` / `ZERO_STRIDE` / `ComposeProduct` dispatch. `complement_step` checks each gap and next stride for both the typed and runtime paths. Typed sorting follows upstream's requirement of static strides for multi-mode layouts; runtime sorting uses `Leaves` and `MAX_RANK` arrays.
 
-全静态、混合与动态路径的测试统一放在 [`tests/complement_contract.rs`](../tests/complement_contract.rs)，作为独立集成测试运行。入口、类型保留规则及上游偏离详见[布局代数 §14.2](algebra.md#142-全静态混合与运行时入口)。
+Tests live in [`tests/complement_contract.rs`](../tests/complement_contract.rs). Entry points, type-preservation rules, and upstream deviations are described in [layout algebra §14.2](algebra.md#142-全静态混合与运行时入口).
 
-### 2.5 inverse、divide 与 product 的类型化实现
+### 2.5 Typed inverse, divide, and product
 
-[`inverse.rs`](../src/algebra/inverse.rs) 的 `TypedInvert<LEFT>` 与 `StaticInverse<LEFT>` 复用同一套类型推导。`Attach` 在排序前保存原逻辑前缀积，排序直接复用 complement 的稳定 `Sort`；右逆过滤动态 stride，仅依据静态等式接续连续链，左逆要求 coalesce 后的 stride 全静态。计算依赖动态 shape 时，只让依赖它的结果叶子变为动态值。运行时 `sorted_leaves` 与枚举逆仍保留。
+`TypedInvert<LEFT>` in [`inverse.rs`](../src/algebra/inverse.rs) derives `TypedInverse`. `Attach` records the original logical prefix product before sorting, and sorting reuses complement's stable `Sort`. The right inverse drops dynamic strides and extends the chain only through static equalities; the left inverse requires all strides to be static after coalescing. Only result leaves that depend on a dynamic shape become dynamic. The runtime `sorted_leaves` path and the enumerated inverses remain.
 
-[`typed.rs`](../src/algebra/typed.rs) 是 divide/product 共用的内部模块：`Transform` 按整数、布局或嵌套 tuple tiler 分派，`Unzip` 按上游 guide 收集 tile/rest，`Regroup` 选择 logical/zipped/tiled/flat profile，`Checked` 统一执行最终 `Layout::new` 校验。两种算法只各自实现单个 tiler 的 `Binary` 运算，继续复用现有 composition 与 complement；公共方法、结果类型与静态常量入口由同一个内部宏生成。
+[`typed.rs`](../src/algebra/typed.rs) is the internal module shared by divide and product: `Transform` dispatches on integer, layout, or nested-tuple tilers, `Unzip` collects tile/rest by the upstream guide, `Regroup` selects the zipped/tiled/flat profile, and `Checked` runs the final `Layout::new`. Each operation only implements `Binary` for a single tiler and reuses composition and complement; the public methods and result types come from one internal macro.
 
-[`divide.rs`](../src/algebra/divide.rs) 的 `CoalesceTarget` 保留 `shape(coalesce(L))` 的类型，严格 axes 由 `StrictAxes` 校验等长和整除关系；整数叶子直接生成 `(tile,rest)`，嵌套模式复用组合。`product.rs` 的 `ZipModes` 为 blocked/raked 按顶层 rank 补 `1:0`，再保留各模式的 block/rest 边界。动态 tuple product 与原有 tuple divide 共用 `group_modes` / `Modes`，结果仍为一层 `GroupedLayout`。
+`CoalesceTarget` in [`divide.rs`](../src/algebra/divide.rs) keeps the type of `shape(coalesce(L))`. In `product.rs`, blocked/raked pad the tiler with `1:0` modes to the block's rank before composing (`ProductOp<true>` with `PadModes`), then `ZipModes` zips block and rest per mode. Runtime tuple products and tuple divides share `group_modes` / `Modes` and produce a one-level `GroupedLayout`; runtime single-tiler divide regroups the composed tile and rest so tiled/flat unpack the composed modes like upstream.
 
-全静态入口从 `StaticValue` 构造常量，不执行最终运行时大小、地址范围或 tiler 值域校验；混合方法保留原动态字段，校验输入与结果后返回 `Result`。类型化路径不转为运行时数组，因此支持超过 `MAX_RANK` 的输入和输出；动态入口保留固定容量限制及惰性映射能力。
+Fully static results read through `StaticValue` skip the final runtime size, address-range, and tiler checks; mixed methods keep dynamic fields and validate inputs and results before returning `Result`. Typed paths never go through runtime arrays, so their inputs and outputs may exceed `MAX_RANK`; runtime entry points keep the fixed capacity and the lazy maps.
 
-对应契约分别集中在 [`inverse_contract.rs`](../tests/inverse_contract.rs)、[`divide_contract.rs`](../tests/divide_contract.rs)、[`product_contract.rs`](../tests/product_contract.rs)。这些文件也承接原 `algebra_contract.rs` 中相应模块的测试，后者只保留 `Grouping` / `TileRest` 和跨模块规律。算法、静态性规则及上游偏离分别见[布局代数 §21.1](algebra.md#211-inverse-的全静态混合与运行时入口)、[§28.1](algebra.md#281-divide-的全静态混合与运行时入口)、[§36.1](algebra.md#361-product-的全静态混合与运行时入口)。
+Contracts live in [`inverse_contract.rs`](../tests/inverse_contract.rs), [`divide_contract.rs`](../tests/divide_contract.rs), and [`product_contract.rs`](../tests/product_contract.rs); `algebra_contract.rs` keeps `Grouping` / `TileRest` and cross-module laws. Algorithms, static-ness rules, and upstream deviations are in [layout algebra §21.1](algebra.md#211-inverse-的全静态混合与运行时入口), [§27.1](algebra.md#271-divide-的全静态混合与运行时入口), and [§35.1](algebra.md#351-product-的全静态混合与运行时入口).
 
 ## 3. 三种布局表示与公共契约
 
@@ -165,11 +166,11 @@ coalesce 算法集中在 [`src/algebra/coalesce.rs`](../src/algebra/coalesce.rs)
 
 | 输入 | 普通化简 | 保留扩展映射 |
 |---|---|---|
-| 全静态 `Layout` | `algebra::static_coalesce` | `algebra::static_coalesce_extended` |
+| Fully static `Layout` | `<CoalescedLayout<S, D> as StaticValue>::VALUE` | `<CoalescedLayout<S, D, true> as StaticValue>::VALUE` |
 | 混合或全动态叶子的 `Layout` | `Layout::coalesce` | `Layout::coalesce_extended` |
 | 运行时元数据 `DynLayout` | `DynLayout::coalesce` | `DynLayout::coalesce_extended` |
 
-全静态入口用 `CoalesceFold<EXTENDED>` 推导结果类型，再通过 `StaticCoalesce::OUTPUT` 和共享的 `StaticValue` 构造常量值；没有运行时递归，不经过 `DynLayout`，因此不受 `MAX_RANK` 限制。`StaticValue` 也供静态 composition 使用。普通化简将空结果归一为 `1:0`，扩展版本保留末尾 shape-1 的 stride。与 `static_composition` 一样，常量入口不调用 `Layout::new` 的大小与地址范围校验；非法静态 shape 由 `Shape` 约束拒绝，静态合并乘积溢出在类型实例化时报错。
+The fully static result type comes from `CoalesceFold<EXTENDED>` and its value from `StaticValue`; there is no runtime recursion and no `DynLayout`, so it is not limited by `MAX_RANK`. The plain version normalizes an empty result to `1:0`; the extended version keeps the stride of a trailing shape-1 mode. Reading a constant this way skips `Layout::new`'s size and address-range validation;非法静态 shape 由 `Shape` 约束拒绝，静态合并乘积溢出在类型实例化时报错。
 
 普通折叠与扩展折叠的空尾初始化共用 `PrependToEmpty<S,D,EXTENDED>`：保留分支不区分 EXTENDED，静态单位轴在普通分支被删除，在扩展分支以 extent 2 保留末尾 stride。三态合并策略与空输入的 `1:0` 约定保持不变。
 
@@ -193,10 +194,10 @@ coalesce 算法集中在 [`src/algebra/coalesce.rs`](../src/algebra/coalesce.rs)
 
 `composition` 构造 `Composition<A,B>` 时缓存满足规范化条件的仿射结果，即使弱整除导致它与逐点复合不同；不可整除或非仿射时保留逐点回退，其他错误直接返回。
 
-`Composition::index` 因而只需在缓存布局求值与 `outer.index_extended(inner.index(i))` 之间选择。它的 `size/rank/extent` 仍来自 inner；直接调用 `composition_layout` 得到的规范布局可能有不同的顶层结构。
+`Composition::index` 因而只需在缓存布局求值与 `outer.index_extended(inner.index(i))` 之间选择。Its `size` comes from inner; `rank`/`extent` follow the normalized layout when there is one (matching `composition_layout`), and inner's modes otherwise.
 
 ```rust
-use noodle_cute::algebra::composition::{composition, composition_layout};
+use noodle_cute::algebra::{composition, composition_layout};
 use noodle_cute::layout::{DynLayout, LayoutMap};
 
 fn main() -> noodle_cute::Result<()> {
@@ -215,11 +216,11 @@ fn main() -> noodle_cute::Result<()> {
 
 这组断言直接体现数学 §7 的例外，不能用“组合总是逐点代入”替换实现。
 
-两侧都是 `Int<N>` 叶子时，`static_composition` 在 trait 求解阶段执行同一算法：公共模块的 `CoalesceFold<true>` 做 `coalesce_x`；普通 `Layout::coalesce` 使用同一折叠的默认分支，两者共用 `Prepend` 的丢弃/合并规则，`ComposeTree` 按 inner 的树递归，`Fold` 的每一步数值由 `const fn step` 计算并以泛型常量写回类型。结果是零大小、可放进 `const` 的 `Layout`，不经过 `Leaves`/`DynLayout`；整除、溢出和 profile 错误都在实例化时编译失败。细节见[布局代数 7.1 节](algebra.md#71-全静态入口-static_composition)。
+When both sides have only `Int<N>` leaves, `TypedComposition<A, B>` runs the same algorithm during trait resolution:公共模块的 `CoalesceFold<true>` 做 `coalesce_x`；普通 `Layout::coalesce` 使用同一折叠的默认分支，两者共用 `Prepend` 的丢弃/合并规则，`ComposeTree` 按 inner 的树递归，`Fold` 的每一步数值由 `const fn step` 计算并以泛型常量写回类型。结果是零大小、可放进 `const` 的 `Layout`，不经过 `Leaves`/`DynLayout`；整除、溢出和 profile 错误都在实例化时编译失败。细节见[布局代数 7.1 节](algebra.md#71-fully-static-results)。
 
-全静态、混合及运行时 composition 都在 [`src/algebra/composition.rs`](../src/algebra/composition.rs) 中实现。`static_composition` 用 `StaticCompose::OUTPUT` 构造常量；`Layout::composition` 返回 `Result<TypedComposition<A,B>>`，两者共用 `ComposeTree` / `Fold` / `Finish` 的类型递归，阶段结果统一为 `Output: LayoutParts`。混合路径的 `TypedStep` 仅在相关参数静态已知时生成 `Int<N>`，否则生成 `DynInt`；运行时单位模式不会改变输出树。静态零乘动态值与静态零分子除动态值沿用 CuTe 的特殊规则。
+全静态、混合及运行时 composition 都在 [`src/algebra/composition.rs`](../src/algebra/composition.rs) 中实现。A fully static result is read as `<TypedComposition<A,B> as StaticValue>::VALUE`; `Layout::composition` returns `Result<TypedComposition<A,B>>`; both share `ComposeTree` / `Fold` / `Finish` 的类型递归，阶段结果统一为 `Output: LayoutParts`。混合路径的 `TypedStep` 仅在相关参数静态已知时生成 `Int<N>`，否则生成 `DynInt`；运行时单位模式不会改变输出树。静态零乘动态值与静态零分子除动态值沿用 CuTe 的特殊规则。
 
-`DynLayout::composition(&rhs)` 委托给 `composition_layout`，返回 `GroupedLayout`；通用 `composition` 仍提供原有惰性回退。类型化方法允许负 stride，并检查动态整除、除零与溢出；与上游省略动态断言相比，这是显式的受检差异。类型化结果和常量结果不经过固定容量缓冲区，因此不受 `MAX_RANK` 限制。类型化 coalesce 与运行时 coalesce 可保留不同模式边界，弱整除时结果数值可能随静态信息不同而改变，见[布局代数 7.3 节](algebra.md#73-composition-的全静态混合与运行时入口)。运行时/混合契约见 [`tests/composition_contract.rs`](../tests/composition_contract.rs)，静态类型契约见 [`tests/static_composition_contract.rs`](../tests/static_composition_contract.rs)。
+`composition_layout` returns a `GroupedLayout`; the generic `composition` keeps the lazy fallback.类型化方法允许负 stride，并检查动态整除、除零与溢出；与上游省略动态断言相比，这是显式的受检差异。类型化结果和常量结果不经过固定容量缓冲区，因此不受 `MAX_RANK` 限制。类型化 coalesce 与运行时 coalesce 可保留不同模式边界，弱整除时结果数值可能随静态信息不同而改变，见[布局代数 7.3 节](algebra.md#73-composition-的全静态混合与运行时入口)。Runtime, mixed, and static contracts are in [`tests/composition_contract.rs`](../tests/composition_contract.rs).
 
 ### 5.3 补布局、划分与乘积
 
@@ -505,7 +506,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `TileRest` | 余数选 tile，商选 rest，两侧相加 | `_tile`、`_rest` |
 | `LocalTile` | 局部编号解码后加全局原点，调用父坐标公式 | `_tile_a`、`_origin_a`、`_layout` |
 | `LocalPartition` | 将编号变为 `thread + i*threads` | `_thread`、`_threads`、`_layout` |
-| `DividedAxes` | 分别解码 tile/rest，再恢复原坐标 | `_tile_a`、`_rest_a`、`_layout` |
 | `Sliced` | 重建父坐标，减去切片原点地址 | `_selected_a`、`_layout` |
 | `SwizzledLayout` | 对底层地址树添加掩码、移位、XOR | 沿用底层参数 |
 

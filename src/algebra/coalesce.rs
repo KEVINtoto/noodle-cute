@@ -9,7 +9,7 @@ use core::ops::Mul;
 use crate::int::{Int, Integer, mul};
 use crate::layout::{DynLayout, Layout, LayoutMap, Shape};
 use crate::tuple::{Flatten, Item, Nil};
-use crate::{IntTuple, Result, StaticValue};
+use crate::{IntTuple, Result};
 
 /// Selects a coalescing action from facts known at compile time.
 ///
@@ -17,21 +17,16 @@ use crate::{IntTuple, Result, StaticValue};
 /// remains in the output tuple. Action codes are [`DISCARD`] for a static unit
 /// extent, [`RETAIN`] to keep a leaf, and [`MERGE`] to merge it with the folded
 /// tail's head.
-#[doc(hidden)]
 pub struct Decision<const N: u8>;
 
 /// Drops a static unit extent.
-#[doc(hidden)]
 pub const DISCARD: u8 = 0;
 /// Keeps the leaf as a separate mode.
-#[doc(hidden)]
 pub const RETAIN: u8 = 1;
 /// Merges the leaf with the folded tail's head.
-#[doc(hidden)]
 pub const MERGE: u8 = 2;
 
 /// Selects whether a leaf is discarded or retained when the folded tail is empty.
-#[doc(hidden)]
 pub const fn unit_decision(s: Option<isize>) -> u8 {
     if matches!(s, Some(1)) {
         DISCARD
@@ -41,7 +36,6 @@ pub const fn unit_decision(s: Option<isize>) -> u8 {
 }
 
 /// Selects whether to discard, retain, or merge a leaf with the folded tail's head.
-#[doc(hidden)]
 pub const fn merge_decision(
     s: Option<isize>,
     d: Option<isize>,
@@ -66,14 +60,11 @@ pub const fn merge_decision(
 
 // Reuse these constants in bounds and associated-type projections so generic
 // const expressions refer to identical definitions.
-#[doc(hidden)]
 pub const UNIT_DECISION<S: Integer>: u8 = unit_decision(S::STATIC);
-#[doc(hidden)]
 pub const MERGE_DECISION<S: Integer, D: Integer, TS: Integer, TD: Integer>: u8 =
     merge_decision(S::STATIC, D::STATIC, TS::STATIC, TD::STATIC);
 
 /// 将叶子加入空尾部；EXTENDED 为真时用 extent 2 保留末尾静态单位轴。
-#[doc(hidden)]
 pub trait PrependToEmpty<S, D, const EXTENDED: bool = false> {
     type Output;
     fn apply(s: S, d: D) -> Self::Output;
@@ -104,7 +95,6 @@ impl<S, D, const EXTENDED: bool> PrependToEmpty<S, D, EXTENDED> for Decision<RET
 /// - `TS`, `TD`: types of the tail's first shape and stride leaves.
 /// - `TSR`, `TDR`: types of the remaining shape and stride tuples of the tail
 ///   after its first leaf.
-#[doc(hidden)]
 pub trait PrependToNonempty<S, D, TS, TSR, TD, TDR> {
     type Output;
     fn apply(s: S, d: D, tail: Layout<IntTuple<TS, TSR>, IntTuple<TD, TDR>>) -> Self::Output;
@@ -143,7 +133,6 @@ impl<S: Mul<TS>, D, TS, TSR, TD, TDR> PrependToNonempty<S, D, TS, TSR, TD, TDR>
 ///
 /// `S`/`D` are the new shape/stride leaf types. For a nonempty tail, `TS`/`TD`
 /// are its first shape/stride leaf types and `TSR`/`TDR` the remaining tuples.
-#[doc(hidden)]
 pub trait Prepend<S, D> {
     type Output;
     fn prepend(self, s: S, d: D) -> Self::Output;
@@ -189,7 +178,6 @@ where
 /// The result can still be empty when the input is empty or every extent is a
 /// static one; [`FinishCoalesce`] normalizes that case.
 /// `EXTENDED` 选择 coalesce_x 的初始叶子，保留末尾 stride。
-#[doc(hidden)]
 pub trait CoalesceFold<const EXTENDED: bool = false> {
     type Output;
     fn fold(self) -> Self::Output;
@@ -267,7 +255,6 @@ where
 }
 
 /// Validates the folded layout and normalizes an empty result to `1:0`.
-#[doc(hidden)]
 pub trait FinishCoalesce {
     type Output: LayoutMap;
     fn finish(self) -> Result<Self::Output>;
@@ -294,7 +281,34 @@ where
     }
 }
 
-/// 类型化 coalesce 的结果类型；EXTENDED 选择保留扩展映射的版本。
+/// Result type of the typed coalesce; `EXTENDED` selects CuTe `coalesce_x`, which keeps the
+/// extended mapping.
+///
+/// For fully static inputs, `<CoalescedLayout<S, D> as StaticValue>::VALUE` is the result as
+/// a constant: static unit modes are removed, contiguous modes merged, and an empty result is
+/// normalized to `1:0`. The extended version replaces a trailing static unit extent with 2.
+/// Static merge products must be representable as `isize`.
+///
+/// ```
+/// use noodle_cute::{Int, IntTuple, Nil, StaticValue, algebra::CoalescedLayout, layout::Layout};
+/// type Pair<const A: isize, const B: isize> = IntTuple<Int<A>, IntTuple<Int<B>, Nil>>;
+/// type Single<const S: isize, const D: isize> = Layout<IntTuple<Int<S>, Nil>, IntTuple<Int<D>, Nil>>;
+/// const C: Single<6, 1> = <CoalescedLayout<Pair<2, 3>, Pair<1, 2>> as StaticValue>::VALUE;
+/// const X: Single<4, 1> = <CoalescedLayout<Pair<2, 1>, Pair<1, 2>, true> as StaticValue>::VALUE;
+/// ```
+///
+/// Runtime leaves have no constant value; use [`Layout::coalesce`] instead:
+/// ```compile_fail
+/// use noodle_cute::{DynInt, Int, StaticValue, algebra::CoalescedLayout};
+/// const C: CoalescedLayout<DynInt, Int<1>> = StaticValue::VALUE;
+/// ```
+/// Static merge products must fit in `isize`:
+/// ```compile_fail
+/// use noodle_cute::{Int, IntTuple, Nil, StaticValue, algebra::CoalescedLayout};
+/// type Shape = IntTuple<Int<{ isize::MAX }>, IntTuple<Int<2>, Nil>>;
+/// type Stride = IntTuple<Int<0>, IntTuple<Int<0>, Nil>>;
+/// const C: CoalescedLayout<Shape, Stride> = StaticValue::VALUE;
+/// ```
 pub type CoalescedLayout<S, D, const EXTENDED: bool = false> = <<Layout<
     <S as Flatten>::Output,
     <D as Flatten>::Output,
@@ -344,80 +358,6 @@ where
         self.size()?;
         self.clone().flatten().fold().finish()
     }
-}
-
-/// 全静态 coalesce 的结果类型与常量值，不经过运行时递归或 DynLayout。
-///
-/// EXTENDED 选择 CuTe coalesce_x；默认选择普通 coalesce。
-pub trait StaticCoalesce<const EXTENDED: bool = false>: Copy {
-    type Output: StaticValue;
-    const OUTPUT: Self::Output = Self::Output::VALUE;
-}
-impl<S, D, const EXTENDED: bool> StaticCoalesce<EXTENDED> for Layout<S, D>
-where
-    S: Shape + StaticValue + Flatten,
-    D: Item<Profile = S::Profile> + StaticValue + Flatten,
-    Layout<S::Output, D::Output>: CoalesceFold<EXTENDED>,
-    <Layout<S::Output, D::Output> as CoalesceFold<EXTENDED>>::Output: FinishCoalesce,
-    CoalescedLayout<S, D, EXTENDED>: StaticValue,
-{
-    type Output = CoalescedLayout<S, D, EXTENDED>;
-}
-
-/// 在编译期化简全静态布局，静态单位轴被移除，连续模式被合并。
-///
-/// 空输入与全单位轴结果归一为 1:0。静态合并乘积溢出在实例化时报错。
-/// 与 static_composition 一样，此入口不执行 Layout::new 的大小与地址范围校验。
-///
-/// ```
-/// use noodle_cute::{Int, IntTuple, Nil, shape, stride};
-/// use noodle_cute::layout::Layout;
-/// use noodle_cute::algebra::static_coalesce;
-/// const C: Layout<IntTuple<Int<6>, Nil>, IntTuple<Int<1>, Nil>> = static_coalesce(
-///     Layout { shape: shape![Int::<2>, Int::<3>], stride: stride![Int::<1>, Int::<2>] }
-/// );
-/// ```
-///
-/// 动态叶子应使用 Layout::coalesce：
-/// ```compile_fail
-/// use noodle_cute::{DynInt, Int, layout::Layout, algebra::static_coalesce};
-/// let _ = static_coalesce(Layout { shape: DynInt(3), stride: Int::<1> });
-/// ```
-///
-/// 静态合并乘积必须能由 isize 表示：
-/// ```compile_fail
-/// use noodle_cute::{Int, shape, stride, layout::Layout, algebra::static_coalesce};
-/// let _ = static_coalesce(Layout {
-///     shape: shape![Int::<{ isize::MAX }>, Int::<2>],
-///     stride: stride![Int::<0>, Int::<0>],
-/// });
-/// ```
-pub const fn static_coalesce<L: StaticCoalesce>(_: L) -> L::Output {
-    L::OUTPUT
-}
-
-/// 在编译期执行全静态 coalesce_x，保留扩展映射。
-///
-/// 末尾静态 shape-1 换成 2，因此结果大小可能增大。空输入归一为 1:0。
-/// 扩展映射等价要求原布局的前导 extent 为正。
-/// 与 static_coalesce 相同，此入口不执行运行时大小与地址范围校验。
-///
-/// ```
-/// use noodle_cute::{Int, IntTuple, Nil, shape, stride};
-/// use noodle_cute::layout::Layout;
-/// use noodle_cute::algebra::static_coalesce_extended;
-/// const C: Layout<IntTuple<Int<4>, Nil>, IntTuple<Int<1>, Nil>> = static_coalesce_extended(
-///     Layout { shape: shape![Int::<2>, Int::<1>], stride: stride![Int::<1>, Int::<2>] }
-/// );
-/// ```
-///
-/// 动态 stride 也不能进入全静态入口：
-/// ```compile_fail
-/// use noodle_cute::{DynInt, Int, layout::Layout, algebra::static_coalesce_extended};
-/// let _ = static_coalesce_extended(Layout { shape: Int::<1>, stride: DynInt(8) });
-/// ```
-pub const fn static_coalesce_extended<L: StaticCoalesce<true>>(_: L) -> L::Output {
-    L::OUTPUT
 }
 
 impl DynLayout {

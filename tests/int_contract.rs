@@ -5,7 +5,7 @@
 
 use core::mem::{size_of, size_of_val};
 
-use noodle_cute::int::{DynInt, Int, Integer, NON_NEGATIVE};
+use noodle_cute::int::{DynInt, Int, Integer};
 use noodle_cute::{Error, i};
 
 #[test]
@@ -92,14 +92,6 @@ fn dynint_conversions_and_default_round_trip() {
     assert_eq!(value, DynInt(11));
     assert_eq!(value.value(), 11);
     assert_eq!(DynInt::default(), DynInt(0));
-}
-
-#[test]
-#[allow(clippy::assertions_on_constants)]
-fn non_negative_const_matches_runtime_sign_check() {
-    assert!(NON_NEGATIVE::<0>);
-    assert!(NON_NEGATIVE::<5>);
-    assert!(!NON_NEGATIVE::<-1>);
 }
 
 #[test]

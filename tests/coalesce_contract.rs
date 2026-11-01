@@ -2,11 +2,9 @@
 
 use core::mem::size_of_val;
 
-use noodle_cute::algebra::{
-    CoalescedLayout, StaticCoalesce, static_coalesce, static_coalesce_extended,
-};
+use noodle_cute::algebra::CoalescedLayout;
 use noodle_cute::layout::{AffineLayoutMap, DynLayout, Layout, LayoutMap};
-use noodle_cute::{DynInt, Error, Int, IntTuple, Nil, shape, stride};
+use noodle_cute::{DynInt, Error, Int, IntTuple, Nil, StaticValue, shape, stride};
 
 type Pair<A, B> = IntTuple<A, IntTuple<B, Nil>>;
 type Triple<A, B, C> = IntTuple<A, Pair<B, C>>;
@@ -19,27 +17,25 @@ fn static_entries_produce_const_zero_sized_results() {
         shape: shape![Int::<2>, (Int::<1>, Int::<6>)],
         stride: stride![Int::<1>, (Int::<99>, Int::<2>)],
     };
-    const OUTPUT: Single<Int<12>, Int<1>> = static_coalesce(INPUT);
+    const OUTPUT: Single<Int<12>, Int<1>> = <CoalescedLayout<
+        Pair<Int<2>, Pair<Int<1>, Int<6>>>,
+        Pair<Int<1>, Pair<Int<99>, Int<2>>>,
+    > as StaticValue>::VALUE;
     assert_eq!(OUTPUT, INPUT.coalesce().unwrap());
     assert_eq!(size_of_val(&OUTPUT), 0);
     for i in 0..12 {
         assert_eq!(OUTPUT.index(i), INPUT.index(i));
     }
 
-    type Unit = Layout<Int<1>, Int<8>>;
-    const NORMAL: Layout<Int<1>, Int<0>> = <Unit as StaticCoalesce>::OUTPUT;
-    const EXTENDED: Single<Int<2>, Int<8>> = <Unit as StaticCoalesce<true>>::OUTPUT;
+    const NORMAL: Layout<Int<1>, Int<0>> = <CoalescedLayout<Int<1>, Int<8>> as StaticValue>::VALUE;
+    const EXTENDED: Single<Int<2>, Int<8>> =
+        <CoalescedLayout<Int<1>, Int<8>, true> as StaticValue>::VALUE;
     assert_eq!(NORMAL.index(0), Ok(0));
     assert_eq!(EXTENDED.index_extended(3), Ok(24));
 
-    const EMPTY: Layout<Int<1>, Int<0>> = static_coalesce(Layout {
-        shape: Nil,
-        stride: Nil,
-    });
-    const EMPTY_EXTENDED: Single<Int<1>, Int<0>> = static_coalesce_extended(Layout {
-        shape: Nil,
-        stride: Nil,
-    });
+    const EMPTY: Layout<Int<1>, Int<0>> = <CoalescedLayout<Nil, Nil> as StaticValue>::VALUE;
+    const EMPTY_EXTENDED: Single<Int<1>, Int<0>> =
+        <CoalescedLayout<Nil, Nil, true> as StaticValue>::VALUE;
     assert_eq!(EMPTY.size(), Ok(1));
     assert_eq!(EMPTY_EXTENDED.index_extended(5), Ok(0));
 }
@@ -50,19 +46,18 @@ fn static_extended_seed_preserves_the_terminal_stride() {
         shape: shape![Int::<2>, Int::<1>],
         stride: stride![Int::<1>, Int::<8>],
     };
-    const NORMAL: Single<Int<2>, Int<1>> = static_coalesce(INPUT);
+    type Shape = Pair<Int<2>, Int<1>>;
+    const NORMAL: Single<Int<2>, Int<1>> =
+        <CoalescedLayout<Shape, Pair<Int<1>, Int<8>>> as StaticValue>::VALUE;
     const EXTENDED: Layout<Pair<Int<2>, Int<2>>, Pair<Int<1>, Int<8>>> =
-        static_coalesce_extended(INPUT);
-    let _: CoalescedLayout<Pair<Int<2>, Int<1>>, Pair<Int<1>, Int<8>>, true> = EXTENDED;
+        <CoalescedLayout<Shape, Pair<Int<1>, Int<8>>, true> as StaticValue>::VALUE;
     assert_eq!(NORMAL.index_extended(2), Ok(2));
     for i in 0..16 {
         assert_eq!(EXTENDED.index_extended(i), INPUT.index_extended(i));
     }
 
-    const MERGED: Single<Int<4>, Int<1>> = static_coalesce_extended(Layout {
-        shape: shape![Int::<2>, Int::<1>],
-        stride: stride![Int::<1>, Int::<2>],
-    });
+    const MERGED: Single<Int<4>, Int<1>> =
+        <CoalescedLayout<Shape, Pair<Int<1>, Int<2>>, true> as StaticValue>::VALUE;
     assert_eq!(MERGED.size(), Ok(4));
     assert_eq!(MERGED.index_extended(9), Ok(9));
 }
@@ -149,7 +144,10 @@ fn runtime_backward_fold_agrees_with_static_zero_extent_order() {
         shape: shape![Int::<{ isize::MAX }>, Int::<2>, Int::<0>],
         stride: stride![Int::<0>, Int::<0>, Int::<0>],
     };
-    const OUTPUT: Single<Int<0>, Int<0>> = static_coalesce(INPUT);
+    const OUTPUT: Single<Int<0>, Int<0>> = <CoalescedLayout<
+        Triple<Int<{ isize::MAX }>, Int<2>, Int<0>>,
+        Triple<Int<0>, Int<0>, Int<0>>,
+    > as StaticValue>::VALUE;
     let input = INPUT.as_flat_layout().unwrap();
     let normal = input.coalesce().unwrap();
     assert_eq!(normal.shapes(), &[0]);

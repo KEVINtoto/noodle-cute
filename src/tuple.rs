@@ -23,7 +23,7 @@ use core::marker::PhantomData;
 use core::ops::Mul;
 
 use crate::int::{Int, Integer, mul};
-use crate::{Error, Result};
+use crate::{Bool, Error, Result};
 
 /// An empty tuple and the terminator of an [`IntTuple`] chain.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -226,36 +226,62 @@ const IS_ZERO<const N: usize>: bool = N == 0;
 // Keep this expression valid at zero, even though only the head branch is used.
 const SUB_1<const N: usize>: usize = N.saturating_sub(1);
 
-/// Dispatch marker: `true` selects the head; `false` continues into the tail.
-pub use crate::Assert as GetHead;
+// Implementation traits that appear in public bounds but are not part of the API.
+mod detail {
+    use super::{Get, IntTuple, Nil, SUB_1};
+    use crate::Bool;
 
-/// Implements one head-or-tail step of compile-time tuple access.
-pub trait Step<H, T, const INDEX: usize> {
-    type Output;
-    fn step(tuple: &IntTuple<H, T>) -> &Self::Output;
-}
+    /// One head-or-tail step of compile-time tuple access.
+    pub trait Step<H, T, const INDEX: usize> {
+        type Output;
+        fn step(tuple: &IntTuple<H, T>) -> &Self::Output;
+    }
 
-impl<H, T, const INDEX: usize> Step<H, T, INDEX> for GetHead<true> {
-    type Output = H;
-    fn step(tuple: &IntTuple<H, T>) -> &Self::Output {
-        &tuple.0
+    impl<H, T, const INDEX: usize> Step<H, T, INDEX> for Bool<true> {
+        type Output = H;
+        fn step(tuple: &IntTuple<H, T>) -> &Self::Output {
+            &tuple.0
+        }
+    }
+
+    impl<H, T: Get<{ SUB_1::<INDEX> }>, const INDEX: usize> Step<H, T, INDEX> for Bool<false> {
+        type Output = T::Output;
+        fn step(tuple: &IntTuple<H, T>) -> &Self::Output {
+            T::get(&tuple.1)
+        }
+    }
+
+    /// Takes the only mode out of a one-mode tuple and keeps a longer tuple unchanged.
+    ///
+    /// Unlike CuTe's recursive `unwrap`, this removes a single level; callers only pass flat
+    /// tuples, where both agree.
+    pub trait Unwrap {
+        type Output;
+        fn unwrap(self) -> Self::Output;
+    }
+    impl<H> Unwrap for IntTuple<H, Nil> {
+        type Output = H;
+        fn unwrap(self) -> H {
+            self.0
+        }
+    }
+    impl<H, TH, TT> Unwrap for IntTuple<H, IntTuple<TH, TT>> {
+        type Output = Self;
+        fn unwrap(self) -> Self {
+            self
+        }
     }
 }
-
-impl<H, T: Get<{ SUB_1::<INDEX> }>, const INDEX: usize> Step<H, T, INDEX> for GetHead<false> {
-    type Output = T::Output;
-    fn step(tuple: &IntTuple<H, T>) -> &Self::Output {
-        T::get(&tuple.1)
-    }
-}
+use detail::Step;
+pub(crate) use detail::Unwrap;
 
 impl<H, T, const INDEX: usize> Get<INDEX> for IntTuple<H, T>
 where
-    GetHead<{ IS_ZERO::<INDEX> }>: Step<H, T, INDEX>,
+    Bool<{ IS_ZERO::<INDEX> }>: Step<H, T, INDEX>,
 {
-    type Output = <GetHead<{ IS_ZERO::<INDEX> }> as Step<H, T, INDEX>>::Output;
+    type Output = <Bool<{ IS_ZERO::<INDEX> }> as Step<H, T, INDEX>>::Output;
     fn get(&self) -> &Self::Output {
-        GetHead::<{ IS_ZERO::<INDEX> }>::step(self)
+        Bool::<{ IS_ZERO::<INDEX> }>::step(self)
     }
 }
 
@@ -331,39 +357,6 @@ where
     type Output = <H::Output as Append<T::Output>>::Output;
     fn flatten(self) -> Self::Output {
         self.0.flatten().append(self.1.flatten())
-    }
-}
-
-/// 将非空 tuple 的唯一模式取出；含多个模式时保留原 tuple。
-///
-/// 不递归展平内部模式，Nil 没有实现；composition 的收尾阶段复用此操作。
-/// CuTe 的 `unwrap` 会递归拆除单元素 tuple；这里的调用方只传入扁平 tuple，因此只拆一层。
-///
-/// ```
-/// use noodle_cute::{Int, int_tuple};
-/// use noodle_cute::tuple::Unwrap;
-/// let leaf: Int<2> = int_tuple![Int::<2>].unwrap();
-/// assert_eq!(leaf.value(), 2);
-/// let nested = int_tuple![(Int::<2>, Int::<3>)];
-/// assert_eq!(nested.unwrap(), int_tuple![Int::<2>, Int::<3>]);
-/// let pair = int_tuple![Int::<2>, Int::<3>];
-/// assert_eq!(pair.unwrap(), pair);
-/// ```
-#[doc(hidden)]
-pub trait Unwrap {
-    type Output;
-    fn unwrap(self) -> Self::Output;
-}
-impl<H> Unwrap for IntTuple<H, Nil> {
-    type Output = H;
-    fn unwrap(self) -> H {
-        self.0
-    }
-}
-impl<H, TH, TT> Unwrap for IntTuple<H, IntTuple<TH, TT>> {
-    type Output = Self;
-    fn unwrap(self) -> Self {
-        self
     }
 }
 

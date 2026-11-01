@@ -8,11 +8,11 @@ use core::ops::{Div, Mul};
 use crate::int::{Integer, ceil_div, mul};
 use crate::layout::{AffineLayoutMap, DynLayout, Layout, LayoutMap, LayoutParts, MAX_RANK, Shape};
 use crate::tuple::{Append, Flatten, Item, Product, Unwrap};
-use crate::{Assert, Error, Int, IntTuple, Nil, Result, StaticValue, True};
+use crate::{Bool, Error, Int, IntTuple, Nil, Result, True};
 
 use super::Leaves;
 use super::coalesce::{CoalesceFold, FinishCoalesce, Prepend};
-use super::composition::{ComposeProduct, Select, StepNumber, ZERO_STRIDE};
+use super::composition::{ComposeProduct, StepNumber, ZERO_STRIDE};
 
 fn complement_step(s: isize, d: isize, current: isize) -> Result<(isize, isize)> {
     if d < 0 {
@@ -73,7 +73,7 @@ fn complement_prefix<L: AffineLayoutMap>(layout: &L) -> Result<Option<(Leaves, i
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::algebra::complement::complement_shape;
+/// use noodle_cute::algebra::complement_shape;
 /// use noodle_cute::layout::{DynLayout, LayoutMap};
 ///
 /// let layout = DynLayout::new(&[3], &[1])?;
@@ -125,7 +125,7 @@ pub fn complement_shape<L: AffineLayoutMap>(layout: L, cotarget: &[isize]) -> Re
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::algebra::complement::complement;
+/// use noodle_cute::algebra::complement;
 /// use noodle_cute::layout::{DynLayout, LayoutMap};
 ///
 /// let layout = DynLayout::new(&[4], &[1])?;
@@ -154,7 +154,7 @@ pub fn complement<L: AffineLayoutMap>(layout: L, cotarget: isize) -> Result<DynL
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::algebra::complement::complement_extended;
+/// use noodle_cute::algebra::complement_extended;
 /// use noodle_cute::layout::{DynLayout, LayoutMap};
 ///
 /// let layout = DynLayout::new(&[2], &[2])?;
@@ -185,7 +185,48 @@ pub fn complement_extended<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
     out.layout()
 }
 
-/// 类型化 complement 的结果；EXTENDED 为真时保留末尾重复步长。
+/// Result type of the typed complement; `EXTENDED` keeps the terminal repetition stride
+/// (CuTe `complement(layout)` without a cotarget).
+///
+/// For fully static inputs, `<TypedComplement<L, C> as StaticValue>::VALUE` is the result as
+/// a constant. Static empty domains, negative cotargets, negative strides, overlaps, and
+/// arithmetic overflow are rejected at compile time. An empty tuple follows this crate's
+/// scalar convention.
+///
+/// ```
+/// use noodle_cute::{Int, IntTuple, Nil, StaticValue, algebra::TypedComplement, layout::Layout};
+/// type Pair<const A: isize, const B: isize> = IntTuple<Int<A>, IntTuple<Int<B>, Nil>>;
+/// const C: Layout<Pair<3, 2>, Pair<2, 12>> =
+///     <TypedComplement<Layout<Pair<2, 2>, Pair<1, 6>>, Int<24>> as StaticValue>::VALUE;
+/// const E: Layout<Pair<2, 1>, Pair<1, 8>> =
+///     <TypedComplement<Layout<Int<4>, Int<2>>, Nil, true> as StaticValue>::VALUE;
+/// ```
+///
+/// ```compile_fail
+/// use noodle_cute::{DynInt, Int, StaticValue, algebra::TypedComplement, layout::Layout};
+/// const C: TypedComplement<Layout<DynInt, Int<2>>, Int<24>> = StaticValue::VALUE;
+/// ```
+/// ```compile_fail
+/// use noodle_cute::{Int, IntTuple, Nil, StaticValue, algebra::TypedComplement, layout::Layout};
+/// type Pair<const A: isize, const B: isize> = IntTuple<Int<A>, IntTuple<Int<B>, Nil>>;
+/// const C: TypedComplement<Layout<Pair<2, 2>, Pair<2, 3>>, Int<16>> = StaticValue::VALUE;
+/// ```
+/// ```compile_fail
+/// use noodle_cute::{Int, StaticValue, algebra::TypedComplement, layout::Layout};
+/// const C: TypedComplement<Layout<Int<0>, Int<1>>, Int<8>> = StaticValue::VALUE;
+/// ```
+/// ```compile_fail
+/// use noodle_cute::{Int, StaticValue, algebra::TypedComplement, layout::Layout};
+/// const C: TypedComplement<Layout<Int<2>, Int<-1>>, Int<8>> = StaticValue::VALUE;
+/// ```
+/// ```compile_fail
+/// use noodle_cute::{Int, StaticValue, algebra::TypedComplement, layout::Layout};
+/// const C: TypedComplement<Layout<Int<2>, Int<1>>, Int<-1>> = StaticValue::VALUE;
+/// ```
+/// ```compile_fail
+/// use noodle_cute::{Int, Nil, StaticValue, algebra::TypedComplement, layout::Layout};
+/// const C: TypedComplement<Layout<Int<2>, Int<{ isize::MAX }>>, Nil, true> = StaticValue::VALUE;
+/// ```
 pub type TypedComplement<L, C = Nil, const EXTENDED: bool = false> =
     <L as Complement<C, EXTENDED>>::Output;
 
@@ -236,108 +277,10 @@ impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
     }
 }
 
-impl DynLayout {
-    /// 按运行时数值排序、过滤和化简，支持多模式动态 stride。
-    ///
-    /// 错误条件与 [`complement`] 相同。
-    pub fn complement(&self, cotarget: isize) -> Result<Self> {
-        complement(*self, cotarget)
-    }
-
-    /// tuple cotarget 的运行时补布局，逐叶折叠 ceil_div。
-    ///
-    /// 错误条件与 [`complement_shape`] 相同。
-    pub fn complement_shape(&self, cotarget: &[isize]) -> Result<Self> {
-        complement_shape(*self, cotarget)
-    }
-
-    /// 保留末尾重复步长的运行时补布局。
-    ///
-    /// 错误条件与 [`complement_extended`] 相同。
-    pub fn complement_extended(&self) -> Result<Self> {
-        complement_extended(*self)
-    }
-}
-
-/// 全静态 complement 的结果类型与常量值。
-pub trait StaticComplement<C = Nil, const EXTENDED: bool = false>: Copy {
-    type Output: StaticValue;
-    const OUTPUT: Self::Output = Self::Output::VALUE;
-}
-
-impl<S: StaticValue, D: StaticValue, C: StaticValue, const EXTENDED: bool>
-    StaticComplement<C, EXTENDED> for Layout<S, D>
-where
-    Self: Complement<C, EXTENDED>,
-    TypedComplement<Self, C, EXTENDED>: StaticValue,
-{
-    type Output = TypedComplement<Self, C, EXTENDED>;
-}
-
-/// 在编译期求全静态 complement，不经过运行时数组。
-///
-/// 静态零域、负 cotarget、负 stride、重叠和算术溢出在实例化时拒绝。
-/// 空 tuple 按本库标量约定处理，cotarget 中的零 extent 沿用运行时零域扩展。
-/// 与 static_coalesce 一样，此入口不执行最终布局的运行时大小与地址范围校验。
-///
-/// ```
-/// use noodle_cute::{Int, IntTuple, Nil, shape, stride, layout::Layout};
-/// use noodle_cute::algebra::complement::static_complement;
-/// type Pair<const A: isize, const B: isize> = IntTuple<Int<A>, IntTuple<Int<B>, Nil>>;
-/// const C: Layout<Pair<3, 2>, Pair<2, 12>> = static_complement(
-///     Layout { shape: shape![Int::<2>, Int::<2>], stride: stride![Int::<1>, Int::<6>] },
-///     Int::<24>,
-/// );
-/// ```
-///
-/// ```compile_fail
-/// use noodle_cute::{DynInt, Int, layout::Layout, algebra::complement::static_complement};
-/// let _ = static_complement(Layout { shape: DynInt(4), stride: Int::<2> }, Int::<24>);
-/// ```
-/// ```compile_fail
-/// use noodle_cute::{Int, shape, stride, layout::Layout, algebra::complement::static_complement};
-/// let _ = static_complement(Layout {
-///     shape: shape![Int::<2>, Int::<2>], stride: stride![Int::<2>, Int::<3>],
-/// }, Int::<16>);
-/// ```
-/// ```compile_fail
-/// use noodle_cute::{Int, layout::Layout, algebra::static_complement};
-/// let _ = static_complement(Layout { shape: Int::<0>, stride: Int::<1> }, Int::<8>);
-/// ```
-/// ```compile_fail
-/// use noodle_cute::{Int, layout::Layout, algebra::static_complement};
-/// let _ = static_complement(Layout { shape: Int::<2>, stride: Int::<-1> }, Int::<8>);
-/// ```
-/// ```compile_fail
-/// use noodle_cute::{Int, layout::Layout, algebra::static_complement};
-/// let _ = static_complement(Layout { shape: Int::<2>, stride: Int::<1> }, Int::<-1>);
-/// ```
-/// ```compile_fail
-/// use noodle_cute::{Int, layout::Layout, algebra::static_complement_extended};
-/// let _ = static_complement_extended(Layout { shape: Int::<2>, stride: Int::<{isize::MAX}> });
-/// ```
-pub const fn static_complement<L: StaticComplement<C>, C: Copy>(_: L, _: C) -> L::Output {
-    L::OUTPUT
-}
-
-/// 在编译期求补并保留末尾重复步长；输入约束与 [`static_complement`] 相同。
-///
-/// ```
-/// use noodle_cute::{Int, IntTuple, Nil, layout::Layout};
-/// use noodle_cute::algebra::complement::static_complement_extended;
-/// const C: Layout<IntTuple<Int<2>, IntTuple<Int<1>, Nil>>,
-///                 IntTuple<Int<1>, IntTuple<Int<8>, Nil>>> =
-///     static_complement_extended(Layout { shape: Int::<4>, stride: Int::<2> });
-/// ```
-pub const fn static_complement_extended<L: StaticComplement<Nil, true>>(_: L) -> L::Output {
-    L::OUTPUT
-}
-
 type Filtered<S, D> = <Layout<<S as Flatten>::Output, <D as Flatten>::Output> as Filter>::Output;
 type Ordered<S, D> = <Filtered<S, D> as Sort>::Output;
 type Built<S, D, C, const EXTENDED: bool> = <Ordered<S, D> as Build<C, EXTENDED>>::Output;
 
-#[doc(hidden)]
 pub const NONEMPTY<S: Product>: bool = !matches!(S::Output::STATIC, Some(0))
 where
     S::Output: Integer;
@@ -346,7 +289,7 @@ impl<S, D, C, const EXTENDED: bool> Complement<C, EXTENDED> for Layout<S, D>
 where
     S: Shape + Flatten + Product,
     <S as Product>::Output: Integer,
-    Assert<{ NONEMPTY::<S> }>: True,
+    Bool<{ NONEMPTY::<S> }>: True,
     D: Item<Profile = S::Profile> + Flatten,
     Layout<<S as Flatten>::Output, D::Output>: Filter,
     Filtered<S, D>: Sort,
@@ -373,25 +316,23 @@ where
     }
 }
 
-#[doc(hidden)]
 pub trait FilterLeaf<S> {
     type Output;
     fn filter_leaf(s: S) -> Self::Output;
 }
-impl<S> FilterLeaf<S> for Select<true> {
+impl<S> FilterLeaf<S> for Bool<true> {
     type Output = Int<1>;
     fn filter_leaf(_: S) -> Int<1> {
         Int
     }
 }
-impl<S> FilterLeaf<S> for Select<false> {
+impl<S> FilterLeaf<S> for Bool<false> {
     type Output = S;
     fn filter_leaf(s: S) -> S {
         s
     }
 }
 
-#[doc(hidden)]
 pub trait Filter {
     type Output: LayoutParts;
     fn filter(self) -> Self::Output;
@@ -404,17 +345,17 @@ impl Filter for Layout<Nil, Nil> {
 }
 impl<S, ST, D: Integer, DT> Filter for Layout<IntTuple<S, ST>, IntTuple<D, DT>>
 where
-    Select<{ ZERO_STRIDE::<D> }>: FilterLeaf<S>,
+    Bool<{ ZERO_STRIDE::<D> }>: FilterLeaf<S>,
     Layout<ST, DT>: Filter,
     <Layout<ST, DT> as Filter>::Output:
-        Prepend<<Select<{ ZERO_STRIDE::<D> }> as FilterLeaf<S>>::Output, D>,
+        Prepend<<Bool<{ ZERO_STRIDE::<D> }> as FilterLeaf<S>>::Output, D>,
     <<Layout<ST, DT> as Filter>::Output as Prepend<
-        <Select<{ ZERO_STRIDE::<D> }> as FilterLeaf<S>>::Output,
+        <Bool<{ ZERO_STRIDE::<D> }> as FilterLeaf<S>>::Output,
         D,
     >>::Output: LayoutParts,
 {
     type Output = <<Layout<ST, DT> as Filter>::Output as Prepend<
-        <Select<{ ZERO_STRIDE::<D> }> as FilterLeaf<S>>::Output,
+        <Bool<{ ZERO_STRIDE::<D> }> as FilterLeaf<S>>::Output,
         D,
     >>::Output;
     fn filter(self) -> Self::Output {
@@ -424,13 +365,12 @@ where
         }
         .filter()
         .prepend(
-            <Select<{ ZERO_STRIDE::<D> }> as FilterLeaf<S>>::filter_leaf(self.shape.0),
+            <Bool<{ ZERO_STRIDE::<D> }> as FilterLeaf<S>>::filter_leaf(self.shape.0),
             self.stride.0,
         )
     }
 }
 
-#[doc(hidden)]
 pub trait Sort {
     type Output: LayoutParts;
     fn sort(self) -> Self::Output;
@@ -465,13 +405,11 @@ where
     }
 }
 
-#[doc(hidden)]
 pub const BEFORE<D: Integer, E: Integer>: bool = match (D::STATIC, E::STATIC) {
     (Some(d), Some(e)) => d <= e,
     _ => panic!("Dynamic-stride complement only for rank-1 layouts"),
 };
 
-#[doc(hidden)]
 pub trait Insert<S, D> {
     type Output: LayoutParts;
     fn insert(self, s: S, d: D) -> Self::Output;
@@ -488,20 +426,19 @@ impl<S, D> Insert<S, D> for Layout<Nil, Nil> {
 impl<S, D: Integer, SH, ST, DH: Integer, DT> Insert<S, D>
     for Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>
 where
-    Select<{ BEFORE::<D, DH> }>: InsertAt<S, D, SH, ST, DH, DT>,
+    Bool<{ BEFORE::<D, DH> }>: InsertAt<S, D, SH, ST, DH, DT>,
 {
-    type Output = <Select<{ BEFORE::<D, DH> }> as InsertAt<S, D, SH, ST, DH, DT>>::Output;
+    type Output = <Bool<{ BEFORE::<D, DH> }> as InsertAt<S, D, SH, ST, DH, DT>>::Output;
     fn insert(self, s: S, d: D) -> Self::Output {
-        <Select<{ BEFORE::<D, DH> }> as InsertAt<S, D, SH, ST, DH, DT>>::insert_at(self, s, d)
+        <Bool<{ BEFORE::<D, DH> }> as InsertAt<S, D, SH, ST, DH, DT>>::insert_at(self, s, d)
     }
 }
 
-#[doc(hidden)]
 pub trait InsertAt<S, D, SH, ST, DH, DT> {
     type Output: LayoutParts;
     fn insert_at(tail: Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>, s: S, d: D) -> Self::Output;
 }
-impl<S, D, SH, ST, DH, DT> InsertAt<S, D, SH, ST, DH, DT> for Select<true> {
+impl<S, D, SH, ST, DH, DT> InsertAt<S, D, SH, ST, DH, DT> for Bool<true> {
     type Output = Layout<IntTuple<S, IntTuple<SH, ST>>, IntTuple<D, IntTuple<DH, DT>>>;
     fn insert_at(tail: Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>, s: S, d: D) -> Self::Output {
         Layout {
@@ -510,7 +447,7 @@ impl<S, D, SH, ST, DH, DT> InsertAt<S, D, SH, ST, DH, DT> for Select<true> {
         }
     }
 }
-impl<S, D, SH, ST, DH, DT> InsertAt<S, D, SH, ST, DH, DT> for Select<false>
+impl<S, D, SH, ST, DH, DT> InsertAt<S, D, SH, ST, DH, DT> for Bool<false>
 where
     Layout<ST, DT>: Insert<S, D>,
 {
@@ -532,12 +469,10 @@ where
     }
 }
 
-#[doc(hidden)]
 pub const VALID_STEP<S: Integer, D: Integer, C: Integer>: bool = !matches!(S::STATIC, Some(s) if s <= 0)
     && !matches!(D::STATIC, Some(d) if d <= 0)
     && !matches!((D::STATIC, C::STATIC), (Some(d), Some(c)) if c <= 0 || d / c == 0);
 
-#[doc(hidden)]
 pub trait Prefix<C> {
     type Output: LayoutParts;
     type End: Integer;
@@ -555,7 +490,7 @@ impl<S: Integer + Mul<D>, ST, D: Integer + Div<C>, DT, C: Integer> Prefix<C>
 where
     S::Output: Integer,
     D::Output: Integer,
-    Assert<{ VALID_STEP::<S, D, C> }>: True,
+    Bool<{ VALID_STEP::<S, D, C> }>: True,
     Layout<ST, DT>: Prefix<S::Output>,
 {
     type Output = Layout<
@@ -587,31 +522,27 @@ const fn target_ceil(a: isize, b: isize) -> isize {
     assert!(a >= 0 && b >= 0, "Invalid complement cotarget");
     if b == 0 { a } else { ceil_div(a, b) }
 }
-#[doc(hidden)]
 pub const CEIL_STATIC<A: Integer, B: Integer>: bool = A::STATIC.is_some() && B::STATIC.is_some();
-#[doc(hidden)]
 pub const CEIL<A: Integer, B: Integer>: isize = match (A::STATIC, B::STATIC) {
     (Some(a), Some(b)) => target_ceil(a, b),
     _ => 0,
 };
-#[doc(hidden)]
 pub trait Ceil<B> {
     type Output: Integer;
     fn ceil(self, b: B) -> Self::Output;
 }
 impl<A: Integer, B: Integer> Ceil<B> for A
 where
-    Select<{ CEIL_STATIC::<A, B> }>: StepNumber<{ CEIL::<A, B> }>,
+    Bool<{ CEIL_STATIC::<A, B> }>: StepNumber<{ CEIL::<A, B> }>,
 {
-    type Output = <Select<{ CEIL_STATIC::<A, B> }> as StepNumber<{ CEIL::<A, B> }>>::Output;
+    type Output = <Bool<{ CEIL_STATIC::<A, B> }> as StepNumber<{ CEIL::<A, B> }>>::Output;
     fn ceil(self, b: B) -> Self::Output {
-        <Select<{ CEIL_STATIC::<A, B> }> as StepNumber<{ CEIL::<A, B> }>>::make(target_ceil(
+        <Bool<{ CEIL_STATIC::<A, B> }> as StepNumber<{ CEIL::<A, B> }>>::make(target_ceil(
             self.value(),
             b.value(),
         ))
     }
 }
-#[doc(hidden)]
 pub trait CeilTarget<C> {
     type Output;
     fn ceil_target(self, current: C) -> Self::Output;
@@ -636,7 +567,6 @@ where
     }
 }
 
-#[doc(hidden)]
 pub trait GroupShape {
     type Output;
     fn group_shape(self) -> Result<Self::Output>;
@@ -653,23 +583,21 @@ impl<S> GroupShape for IntTuple<S, Nil> {
         Ok(self)
     }
 }
-#[doc(hidden)]
 pub const SAME_KIND<A: Integer, B: Integer>: bool = A::STATIC.is_some() == B::STATIC.is_some();
 impl<S: Integer, H: Integer, T> GroupShape for IntTuple<S, IntTuple<H, T>>
 where
-    Select<{ SAME_KIND::<S, H> }>: GroupAt<S, H, T>,
+    Bool<{ SAME_KIND::<S, H> }>: GroupAt<S, H, T>,
 {
-    type Output = <Select<{ SAME_KIND::<S, H> }> as GroupAt<S, H, T>>::Output;
+    type Output = <Bool<{ SAME_KIND::<S, H> }> as GroupAt<S, H, T>>::Output;
     fn group_shape(self) -> Result<Self::Output> {
-        <Select<{ SAME_KIND::<S, H> }> as GroupAt<S, H, T>>::group_at(self.1, self.0)
+        <Bool<{ SAME_KIND::<S, H> }> as GroupAt<S, H, T>>::group_at(self.1, self.0)
     }
 }
-#[doc(hidden)]
 pub trait GroupAt<S, H, T> {
     type Output;
     fn group_at(tail: IntTuple<H, T>, s: S) -> Result<Self::Output>;
 }
-impl<S: Integer + Mul<H>, H: Integer, T> GroupAt<S, H, T> for Select<true>
+impl<S: Integer + Mul<H>, H: Integer, T> GroupAt<S, H, T> for Bool<true>
 where
     IntTuple<S::Output, T>: GroupShape,
 {
@@ -679,7 +607,7 @@ where
         IntTuple(s * tail.0, tail.1).group_shape()
     }
 }
-impl<S, H, T> GroupAt<S, H, T> for Select<false>
+impl<S, H, T> GroupAt<S, H, T> for Bool<false>
 where
     IntTuple<H, T>: GroupShape,
 {
@@ -689,7 +617,6 @@ where
     }
 }
 
-#[doc(hidden)]
 pub trait TargetStrides<C> {
     type Output: LayoutParts;
     fn target_strides(self, current: C) -> Result<Self::Output>;
@@ -731,7 +658,6 @@ where
     }
 }
 
-#[doc(hidden)]
 pub trait Target<C, const DIVIDE: bool = true> {
     type Output: LayoutParts;
     fn target(self, current: C) -> Result<Self::Output>;
@@ -772,14 +698,12 @@ where
     }
 }
 
-#[doc(hidden)]
 pub trait Complete<C, End, const EXTENDED: bool> {
     type Output: LayoutParts;
     fn complete(self, cotarget: C, end: End) -> Result<Self::Output>;
 }
 
 // coalesce 的公共结果保留单叶 tuple；CuTe complement 的最终布局需要整数 profile。
-#[doc(hidden)]
 pub trait UnwrapLayout {
     type Output: LayoutParts;
     fn unwrap_layout(self) -> Self::Output;
@@ -851,7 +775,6 @@ where
     }
 }
 
-#[doc(hidden)]
 pub trait Build<C, const EXTENDED: bool> {
     type Output: LayoutParts;
     fn build(self, cotarget: C) -> Result<Self::Output>;

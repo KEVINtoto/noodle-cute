@@ -2,10 +2,10 @@
 
 本文前三部分讲解布局代数的三个核心算法，它们一起构成了分块、乘积、分区、线程分工等所有上层操作的底座；后两部分讲解直接建在它们之上的分块与乘积：
 
-- **第一部分 · 布局组合 `composition`**：怎样构造组合视图，怎样决定按 CuTe 规范化布局求值还是逐点求值，以及 `Composition::normalized` 字段在什么条件下被填充。对应 [`src/algebra/composition.rs`](../src/algebra/composition.rs)；全静态入口 `static_composition` 见 7.1 节，三类输入的入口见 7.3 节。
+- **第一部分 · 布局组合 `composition`**：怎样构造组合视图，怎样决定按 CuTe 规范化布局求值还是逐点求值，以及 `Composition::normalized` 字段在什么条件下被填充。对应 [`src/algebra/composition.rs`](../src/algebra/composition.rs)；fully static results (`TypedComposition` read through `StaticValue`) are covered in 7.1, and the entry points for each kind of input in 7.3.
 - **第二部分 · 补布局 `complement`**：怎样求出一个布局留下的"空隙"，以及 `complement_shape` 与 `complement_extended` 的区别。对应 [`src/algebra/complement.rs`](../src/algebra/complement.rs)。
 - **第三部分 · 求逆 `inverse`**：怎样从地址反推逻辑下标，`right_inverse` 与 `left_inverse` 为什么对"空洞"给出完全不同的答案，以及它们与枚举逆 `dense_*_inverse` 的分工。对应 [`src/algebra/inverse.rs`](../src/algebra/inverse.rs)。
-- **第四部分 · 分块 `divide`**：怎样把一个布局切成"块内坐标 × 块号"，四种 `Grouping` 为什么只是同一映射的不同括号方式，以及单 tiler、逐模式 tiler（`*_divide_modes`）和逐轴整除分块（`*_divide_axes`）三条路线。对应 [`src/algebra/divide.rs`](../src/algebra/divide.rs) 与 [`src/algebra.rs`](../src/algebra.rs) 中的 `TileRest`。
+- **第四部分 · 分块 `divide`**：怎样把一个布局切成"块内坐标 × 块号"，四种 `Grouping` 为什么只是同一映射的不同括号方式，以及单 tiler 与逐模式 tiler（`*_divide_modes`）两条路线。对应 [`src/algebra/divide.rs`](../src/algebra/divide.rs) 与 [`src/algebra.rs`](../src/algebra.rs) 中的 `TileRest`。
 - **第五部分 · 乘积 `product`**：怎样按 tiler 的样式重复铺一个 block，为什么用不带 cotarget 的 `complement_extended`，以及 `blocked_product` 与 `raked_product` 的区别。对应 [`src/algebra/product.rs`](../src/algebra/product.rs)。
 
 `composition` 与 `complement` 的关系可以用一行公式概括，它也正是第四部分 `logical_divide` 的定义（A 为仿射布局时）：
@@ -254,14 +254,14 @@ i ──B──▶ j ──A（含 swizzle）──▶ 地址
 1. Only the pointwise fallback rejects an `inner` whose minimum address is negative (`CoordinateOutOfBounds`), because it uses those values as logical indices of `outer`. Normalization follows CuTe's signed stride divisibility condition `rest_stride % cs == 0 || rest_stride < cs` in `checked_step`, shared by the runtime and typed paths, so negative strides compose through `signum` (for example `(4,4):(4,1) ∘ 4:-1 = 4:-4`).
 2. 未规范化分支的值域检查只试探 `max`。之后每次求值都使用带检查的 `add`/`mul`，即使中间下标溢出，也只会返回 `Err(Overflow)`，不会产生未定义行为。
 
-#### 7.1 全静态入口 `static_composition`
+#### 7.1 Fully static results
 
-[`src/algebra/composition.rs`](../src/algebra/composition.rs) 在 trait 求解阶段执行同一个 CuTe 算法，两侧 shape/stride 都必须是 `Int<N>` 叶子。结果是零大小的 `Layout`，可以写进 `const`，结果类型也可以写成 `StaticComposition<A, B>`；它保留 B 的完整嵌套结构，不经过 `DynLayout`，所以不受 `MAX_RANK` 限制。
+[`src/algebra/composition.rs`](../src/algebra/composition.rs) runs the same CuTe algorithm during trait resolution. When every shape/stride leaf of both sides is an `Int<N>`, the result type `TypedComposition<A, B>` is a zero-sized `Layout` whose value is `<TypedComposition<A, B> as StaticValue>::VALUE`, usable in a `const`. It keeps B's full nesting and never goes through `DynLayout`, so it is not limited by `MAX_RANK`.
 
 ```rust
-use noodle_cute::algebra::static_composition;
+use noodle_cute::algebra::TypedComposition;
 use noodle_cute::layout::Layout;
-use noodle_cute::{Int, IntTuple, Nil, shape, stride};
+use noodle_cute::{Int, IntTuple, Nil, StaticValue};
 
 type Pair<const A: isize, const B: isize> = IntTuple<Int<A>, IntTuple<Int<B>, Nil>>;
 // (6,2):(8,2) ∘ (4,3):(3,1) = ((2,2),3):((24,2),8)
@@ -269,10 +269,9 @@ type R = Layout<
     IntTuple<Pair<2, 2>, IntTuple<Int<3>, Nil>>,
     IntTuple<Pair<24, 2>, IntTuple<Int<8>, Nil>>,
 >;
-const C: R = static_composition(
-    Layout { shape: shape![Int::<6>, Int::<2>], stride: stride![Int::<8>, Int::<2>] },
-    Layout { shape: shape![Int::<4>, Int::<3>], stride: stride![Int::<3>, Int::<1>] },
-);
+type A = Layout<Pair<6, 2>, Pair<8, 2>>;
+type B = Layout<Pair<4, 3>, Pair<3, 1>>;
+const C: R = <TypedComposition<A, B> as StaticValue>::VALUE;
 ```
 
 与第 3 节的对应关系：
@@ -297,7 +296,7 @@ const C: R = static_composition(
 
 [`coalesce.rs`](../src/algebra/coalesce.rs) 将类型层和运行时化简放在同一模块：
 
-- 全静态 `Layout` 使用 `static_coalesce` / `static_coalesce_extended`，通过 `CoalesceFold<false/true>` 推导结果类型、通过 `StaticCoalesce::OUTPUT` 的默认值直接构造常量值。
+- A fully static `Layout` reads its result as `<CoalescedLayout<S, D> as StaticValue>::VALUE` (or `CoalescedLayout<S, D, true>` for `coalesce_x`); `CoalesceFold<false/true>` derives the type.
 - 混合 `Layout` 使用 `coalesce` / `coalesce_extended` 方法，保留静态叶子及动态字段，不转成运行时数组。输出类型是 `CoalescedLayout<S,D>` / `CoalescedLayout<S,D,true>`；结果构造后返回受检的 `Result`。
 - `DynLayout` 使用同名方法，根据当前数值决定哪些模式可以删除或合并，结果仍是 `DynLayout`。
 
@@ -308,35 +307,35 @@ const C: R = static_composition(
 As in CuTe, a static zero factor makes the product static: `x * _0` is `_0` even for a dynamic `x`, so `(DynInt(3), Int<4>):(Int<0>, Int<0>)` merges into `12:_0` (with a dynamic extent) exactly like upstream `bw_coalesce`.
 
 ```rust
-use noodle_cute::{DynInt, Int, IntTuple, Nil, shape, stride};
-use noodle_cute::algebra::{static_coalesce, static_coalesce_extended};
+use noodle_cute::{DynInt, Int, IntTuple, Nil, StaticValue, shape, stride};
+use noodle_cute::algebra::CoalescedLayout;
 use noodle_cute::layout::{Layout, LayoutMap};
 
-const NORMAL: Layout<IntTuple<Int<2>, Nil>, IntTuple<Int<1>, Nil>> = static_coalesce(
-    Layout { shape: shape![Int::<2>, Int::<1>], stride: stride![Int::<1>, Int::<2>] },
-);
-const EXTENDED: Layout<IntTuple<Int<4>, Nil>, IntTuple<Int<1>, Nil>> = static_coalesce_extended(
-    Layout { shape: shape![Int::<2>, Int::<1>], stride: stride![Int::<1>, Int::<2>] },
-);
+type Shape = IntTuple<Int<2>, IntTuple<Int<1>, Nil>>;
+type Stride = IntTuple<Int<1>, IntTuple<Int<2>, Nil>>;
+const NORMAL: Layout<IntTuple<Int<2>, Nil>, IntTuple<Int<1>, Nil>> =
+    <CoalescedLayout<Shape, Stride> as StaticValue>::VALUE;
+const EXTENDED: Layout<IntTuple<Int<4>, Nil>, IntTuple<Int<1>, Nil>> =
+    <CoalescedLayout<Shape, Stride, true> as StaticValue>::VALUE;
 let mixed = Layout::new(shape![Int::<2>, Int::<1>], stride![Int::<1>, DynInt(8)])?;
 let extended = mixed.coalesce_extended()?;
 assert_eq!(extended.index_extended(2)?, 8);
 # Ok::<(), noodle_cute::Error>(())
 ```
 
-常量入口要求两棵树都是 `Int<N>` 叶子，不执行运行时大小或地址范围校验；静态合并乘积溢出在实例化时编译失败。方法入口检查输入 shape 与输出布局，动态错误返回 `Err`。
+常量读取要求两棵树都是 `Int<N>` 叶子，不执行运行时大小或地址范围校验；静态合并乘积溢出在实例化时编译失败。方法入口检查输入 shape 与输出布局，动态错误返回 `Err`。
 
 扩展版本的类型层结果遵循上游占位规则：末尾静态 shape-1 改为 2，因此逻辑大小可能增加；混合输入的动态 shape-1 不会改为静态 2。运行时版本沿用末尾真实 extent，以免占位值增加溢出风险，有限域大小不变，但保留相同的扩展步长。空输入统一采用本库的 `1:0` 标量约定。扩展映射等价要求原布局的前导 extent 为正；含零 extent 时仍按 CuTe 的代数规则化简，不保证保留原扩展解码的零除错误。
 
 #### 7.3 composition 的全静态、混合与运行时入口
 
-三类算法都在 [`composition.rs`](../src/algebra/composition.rs) 内实现。现有 `algebra::static_composition` 导出路径保留。
+三类算法都在 [`composition.rs`](../src/algebra/composition.rs) 内实现。
 
 | 输入与入口 | 结果 | 结构与检查 |
 |---|---|---|
-| 全静态 `static_composition(A,B)` | 零大小的 `Layout` 常量 | `StaticCompose::OUTPUT` 默认构造类型确定的值；静态非法 shape、整除错误、乘积溢出在实例化时拒绝 |
+| Fully static `<TypedComposition<A,B> as StaticValue>::VALUE` | Zero-sized `Layout` constant | The type determines the value; static illegal shapes, divisibility errors, and product overflow are rejected at instantiation |
 | 混合 `A.composition(B)`，A/B 为 `Layout` | `Result<TypedComposition<A,B>>` | 保留静态叶子和 RHS 完整嵌套；动态参数仅改变字段值，不改变类型 |
-| 运行时 `A.composition(&B)`，A 为 `DynLayout` | `Result<GroupedLayout>` | 与 `composition_layout(&A,&B)` 相同，按当前数值规范化并保留 RHS 顶层分组 |
+| Runtime `composition_layout(&A, &B)` | `Result<GroupedLayout>` | Normalizes with the current values and keeps the RHS top-level grouping |
 | 通用 `composition(A,B)` | `Result<Composition<A,B>>` | 保留原有规范化缓存、不可整除或非仿射时的逐点回退 |
 
 全静态与混合入口共用 `ComposeTree`、`Fold` 和 `Finish`，各阶段通过 `Output: LayoutParts` 表达同一个布局结果，中继阶段直接转发 `Output`。最终通过 `LayoutParts::into_layout` 取出 shape/stride 再执行入口所需校验；这个转换本身不做归一或校验。辅助 trait 的 shape/stride 应从 `Output` 投影，公开结果别名保持一致。
@@ -645,16 +644,15 @@ complement((2,2):(1,3), 12) = 2:6
 
 #### 14.2 全静态、混合与运行时入口
 
-算法以 [CuTe `layout.hpp`](https://github.com/NVIDIA/cutlass/blob/main/include/cute/layout.hpp) 的 `filter`、`detail::complement_prefix` 和两个 `detail::complement` 重载为准。相关实现均在 [`complement.rs`](../src/algebra/complement.rs)，并从 `algebra` 重导出类型化 trait 和全静态函数。
+算法以 [CuTe `layout.hpp`](https://github.com/NVIDIA/cutlass/blob/main/include/cute/layout.hpp) 的 `filter`、`detail::complement_prefix` 和两个 `detail::complement` 重载为准。相关实现均在 [`complement.rs`](../src/algebra/complement.rs)，并从 `algebra` 重导出。
 
 | 输入与入口 | 结果与结构 |
 |---|---|
-| 全静态 `static_complement(L, cotarget)` | 可用于 `const` 的零大小 `Layout`；cotarget 可为整数或嵌套 shape |
-| 全静态 `static_complement_extended(L)` | 保留末尾 `1:重复步长` 的常量布局 |
+| Fully static `<TypedComplement<L, C> as StaticValue>::VALUE` | Zero-sized `Layout` constant; the cotarget may be an integer or a nested shape |
+| Fully static `<TypedComplement<L, Nil, true> as StaticValue>::VALUE` | Constant layout keeping the terminal `1:repetition-stride` mode |
 | 混合 `L.complement(cotarget)`，L 为 `Layout` | `Result<TypedComplement<L,C>>`，保留可推导的静态叶子 |
 | 混合 `L.complement_extended()` | `Result<TypedComplement<L,Nil,true>>` |
-| 运行时 `DynLayout::complement` / `complement_shape` / `complement_extended` | 根据当前数值排序和化简，结果为 `DynLayout` |
-| 通用自由函数 `complement` / `complement_shape` / `complement_extended` | 保持原有 `AffineLayoutMap` 输入与 `DynLayout` 输出，供 divide/product 等调用 |
+| Runtime free functions `complement` / `complement_shape` / `complement_extended` | Take any `AffineLayoutMap`, sort and simplify with the current values, and return a `DynLayout`; divide/product call them too |
 
 全静态与混合入口共用以下阶段，不转为运行时数组，因此不受 `MAX_RANK` 限制：
 
@@ -667,16 +665,13 @@ complement((2,2):(1,3), 12) = 2:6
 类型结构只受静态信息影响。比如 `4:1` 的动态 cotarget 恰好为 4 时，结果仍是动态 `1:4` 叶子；若 cotarget 为 `Int<4>`，普通 coalesce 将结果归一为静态 `1:0`。动态 shape 恰好等于 1 时也会保留原模式。
 
 ```rust
-use noodle_cute::{DynInt, Int, IntTuple, Nil, layout::Layout};
-use noodle_cute::algebra::{static_complement, static_complement_extended};
+use noodle_cute::{DynInt, Int, IntTuple, Nil, StaticValue, layout::Layout};
+use noodle_cute::algebra::TypedComplement;
 
 type Pair<const A: isize, const B: isize> = IntTuple<Int<A>, IntTuple<Int<B>, Nil>>;
-const C: Layout<Pair<2,3>, Pair<1,8>> = static_complement(
-    Layout { shape: Int::<4>, stride: Int::<2> }, Int::<24>,
-);
-const E: Layout<Pair<2,1>, Pair<1,8>> = static_complement_extended(
-    Layout { shape: Int::<4>, stride: Int::<2> },
-);
+type L = Layout<Int<4>, Int<2>>;
+const C: Layout<Pair<2,3>, Pair<1,8>> = <TypedComplement<L, Int<24>> as StaticValue>::VALUE;
+const E: Layout<Pair<2,1>, Pair<1,8>> = <TypedComplement<L, Nil, true> as StaticValue>::VALUE;
 let input = Layout::new(DynInt(4), Int::<2>)?;
 let mixed: Layout<IntTuple<Int<2>, IntTuple<DynInt, Nil>>,
                   IntTuple<Int<1>, IntTuple<DynInt, Nil>>> = input.complement(Int::<24>)?;
@@ -684,7 +679,7 @@ assert_eq!(mixed.shape.1.0, DynInt(3));
 # Ok::<(), noodle_cute::Error>(())
 ```
 
-偏离与检查边界：静态零域、静态负 stride、静态零 gap 等在编译期拒绝；动态错误通过 `Result` 返回。类型化动态零 stride 不会被过滤，返回 `NonInjective`，运行时数值路径则可以过滤它。类型化方法检查输入 size 和最终 `Layout::new`，全静态常量入口与 `static_coalesce` 一样不执行最终运行时 size/address_range 校验。空 tuple 沿用本库标量约定；零 cotarget 的反向 ceil_div 在上游会零除，本库沿用既有动态接口的零域扩展，遇零时保持 rest，尾部大小为零。
+偏离与检查边界：静态零域、静态负 stride、静态零 gap 等在编译期拒绝；动态错误通过 `Result` 返回。类型化动态零 stride 不会被过滤，返回 `NonInjective`，运行时数值路径则可以过滤它。类型化方法检查输入 size 和最终 `Layout::new`；reading a fully static result through `StaticValue` skips the final runtime size/address_range validation, as for coalesce.空 tuple 沿用本库标量约定；零 cotarget 的反向 ceil_div 在上游会零除，本库沿用既有动态接口的零域扩展，遇零时保持 rest，尾部大小为零。
 
 契约测试集中在 [`tests/complement_contract.rs`](../tests/complement_contract.rs)，覆盖全静态常量类型、上游样例与过滤/排序、混合类型依赖、动态边界、超过 `MAX_RANK` 的类型化输出，以及原有 cotarget、重复步长及错误契约。编译失败约束由 rustdoc 的 `compile_fail` 示例覆盖。
 
@@ -910,10 +905,10 @@ L            right_inverse    left_inverse
 
 | 输入与入口 | 结果与约束 |
 |---|---|
-| `static_right_inverse(L)` / `static_left_inverse(L)` | 零大小的 `Layout` 常量；输入 shape/stride 均为静态叶子 |
+| `<TypedInverse<L> as StaticValue>::VALUE` / `<TypedInverse<L, true> as StaticValue>::VALUE` | Zero-sized `Layout` constant; every input shape/stride leaf is static |
 | `L.right_inverse()`，L 为 `Layout` | `Result<TypedInverse<L>>`；忽略动态 stride，仅接续静态已知的连续地址链 |
 | `L.left_inverse()`，L 为 `Layout` | `Result<TypedInverse<L,true>>`；coalesce 后的 stride 必须全静态，shape 可混合 |
-| `DynLayout` 的同名方法及原有自由函数 | 按当前数值 coalesce、排序和求逆，返回 `DynLayout` |
+| Free functions `right_inverse` / `left_inverse` | Coalesce, sort, and invert with the current values, returning a `DynLayout` |
 | `dense_left_inverse` / `dense_right_inverse` | 保留运行时枚举接口，适用于任意 `LayoutMap` |
 
 `TypedInvert<LEFT>` 共用以下准备过程：先用 `CoalesceFold` 展平并化简，再由 `Attach` 为每个叶子保留 `(shape, 原逻辑前缀积)`。右逆过滤动态 stride，左逆要求 stride 类型可由 `StaticValue` 唯一确定；两者复用 complement 的稳定 `Sort`，排序时携带原逻辑前缀积，不能在排序后重新计算它。
@@ -922,13 +917,13 @@ L            right_inverse    left_inverse
 
 `LeftFold` 根据已排序的静态 stride 计算 `gap = d/covered`，结果 stride 来自原逻辑前缀积；动态 shape 只影响前缀积、重叠检查及最后的 extent。与运行时受检入口一致，负 stride、非广播重叠和不可整除被拒绝；动态重叠返回 `NonInjective`，乘积溢出返回 `Overflow`。这是比上游准逆路径更严格的输入检查。广播仍按准逆处理，不声称恢复所有广播坐标。
 
-收尾复用 `CoalesceFold` / `FinishCoalesce` 和 `UnwrapLayout`，单模式结果恢复为整数 profile。空 tuple 按标量约定返回 `1:0`；empty layouts are inverted like upstream (e.g. `0:_1` gives `0:_1`). 静态非法整除或运算溢出在实例化时拒绝；全静态常量入口与其他静态代数一样，不执行最终运行时大小及地址范围校验。类型化路径不经过固定容量数组，输入和输出均可超过 `MAX_RANK`。
+收尾复用 `CoalesceFold` / `FinishCoalesce` 和 `UnwrapLayout`，单模式结果恢复为整数 profile。空 tuple 按标量约定返回 `1:0`；empty layouts are inverted like upstream (e.g. `0:_1` gives `0:_1`). 静态非法整除或运算溢出在实例化时拒绝；reading a fully static result through `StaticValue` skips the final runtime size and address-range validation, as for the other operations.类型化路径不经过固定容量数组，输入和输出均可超过 `MAX_RANK`。
 
 契约集中在 [`tests/inverse_contract.rs`](../tests/inverse_contract.rs)：保留原有结构逆、枚举逆与容量边界测试，并验证常量类型、混合静态性规则、动态错误及 33 模式的独立位反转原像公式。
 
 ## 第四部分 · 分块 `divide`
 
-本部分讲解 [`src/algebra/divide.rs`](../src/algebra/divide.rs) 中的 `logical_divide` / `zipped_divide` / `tiled_divide` / `flat_divide`、逐模式版本 `*_divide_modes`、逐轴版本 `*_divide_axes`，以及它们共用的 [`src/algebra.rs`](../src/algebra.rs) 中的 `TileRest` 与 `Grouping`。
+本部分讲解 [`src/algebra/divide.rs`](../src/algebra/divide.rs) 中的 `logical_divide` / `zipped_divide` / `tiled_divide` / `flat_divide`、逐模式版本 `*_divide_modes`，以及它们共用的 [`src/algebra.rs`](../src/algebra.rs) 中的 `TileRest` 与 `Grouping`。
 
 本部分记被分块的布局为 `L`，tile（也叫 tiler）为 `T`。
 
@@ -993,7 +988,7 @@ index(7) = 1 + 2 = 3
 | `(t, r) ↦ T(t) + R(r)` | `TileRest<T, R>` 与它的 `LayoutMap` 实现 | [`src/algebra.rs`](../src/algebra.rs) |
 | 括号方式 | `Grouping::{Logical, Zipped, Tiled, Flat}` | 同上 |
 | `L ∘ TileRest` | `Divided<A, B> = Composition<A, TileRest<B, DynLayout>>` | [`src/algebra/divide.rs`](../src/algebra/divide.rs) |
-| `TileRest(block, complement ∘ tiler)` | `Product<A, B> = TileRest<A, Composition<DynLayout, B>>` | [`src/algebra/product.rs`](../src/algebra/product.rs) |
+| `TileRest(block, complement ∘ tiler)` | `Produced<A, B> = TileRest<A, Composition<DynLayout, B>>` | [`src/algebra/product.rs`](../src/algebra/product.rs) |
 
 **为什么这样**：divide 和 product 本质上都是"一份 tile 地址 + 一份偏移地址"。把这件事单独做成一个类型，两族算法只需各自决定 tile 和 rest 是什么。
 
@@ -1221,77 +1216,11 @@ zipped  : ((2,3),(2,2,2)) : ((1,4),(2,12,24))      分组 [2,3]
 
 CuTe 的 `logical_divide` 在 tuple tiler 下返回深度为 2 的嵌套布局 `((t0, r0), (t1, r1))`。`GroupedLayout` 只有一层分组，所以 logical 版本只能把 `(tile_m, rest_m)` 合成一个顶层模式（分组 `[2,2]`），**每个模式内部 tile 与 rest 的边界不再记录**。
 
-需要这条边界时，可以使用保留完整 profile 的类型化入口（28.1 节），或改用 zipped / tiled / flat 运行时分组。
+需要这条边界时，可以使用保留完整 profile 的类型化入口（27.1 节），或改用 zipped / tiled / flat 运行时分组。
 
 一句话记忆：**逐模式 tiler = 对每个模式各做一次单 tiler 分块，再按四种方式拼装**。
 
-### 26. 逐轴整除分块：`*_divide_axes`
-
-`logical_divide_axes(L, &[t_0, t_1, …])` 用一组整数按顶层轴分块，要求每个 `t_a` 都**恰好整除**第 a 轴的长度。它返回惰性结构 `DividedAxes<L>`，只记录 tile 与 rest 两组长度，不做任何组合运算。
-
-#### 26.1 机制
-
-构造时（`divide_axes`）只做检查：
-
-- tile 个数必须等于 `rank(L)`，否则 `StructureMismatch`；
-- 每个 `t_a > 0`，否则 `InvalidShape`；
-- `extent(a) % t_a == 0`，否则 `NotDivisible`；
-- 记录 `rest_a = extent(a) / t_a`。
-
-求值时（`index`）：
-
-- `Logical`：直接返回 `L.index(i)`，线性顺序不变；
-- 其余三种：先把 `i` 拆成"所有 tile 位"和"所有 rest 位"，再逐轴还原原坐标 `c_a = t_a' + rest_a' · t_a`，最后调用 `L.index_of_coord`。
-
-```text
-tile = i % (t_0·t_1·…),  rest = i / (t_0·t_1·…)
-对每个轴 a：
-    t' = tile % t_a;  tile /= t_a
-    r' = rest % rest_a;  rest /= rest_a
-    c_a = t' + r' · t_a
-```
-
-各 `Grouping` 下的 rank：
-
-| `Grouping` | rank | extent |
-|---|---|---|
-| `Logical` | r | 与 `L` 相同 |
-| `Zipped` | 2 | `(∏ t_a, ∏ rest_a)` |
-| `Tiled` | 1 + r | `(∏ t_a, rest_0, rest_1, …)` |
-| `Flat` | 2r | `(t_0, t_1, …, rest_0, rest_1, …)` |
-
-#### 26.2 走一遍 `L = (6,8):(11,1)`，tile `[2,4]`
-
-rest 为 `[3,2]`，size 仍是 48。四种分组的 extent 分别为 `(6,8)`、`(8,6)`、`(8,3,2)`、`(2,4,3,2)`。
-
-设原坐标为 `(ti + 2·ri, tj + 4·rj)`，地址为 `(ti + 2·ri)·11 + tj + 4·rj`。四种写法下的坐标：
-
-```text
-Logical : (ti + 2·ri, tj + 4·rj)        // 就是原坐标
-Zipped  : (ti + 2·tj, ri + 3·rj)        // (块内坐标, 块号)
-Tiled   : (ti + 2·tj, ri, rj)
-Flat    : (ti, tj, ri, rj)
-```
-
-契约测试确认：在这个例子上，`*_divide_axes` 与以 `(2:1, 4:1)` 为 tiler 的 `*_divide_modes` 四种分组给出完全相同的 extent 与地址序列。
-
-#### 26.3 为什么还要这个版本
-
-| | `*_divide_modes` | `*_divide_axes` |
-|---|---|---|
-| `L` 的要求 | 仿射布局 | 任意 `LayoutMap`（只用 `extent` 与 `index_of_coord`） |
-| tiler | 每个模式一个布局，可带步长 | 每个轴一个正整数 |
-| 不整除 | 补齐 | `NotDivisible` |
-| 结果 | 立即算出的 `GroupedLayout` | 惰性的 `DividedAxes`，`as_affine()` 返回 `None` |
-| size | 补齐后可能变大 | 恒等于 `size(L)` |
-
-它服务于"`L` 非仿射（例如 swizzle）但仍想按矩形分块"的场景：既然没有扩展域可以补齐，干脆要求整除；只重排逻辑坐标、不改变地址集合，所以 `address_range` 与 `is_injective` 都直接委托给 `L`。
-
-**与 CuTe 的差异**：CuTe 没有独立的 `*_divide_axes`。它在整除时与 CuTe 用整数 tuple 作为 tiler 的 `*_divide` 结果一致（见上面的对照测试），是本项目为非仿射布局补充的受限版本。
-
-一句话记忆：**`_axes` 只重新解释坐标，不算新布局；代价是必须整除**。
-
-### 27. 错误与边界
+### 26. 错误与边界
 
 | 输入情况 | 返回 | 来源 |
 |---|---|---|
@@ -1301,14 +1230,12 @@ Flat    : (ti, tj, ri, rj)
 | `L` 非仿射且 tile 不整除 `size(L)` | `Err(CoordinateOutOfBounds)` | `composition` 值域检查 |
 | `_modes`：tiler 比 rank 长 | `Err(StructureMismatch)` | `divide_modes` |
 | `_modes`：某模式的组合不满足整除条件 | `Err(NotDivisible)` | `composition_layout` |
-| `_axes`：tile 个数 ≠ rank | `Err(StructureMismatch)` | `divide_axes` |
-| `_axes`：tile ≤ 0 / 不整除 | `Err(InvalidShape)` / `Err(NotDivisible)` | `divide_axes` |
 | 叶子或模式数超 `MAX_RANK` | `Err(CapacityExceeded)` | `Leaves` / `Modes` |
 | `L` 为空（如 `0:1`） | 结果 size 为 0 | |
 
 CuTe 在这些地方大多是静态断言或未定义行为。本项目统一改为返回 `Result`。
 
-### 28. 与上游的对应与流程总览
+### 27. 与上游的对应与流程总览
 
 | CuTe（`include/cute/layout.hpp`） | noodle-cute |
 |---|---|
@@ -1317,7 +1244,6 @@ CuTe 在这些地方大多是静态断言或未定义行为。本项目统一改
 | `zipped_divide = tile_unzip(logical_divide(...))` | `zipped_divide` / `zipped_divide_modes` |
 | `tiled_divide = zipped_divide(...)(_, repeat<R1>(_))` | `tiled_divide` / `tiled_divide_modes` |
 | `flat_divide = zipped_divide(...)(repeat<R0>(_), repeat<R1>(_))` | `flat_divide` / `flat_divide_modes` |
-| 无 | `*_divide_axes`（整除、惰性、可用于非仿射布局） |
 
 ```text
                       logical_divide(L, T)
@@ -1335,34 +1261,30 @@ CuTe 在这些地方大多是静态断言或未定义行为。本项目统一改
                                ▼
                     composition(L, inner)  ──▶  Divided（惰性）
                                │
-                         .as_affine()
+             L affine: regroup L∘T and L∘rest by Grouping
                                ▼
-              扁平叶子 + 按 Grouping 写入的顶层分组
+              flat leaves + top-level groups (.as_affine())
 ```
 
 一句话记忆：**先在逻辑下标空间里排好 (块内, 块号)，再整体送进 `L`**。
 
-#### 28.1 divide 的全静态、混合与运行时入口
+#### 27.1 divide 的全静态、混合与运行时入口
 
 | 输入与入口 | 结果 |
 |---|---|
-| `static_logical_divide` / `static_zipped_divide` / `static_tiled_divide` / `static_flat_divide` | 可用于 `const` 的完整层级 `Layout` |
+| `<TypedDivided<L, T, KIND> as StaticValue>::VALUE` | Full-hierarchy `Layout` constant for fully static inputs |
 | `Layout` 的 `logical_divide` / `zipped_divide` / `tiled_divide` / `flat_divide` 方法 | `Result<TypedDivided<L,T,KIND>>`，保留静态叶子和动态字段 |
-| `static_*_divide_axes` / `Layout::*_divide_axes` | 严格逐轴整除，分别返回静态常量与 `Result<TypedDividedAxes<...>>` |
-| `DynLayout` 的同名方法 | 复用原有单 tiler、严格 axes 和 `&[DynLayout]` modes 算法 |
-| 原有通用自由函数 | 保留非仿射输入、惰性 `Divided` / `DividedAxes` 及组合回退 |
+| Free functions `*_divide` and `*_divide_modes` | Single-layout tilers (lazy `Divided`, with the pointwise fallback for non-affine inputs) and `&[DynLayout]` per-mode tilers |
 
-`KIND` 的 0、1、2、3 分别表示 logical、zipped、tiled、flat。全静态 trait 为 `StaticDivide<T,KIND>` / `StaticDivideAxes<T,KIND>`，其 `OUTPUT` 从同一类型化算法的结果类型构造常量。
+`KIND` is one of `algebra::LOGICAL`, `ZIPPED`, `TILED`, or `FLAT`.
 
 单个类型化 tiler 为 `Layout` 时，`DivideOp` 完整复用 `composition(L, (T, complement(T, shape(coalesce(L)))))`：`CoalesceTarget` 取得类型化 cotarget，complement 保留静态推导，composition 处理弱整除和扩展域。整数 tiler 自动视为 `n:1`。类型化入口遇到组合整除失败直接返回 `NotDivisible`，不会构造惰性回退。
 
 嵌套 tuple tiler 使用 [`typed.rs`](../src/algebra/typed.rs) 的 `Transform` 递归处理相同 profile 的模式，短 tuple 保留尾部，空 tuple 返回原布局。`Unzip` 对应上游 `zip2_by`：按 tiler 的终端收集 tile/rest，未覆盖模式只进入 rest。`Regroup` 只解开顶层模式，不压平内部层级；所以整数 tiler 的 `(tile,rest)` 与单元素 tuple tiler 的 `((tile),(rest))` 不同。这些结构均由类型保留，不受 `GroupedLayout` 的一层分组限制。
 
-严格 axes 是本库的受检扩展，要求 tiler 是与顶层 rank 等长的整数 tuple。`StrictAxes` 检查每轴 extent 的整除关系；静态不整除和 rank 不匹配在编译期拒绝，动态不整除返回 `NotDivisible`，非正 tile 返回 `InvalidShape`。单整数模式直接生成 `(t,s/t):(d,t*d)`，支持零 extent 与负 stride；嵌套模式复用普通 divide/composition，沿用组合对零 extent 中间模式的限制。所有实际生成的 stride 使用受检乘法。
+公开方法校验输入 size 和最终 `Layout::new`；reading a constant through `StaticValue` skips the final runtime size and address-range checks.只有运行时数组表示受 `MAX_RANK` 限制。原有动态分组拼装收敛到 `group_modes`，它还被运行时 tuple product 复用。
 
-公开方法校验输入 size 和最终 `Layout::new`；常量入口不执行最终运行时大小、地址范围或负地址检查。只有运行时数组表示受 `MAX_RANK` 限制。原有动态分组拼装收敛到 `group_modes`，它还被运行时 tuple product 复用。
-
-[`tests/divide_contract.rs`](../tests/divide_contract.rs) 包含迁移后的动态契约，以及四种静态分组、严格 axes、混合元数据、嵌套/部分/空 tuple、整数与 singleton profile 差异、扩展域、动态错误和超过 `MAX_RANK` 的结果。编译期拒绝示例见模块 rustdoc。
+[`tests/divide_contract.rs`](../tests/divide_contract.rs) 包含迁移后的动态契约，以及四种静态分组、混合元数据、嵌套/部分/空 tuple、整数与 singleton profile 差异、扩展域、动态错误和超过 `MAX_RANK` 的结果。编译期拒绝示例见模块 rustdoc。
 
 ## 第五部分 · 乘积 `product`
 
@@ -1370,7 +1292,7 @@ CuTe 在这些地方大多是静态断言或未定义行为。本项目统一改
 
 本部分记被重复的小布局为 `block`，描述"怎样重复"的布局为 `tiler`。
 
-### 29. 乘积在做什么
+### 28. 乘积在做什么
 
 分块是"把大的切成小的"，乘积反过来：**把一个 block 当成瓷砖，按 tiler 的样式铺很多份**。
 
@@ -1394,9 +1316,9 @@ result.size()?;
 Ok(result)
 ```
 
-`Product<A, B> = TileRest<A, Composition<DynLayout, B>>`。最后的 `result.size()?` 提前检查 `size(block) · size(tiler)` 是否溢出。block 必须有仿射形式（要对它求补），tiler 可以是任意 `LayoutMap`。
+`Produced<A, B> = TileRest<A, Composition<DynLayout, B>>`。最后的 `result.size()?` 提前检查 `size(block) · size(tiler)` 是否溢出。block 必须有仿射形式（要对它求补），tiler 可以是任意 `LayoutMap`。
 
-### 30. 为什么用 `complement_extended`（不带 cotarget）
+### 29. 为什么用 `complement_extended`（不带 cotarget）
 
 divide 知道目标多大（`shape(L)`），product 不知道：要铺多少份完全由 tiler 决定，tiler 的值可以任意大。所以这里的补布局**不能有 cotarget**，而要能无限延伸。
 
@@ -1411,7 +1333,7 @@ divide 知道目标多大（`shape(L)`），product 不知道：要铺多少份�
 
 **与上游的关系**：CuTe 的 `logical_product` 使用无 cotarget 的 `complement(block)`，等价于 `complement(block, cosize(block))`。cosize 不超过 `current`，尾部的 `ceil_div(cosize, current)` 恰为 1，只剩一个 `1:current` 叶子，与本项目的 `complement_extended` 一致。
 
-### 31. 走一遍 `logical_product((2,2):(1,4), (2,3):(1,2))`
+### 30. 走一遍 `logical_product((2,2):(1,4), (2,3):(1,2))`
 
 把地址看成 4 行、按列存放的矩阵（`a = 行 + 4·列`）。block 占行 0–1、列 0–1；tiler 是 2×3 的列优先排列。
 
@@ -1460,7 +1382,7 @@ logical_product((2,2):(1,4), (2,3):(1,2)) = ((2,2),(2,3)) : ((1,4),(2,8))
 
 24 个地址恰好铺满 `[0, 24)`。注意 tiler 的第 2 份（下标 2）越过了补布局的逻辑大小 2，正是 `1:8` 尾叶子把它送到了地址 8。
 
-### 32. 更多例子
+### 31. 更多例子
 
 以下数据来自契约测试（由 CuTe oracle 生成）：
 
@@ -1476,9 +1398,9 @@ block       tiler           logical_product
 
 tiler 不必是仿射布局。若 tiler 是一个值为 `[0, 2, 1]` 的查表映射，三份瓷砖的起点依次是补布局在 0、2、1 处的值 `0, 8, 2`，结果只能惰性求值（`as_affine()` 为 `None`），地址序列为 `0,1,4,5, 8,9,12,13, 2,3,6,7`。
 
-### 33. `zipped_product` / `tiled_product` / `flat_product`
+### 32. `zipped_product` / `tiled_product` / `flat_product`
 
-与 divide 一样，四个乘积函数共用同一个 `TileRest`，只差 `Grouping`。以第 31 节为例，叶子都是 `(2,2,2,3):(1,4,2,8)`：
+与 divide 一样，四个乘积函数共用同一个 `TileRest`，只差 `Grouping`。以第 30 节为例，叶子都是 `(2,2,2,3):(1,4,2,8)`：
 
 | 函数 | 顶层分组 | 坐标写法 |
 |---|---|---|
@@ -1489,7 +1411,7 @@ tiler 不必是仿射布局。若 tiler 是一个值为 `[0, 2, 1]` 的查表映
 
 `tiled_product` unpacks the top-level modes of the composed rest `complement(block) ∘ tiler`, as upstream `result(_, repeat<R1>(_))` does. A tuple tiler keeps one mode per tiler axis; an integral tiler yields one mode per leaf of the composition. For example `complement(2:2) = (2,1):(1,4)` composed with `6:1` is `(2,3):(1,4)`, so `tiled_product(2:2, 6:1) = (2,2,3):(2,1,4)` with rank 3. The lazy `Composition` reports this structure through its normalized layout.
 
-### 34. `blocked_product` 与 `raked_product`
+### 33. `blocked_product` 与 `raked_product`
 
 `logical_product` 的结果是 `(block 坐标, 瓷砖号)`，不是一个"大矩阵"的 `(行, 列)`。如果 block 和 tiler 都是二维的，通常希望结果也是二维：第 0 模式是"大矩阵的行"，由 block 的行和 tiler 的行组成；第 1 模式同理。这就是对两组做 23.2 节的 **zip**：
 
@@ -1501,7 +1423,7 @@ zip     : ((b0, r0), (b1, r1))      ← blocked_product
 
 两者的叶子完全相同，只是每个模式内部谁在前（谁变化更快）不同。
 
-#### 34.1 一维小例子
+#### 33.1 一维小例子
 
 `block = 3:1`，`tiler = 2:1`。`complement_extended(3:1) = 1:3`，`rest = 1:3 ∘ 2:1 = 2:3`。
 
@@ -1519,7 +1441,7 @@ raked  : 0 1 0 1 0 1      // 两份瓷砖交错排列
 
 "raked"是"耙"的意思：瓷砖的元素像耙齿一样均匀插开，而不是连成一块。
 
-#### 34.2 机制：`rank_product`
+#### 33.2 机制：`rank_product`
 
 ```rust
 let rank = block.rank().max(tiler.rank());
@@ -1540,7 +1462,7 @@ for m in 0..rank {
 4. **Pad before composing**: the typed `blocked_product`/`raked_product` also wrap the tiler into modes and pad it with `1:0` to the block's rank *before* composing, matching upstream `logical_product(append<R>(block), append<R>(tiler))`. A tiler mode whose composition has several modes therefore stays nested inside one result mode: `blocked_product((2,2):(2,8), 8:1) = ((2,(2,2,2)),(2,1)) : ((2,(1,4,16)),(8,0))`.
 5. **Negative tiler strides** compose through `signum` like any other composition, e.g. `blocked_product(2:1, 2:-1) = ((2,2)):((1,-2))`.
 
-#### 34.3 二维例子：`col = (2,2):(1,2)`，`t23 = (2,3):(1,2)`
+#### 33.3 二维例子：`col = (2,2):(1,2)`，`t23 = (2,3):(1,2)`
 
 `col` 稠密覆盖 `[0, 4)`，`complement_extended(col) = 1:4`。
 
@@ -1567,9 +1489,9 @@ blocked                         raked
 
 blocked 中每份瓷砖是一个连续的 2×2 方块；raked 中第 0 份瓷砖的四个元素在 `(0,0)`、`(0,3)`、`(2,0)`、`(2,3)`，均匀分散。同一个坐标 `(1,0)`：blocked 给出地址 1（瓷砖 0 的第 1 个元素），raked 给出地址 4（瓷砖 1 的第 0 个元素）。
 
-注意 blocked 的叶子 `(2,2,2,3):(1,4,2,8)` 恰好与第 31 节 `logical_product` 的叶子相同，但含义不同：这里第 0 模式是"大矩阵的行"，第 31 节的第 0 模式是"block 坐标"。
+注意 blocked 的叶子 `(2,2,2,3):(1,4,2,8)` 恰好与第 30 节 `logical_product` 的叶子相同，但含义不同：这里第 0 模式是"大矩阵的行"，第 30 节的第 0 模式是"block 坐标"。
 
-#### 34.4 rank 不同的例子
+#### 33.4 rank 不同的例子
 
 ```text
 blocked_product(4:1, t23) = ((4,2),(1,3)) : ((1,4),(0,8))
@@ -1580,7 +1502,7 @@ raked_product  (col, 3:1) = ((3,2),(1,2)) : ((4,1),(0,2))
 
 缺的模式补成 `1:0`，并原样留在结果里。
 
-#### 34.5 应用：线程-值（TV）布局
+#### 33.5 应用：线程-值（TV）布局
 
 CuTe 的 `make_tiled_copy` 用 `raked_product(thr, val)` 描述"一个线程块拷贝的矩形区域里，每个位置归哪个线程的第几个值"：
 
@@ -1590,7 +1512,7 @@ CuTe 的 `make_tiled_copy` 用 `raked_product(thr, val)` 描述"一个线程块�
 
 契约测试中的例子：`thr = (4,2):(2,1)`，`val = (2,2):(1,2)`，`raked_product` 为 `((2,4),(2,2)):((8,2),(16,1))`，最终的 TV 布局为 `((2,4),(2,2)):((16,2),(1,8))`。测试逐个检查了每个 `(线程, 值)` 经 TV 布局再经 `raked_product` 后回到 `线程号 + 8·值号`。
 
-### 35. 错误与边界
+### 34. 错误与边界
 
 | 输入情况 | 返回 | 来源 |
 |---|---|---|
@@ -1604,7 +1526,7 @@ CuTe 的 `make_tiled_copy` 用 `raked_product(thr, val)` 描述"一个线程块�
 
 `blocked_product(4:2, 2:3)` 失败的原因：补布局 `(2,1):(1,8)` 的第 0 模式大小为 2，tiler 步长 3 大于 2 却不是 2 的倍数，触发 [第 3.2 节](#32-compose_leaf) 的 stride 整除条件；CuTe 在这里是整除断言失败。
 
-### 36. 与上游的对应及与 divide 的关系
+### 35. 与上游的对应及与 divide 的关系
 
 | CuTe（`include/cute/layout.hpp`） | noodle-cute |
 |---|---|
@@ -1618,7 +1540,7 @@ CuTe 的 `make_tiled_copy` 用 `raked_product(thr, val)` 描述"一个线程块�
 
 - 单 tiler 的乘积返回惰性 `TileRest`，tiler 可以非仿射；需要扁平布局时调用 `.as_affine()`。
 - blocked/raked 要求两侧都是仿射布局，结果只保留一层分组，每个模式内部 block 与 rest 的边界不再记录。
-- CuTe 中的断言与未定义行为改为 `Result` 错误（第 35 节）。
+- CuTe 中的断言与未定义行为改为 `Result` 错误（第 34 节）。
 
 **divide 与 product 互为逆操作**。契约测试验证了：
 
@@ -1635,25 +1557,24 @@ logical_product((2,2):(1,4), 6:1) = logical_divide(24:1, (2,2):(1,4)) = ((2,2),(
 
 一句话记忆：**product = block + 补布局 ∘ tiler；blocked 让瓷砖连成块，raked 让瓷砖交错**。
 
-#### 36.1 product 的全静态、混合与运行时入口
+#### 35.1 product 的全静态、混合与运行时入口
 
 | 输入与入口 | 结果与分组 |
 |---|---|
-| `static_logical_product` / `static_zipped_product` / `static_tiled_product` / `static_flat_product` | 零大小的 `Layout` 常量，保留完整 profile |
-| `static_blocked_product` / `static_raked_product` | 按顶层模式补齐 `1:0` 并 zip 的静态常量 |
+| `<TypedProductLayout<L, T, KIND> as StaticValue>::VALUE` | Zero-sized `Layout` constant keeping the full profile |
 | `Layout` 上的六个同名方法 | `Result<TypedProductLayout<L,T,KIND>>` |
-| `DynLayout` 的同名方法及原有自由函数 | 单 tiler 保留惰性 `Product`，blocked/raked 返回 `GroupedLayout` |
-| `*_product_modes(&block, &[DynLayout])` 及 DynLayout 方法 | 每个被覆盖模式独立求补和组合，保留未覆盖尾部模式 |
+| Free functions `logical/zipped/tiled/flat_product`, `blocked_product`, `raked_product` | Single tilers keep the lazy `Produced`; blocked/raked return a `GroupedLayout` |
+| `*_product_modes(&block, &[DynLayout])` | 每个被覆盖模式独立求补和组合，保留未覆盖尾部模式 |
 
-`TypedProduct<T,KIND>` 与 `StaticProduct<T,KIND>` 共用结果类型；0–3 对应四种普通分组，4、5 对应 blocked、raked。后两种 tiler 使用 `Layout`，普通四种还支持整数与嵌套 tuple。
+`KIND` is one of `algebra::LOGICAL`, `ZIPPED`, `TILED`, `FLAT`, `BLOCKED`, or `RAKED`. The last two take a `Layout` tiler; the other four also accept integers and nested tuples.
 
 `ProductOp` 复用不带 cotarget 的类型化 complement 和 composition，避免把重复步长误换成 cosize。tuple 遍历与 `tile_unzip` 和 divide 共用 `Transform` / `Unzip` / `Regroup`，因此 logical 保留各模式内部的 block/rest 边界，zipped 转置时保留嵌套 guide。空 tuple 是不变换的 tiler，`Layout<Nil,Nil>` 则是实际的标量布局 tiler，两者 profile 不同。
 
-blocked/raked 在整体 logical product 的两组上使用 `IntoModes` 和 `ZipModes`。短侧的每个缺失模式补 `1:0`；这些单位轴保留在最终 profile 中。blocked 每模式为 `(block_m,rest_m)`，raked 交换二者；两侧均为空 tuple 布局时仍是 rank-0 标量。此处的 zip 不做额外 coalesce。
+blocked/raked first wrap the tiler into modes and pad it with `1:0` to the block's rank (`PadModes`), compose, and then apply `IntoModes` and `ZipModes` to the two groups. 短侧的每个缺失模式补 `1:0`；这些单位轴保留在最终 profile 中。blocked 每模式为 `(block_m,rest_m)`，raked 交换二者；两侧均为空 tuple 布局时仍是 rank-0 标量。此处的 zip 不做额外 coalesce。
 
-类型化值入口检查 tiler 的负可达地址以及最终布局大小和地址范围；补布局和组合失败直接返回相应错误，静态已知的非法运算由类型约束拒绝。常量入口不执行运行时值域与最终布局校验，允许的输入必须满足相同前提。运行时通用乘积继续保留不可整除或非仿射 tiler 的惰性回退。`*_product_modes` 仅处理仿射模式，组合失败直接报错，运行时输出保留一层分组。
+类型化值入口检查最终布局大小和地址范围；补布局和组合失败直接返回相应错误，静态已知的非法运算由类型约束拒绝。Reading a constant through `StaticValue` skips the final runtime validation.运行时通用乘积继续保留不可整除或非仿射 tiler 的惰性回退。`*_product_modes` 仅处理仿射模式，组合失败直接报错，运行时输出保留一层分组。
 
-[`tests/product_contract.rs`](../tests/product_contract.rs) 保留原有乘积、TV 布局及容量边界契约，并新增六个静态入口、混合元数据、嵌套/部分/空 tiler、补轴次序、运行时 tuple product、零域/溢出/整除错误及超过 `MAX_RANK` 的类型化输出。跨模块 divide/product/inverse 往返定律继续由 [`algebra_contract.rs`](../tests/algebra_contract.rs) 覆盖。
+[`tests/product_contract.rs`](../tests/product_contract.rs) 保留原有乘积、TV 布局及容量边界契约，并新增六种静态分组、混合元数据、嵌套/部分/空 tiler、补轴次序、运行时 tuple product、零域/溢出/整除错误及超过 `MAX_RANK` 的类型化输出。跨模块 divide/product/inverse 往返定律继续由 [`algebra_contract.rs`](../tests/algebra_contract.rs) 覆盖。
 
 #### 自测
 

@@ -1,21 +1,21 @@
 //! CuTe inverse 的全静态、混合与运行时契约。
 use noodle_cute::Error;
-use noodle_cute::algebra::inverse::*;
+use noodle_cute::algebra::*;
 use noodle_cute::layout::{AffineLayoutMap, DynLayout, Layout, LayoutMap, MAX_RANK};
 
 pub mod common;
-use common::{TableMap, dyn_layout, values};
+use common::{TableMap, dyn_layout, inverted, values};
 use noodle_cute::{DynInt, Int, IntTuple, Nil, shape, stride};
 
 type Pair<A, B> = IntTuple<A, IntTuple<B, Nil>>;
 
 #[test]
 fn static_inverses_are_const_and_preserve_the_colexicographic_preimage() {
-    const R: Layout<Pair<Int<3>, Int<2>>, Pair<Int<2>, Int<1>>> = static_right_inverse(Layout {
+    const R: Layout<Pair<Int<3>, Int<2>>, Pair<Int<2>, Int<1>>> = inverted::<false, _>(Layout {
         shape: shape![Int::<2>, Int::<3>],
         stride: stride![Int::<3>, Int::<1>],
     });
-    const L: Layout<Pair<Int<3>, Int<2>>, Pair<Int<2>, Int<1>>> = static_left_inverse(Layout {
+    const L: Layout<Pair<Int<3>, Int<2>>, Pair<Int<2>, Int<1>>> = inverted::<true, _>(Layout {
         shape: shape![Int::<2>, Int::<3>],
         stride: stride![Int::<3>, Int::<1>],
     });
@@ -24,14 +24,14 @@ fn static_inverses_are_const_and_preserve_the_colexicographic_preimage() {
         (0..6).map(|i| R.index(i).unwrap()).collect::<Vec<_>>(),
         [0, 2, 4, 1, 3, 5]
     );
-    const HOLES: Layout<Pair<Int<2>, Int<4>>, Pair<Int<0>, Int<1>>> = static_left_inverse(Layout {
+    const HOLES: Layout<Pair<Int<2>, Int<4>>, Pair<Int<0>, Int<1>>> = inverted::<true, _>(Layout {
         shape: Int::<4>,
         stride: Int::<2>,
     });
     for i in 0..4 {
         assert_eq!(HOLES.index(2 * i), Ok(i));
     }
-    const UNIT: Layout<Int<1>, Int<0>> = static_right_inverse(Layout {
+    const UNIT: Layout<Int<1>, Int<0>> = inverted::<false, _>(Layout {
         shape: Nil,
         stride: Nil,
     });
@@ -51,10 +51,7 @@ fn mixed_inverse_only_uses_type_known_stride_facts() {
     let right: Layout<Int<1>, Int<0>> = dynamic.right_inverse().unwrap();
     assert_eq!(right.size(), Ok(1));
     assert_eq!(
-        dynamic
-            .as_flat_layout()
-            .unwrap()
-            .right_inverse()
+        right_inverse(dynamic.as_flat_layout().unwrap())
             .unwrap()
             .size(),
         Ok(4)
@@ -356,9 +353,6 @@ fn mixed_inverse_errors_broadcasts_and_dynamic_unit_extents_are_checked() {
     let overflow = Layout::new(DynInt(2), Int::<{ isize::MAX }>).unwrap();
     assert_eq!(overflow.left_inverse(), Err(Error::Overflow));
     assert_eq!(overflow.right_inverse().unwrap().size(), Ok(1));
-    let dynamic = dyn_layout(&[2, 3], &[3, 1]);
-    assert_eq!(dynamic.right_inverse(), right_inverse(dynamic));
-    assert_eq!(dynamic.left_inverse(), left_inverse(dynamic));
 }
 
 #[test]
@@ -373,8 +367,8 @@ fn static_inversion_exceeds_the_runtime_leaf_capacity() {
         32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10,
         9, 8, 7, 6, 5, 4, 3, 2, 1, 0
     );
-    let right = static_right_inverse(input);
-    let left = static_left_inverse(input);
+    let right = inverted::<false, _>(input);
+    let left = inverted::<true, _>(input);
     assert_eq!(right.rank(), MAX_RANK + 1);
     assert_eq!(right.as_flat_layout(), Err(Error::CapacityExceeded));
     assert_eq!(core::mem::size_of_val(&right), 0);

@@ -1,9 +1,11 @@
 //! CuTe complement 的全静态、混合与运行时契约。
 
-use noodle_cute::algebra::complement::{complement, complement_extended, complement_shape};
-use noodle_cute::algebra::{StaticComplement, static_complement, static_complement_extended};
+use noodle_cute::algebra::{TypedComplement, complement, complement_extended, complement_shape};
 use noodle_cute::layout::{AffineLayoutMap, DynLayout, Layout, LayoutMap, MAX_RANK};
-use noodle_cute::{DynInt, Error, Int, IntTuple, Nil, shape, stride};
+use noodle_cute::{DynInt, Error, Int, IntTuple, Nil, StaticValue, shape, stride};
+
+pub mod common;
+use common::{complemented, complemented_extended};
 
 type Pair<A, B> = IntTuple<A, IntTuple<B, Nil>>;
 
@@ -38,9 +40,9 @@ const TILE: Tile = Layout {
 #[test]
 fn static_results_are_const_zero_sized_and_tile_the_cotarget() {
     const RESULT: Layout<Pair<Int<3>, Int<2>>, Pair<Int<2>, Int<12>>> =
-        static_complement(TILE, Int::<24>);
-    const ASSOCIATED: <Tile as StaticComplement<Int<24>>>::Output =
-        <Tile as StaticComplement<Int<24>>>::OUTPUT;
+        complemented(TILE, Int::<24>);
+    const ASSOCIATED: TypedComplement<Tile, Int<24>> =
+        <TypedComplement<Tile, Int<24>> as StaticValue>::VALUE;
     assert_eq!(RESULT, ASSOCIATED);
     assert_eq!(RESULT, TILE.complement(Int::<24>).unwrap());
     assert_eq!(core::mem::size_of_val(&RESULT), 0);
@@ -56,7 +58,7 @@ fn static_results_are_const_zero_sized_and_tile_the_cotarget() {
 
 #[test]
 fn static_filter_sort_and_floor_gaps_follow_cute() {
-    const NESTED: Layout<Pair<Int<2>, Int<2>>, Pair<Int<6>, Int<24>>> = static_complement(
+    const NESTED: Layout<Pair<Int<2>, Int<2>>, Pair<Int<6>, Int<24>>> = complemented(
         Layout {
             shape: shape![(Int::<2>, Int::<2>), Int::<3>],
             stride: stride![(Int::<1>, Int::<12>), Int::<2>],
@@ -64,7 +66,7 @@ fn static_filter_sort_and_floor_gaps_follow_cute() {
         Int::<48>,
     );
     assert_eq!(values(&NESTED), [0, 6, 24, 30]);
-    const SORTED: Layout<Int<2>, Int<6>> = static_complement(
+    const SORTED: Layout<Int<2>, Int<6>> = complemented(
         Layout {
             shape: shape![Int::<2>, Int::<3>],
             stride: stride![Int::<3>, Int::<1>],
@@ -72,7 +74,7 @@ fn static_filter_sort_and_floor_gaps_follow_cute() {
         Int::<12>,
     );
     assert_eq!(values(&SORTED), [0, 6]);
-    const FLOOR: Layout<Int<3>, Int<6>> = static_complement(
+    const FLOOR: Layout<Int<3>, Int<6>> = complemented(
         Layout {
             shape: shape![Int::<2>, Int::<2>],
             stride: stride![Int::<1>, Int::<3>],
@@ -80,7 +82,7 @@ fn static_filter_sort_and_floor_gaps_follow_cute() {
         Int::<13>,
     );
     assert_eq!(values(&FLOOR), [0, 6, 12]);
-    const FILTERED: Layout<Int<2>, Int<1>> = static_complement(
+    const FILTERED: Layout<Int<2>, Int<1>> = complemented(
         Layout {
             shape: shape![Int::<1>, Int::<4>, Int::<9>],
             stride: stride![Int::<-9>, Int::<2>, Int::<0>],
@@ -92,14 +94,14 @@ fn static_filter_sort_and_floor_gaps_follow_cute() {
 
 #[test]
 fn static_tuple_cotargets_and_broadcast_special_case_preserve_semantics() {
-    const TUPLE: Layout<Int<12>, Int<3>> = static_complement(
+    const TUPLE: Layout<Int<12>, Int<3>> = complemented(
         Layout {
             shape: Int::<3>,
             stride: Int::<1>,
         },
         shape![(Int::<4>, Int::<6>)],
     );
-    const INTEGER: Layout<Int<8>, Int<3>> = static_complement(
+    const INTEGER: Layout<Int<8>, Int<3>> = complemented(
         Layout {
             shape: Int::<3>,
             stride: Int::<1>,
@@ -108,7 +110,7 @@ fn static_tuple_cotargets_and_broadcast_special_case_preserve_semantics() {
     );
     assert_eq!(TUPLE.size(), Ok(12));
     assert_eq!(INTEGER.size(), Ok(8));
-    const BROADCAST: Layout<Int<6>, Int<1>> = static_complement(
+    const BROADCAST: Layout<Int<6>, Int<1>> = complemented(
         Layout {
             shape: Int::<4>,
             stride: Int::<0>,
@@ -116,28 +118,28 @@ fn static_tuple_cotargets_and_broadcast_special_case_preserve_semantics() {
         shape![Int::<2>, Int::<3>],
     );
     assert_eq!(values(&BROADCAST), [0, 1, 2, 3, 4, 5]);
-    const SCALAR: Layout<Int<1>, Int<1>> = static_complement(
+    const SCALAR: Layout<Int<1>, Int<1>> = complemented(
         Layout {
             shape: Nil,
             stride: Nil,
         },
         Nil,
     );
-    const EMPTY_TARGET: Layout<Int<2>, Int<1>> = static_complement(
+    const EMPTY_TARGET: Layout<Int<2>, Int<1>> = complemented(
         Layout {
             shape: Int::<4>,
             stride: Int::<2>,
         },
         Nil,
     );
-    const UNIT: Layout<Int<1>, Int<0>> = static_complement(
+    const UNIT: Layout<Int<1>, Int<0>> = complemented(
         Layout {
             shape: Int::<4>,
             stride: Int::<1>,
         },
         Int::<4>,
     );
-    const ZERO: Layout<Int<0>, Int<3>> = static_complement(
+    const ZERO: Layout<Int<0>, Int<3>> = complemented(
         Layout {
             shape: Int::<3>,
             stride: Int::<1>,
@@ -152,21 +154,20 @@ fn static_tuple_cotargets_and_broadcast_special_case_preserve_semantics() {
 
 #[test]
 fn static_extended_complement_keeps_the_terminal_stride() {
-    const GAPS: Layout<Pair<Int<3>, Int<1>>, Pair<Int<2>, Int<12>>> =
-        static_complement_extended(TILE);
-    const COMPACT: Layout<Int<1>, Int<4>> = static_complement_extended(Layout {
+    const GAPS: Layout<Pair<Int<3>, Int<1>>, Pair<Int<2>, Int<12>>> = complemented_extended(TILE);
+    const COMPACT: Layout<Int<1>, Int<4>> = complemented_extended(Layout {
         shape: Int::<4>,
         stride: Int::<1>,
     });
-    const FLOOR: Layout<Int<1>, Int<6>> = static_complement_extended(Layout {
+    const FLOOR: Layout<Int<1>, Int<6>> = complemented_extended(Layout {
         shape: shape![Int::<2>, Int::<2>],
         stride: stride![Int::<1>, Int::<3>],
     });
-    const BROADCAST: Layout<Int<1>, Int<1>> = static_complement_extended(Layout {
+    const BROADCAST: Layout<Int<1>, Int<1>> = complemented_extended(Layout {
         shape: Int::<4>,
         stride: Int::<0>,
     });
-    const SCALAR: Layout<Int<1>, Int<1>> = static_complement_extended(Layout {
+    const SCALAR: Layout<Int<1>, Int<1>> = complemented_extended(Layout {
         shape: Nil,
         stride: Nil,
     });
@@ -179,7 +180,7 @@ fn static_extended_complement_keeps_the_terminal_stride() {
 
 #[test]
 fn static_filter_accepts_more_than_max_rank_input_leaves() {
-    const RESULT: Layout<Int<8>, Int<1>> = static_complement(
+    const RESULT: Layout<Int<8>, Int<1>> = complemented(
         Layout {
             shape: leaves_33!(Int::<1>),
             stride: leaves_33!(Int::<1>),
@@ -623,15 +624,4 @@ fn complement_rejects_empty_negative_overlapping_overflowing_and_over_capacity_i
         complement_shape(gapped, &cotarget),
         Err(Error::CapacityExceeded)
     );
-}
-
-#[test]
-fn dyn_layout_methods_share_the_runtime_algorithms() {
-    let input = dyn_layout(&[2, 2], &[6, 1]);
-    assert_eq!(input.complement(24), complement(input, 24));
-    assert_eq!(
-        input.complement_shape(&[4, 6]),
-        complement_shape(input, &[4, 6])
-    );
-    assert_eq!(input.complement_extended(), complement_extended(input));
 }

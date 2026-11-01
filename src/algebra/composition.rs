@@ -1,7 +1,7 @@
 //! 全静态、混合类型与运行时布局的 composition，以及通用惰性组合。
 //!
 //! 对应 CuTe layout.hpp 的 composition_impl；coalesce_x 复用公共 coalesce 模块。
-//! 全静态使用 [`static_composition`]；混合使用 [`Layout::composition`]，保留类型。
+//! 全静态结果使用 [`TypedComposition`] 与 `StaticValue`；混合使用 [`Layout::composition`]，保留类型。
 //! [`DynLayout::composition`] 返回运行时元数据；通用 [`composition`] 保留惰性回退。
 
 use crate::int::{Integer, ceil_div, mul};
@@ -9,10 +9,9 @@ use crate::layout::{
     AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutMap, LayoutParts, MAX_RANK, Shape,
     affine_injective, is_injective_by_enumeration,
 };
-#[doc(hidden)]
-pub use crate::tuple::Unwrap;
+use crate::tuple::Unwrap;
 use crate::tuple::{Append, Flatten, Item};
-use crate::{DynInt, Error, Int, IntTuple, Nil, Result, StaticValue};
+use crate::{Bool, DynInt, Error, Int, IntTuple, Nil, Result};
 
 use super::Leaves;
 use super::coalesce::CoalesceFold;
@@ -99,7 +98,7 @@ fn compose_grouped(outer: &DynLayout, rhs: &GroupedLayout) -> Result<GroupedLayo
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::algebra::composition::composition;
+/// use noodle_cute::algebra::composition;
 /// use noodle_cute::layout::{DynLayout, LayoutMap};
 ///
 /// let outer = DynLayout::new(&[4, 4], &[1, 4])?;
@@ -154,7 +153,7 @@ pub fn composition<A: LayoutMap, B: LayoutMap>(outer: A, inner: B) -> Result<Com
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::algebra::composition::composition_layout;
+/// use noodle_cute::algebra::composition_layout;
 /// use noodle_cute::layout::{DynLayout, LayoutMap};
 ///
 /// let a = DynLayout::new(&[4, 4], &[1, 4])?;
@@ -303,7 +302,53 @@ impl<A: LayoutMap, B: LayoutMap> LayoutMap for Composition<A, B> {
 type CoalescedLhs<S, D> =
     <Layout<<S as Flatten>::Output, <D as Flatten>::Output> as CoalesceFold<true>>::Output;
 
-/// 类型化 composition 的结果，保留 RHS 的嵌套结构和可静态推导的叶子。
+/// Result type of the typed composition, keeping the RHS nesting and every statically
+/// derivable leaf.
+///
+/// For fully static inputs, `<TypedComposition<A, B> as StaticValue>::VALUE` is the result as
+/// a constant. Like CuTe it allows the extended domain and negative strides; static
+/// intermediate values must be representable as `isize`. An empty RHS stays an empty tuple,
+/// and an empty LHS is treated as `1:0` by this crate's scalar convention.
+///
+/// ```
+/// use noodle_cute::{Int, StaticValue, algebra::TypedComposition, layout::{Layout, LayoutMap}};
+/// type A = Layout<Int<8>, Int<2>>;
+/// type B = Layout<Int<3>, Int<2>>;
+/// const C: Layout<Int<3>, Int<4>> = <TypedComposition<A, B> as StaticValue>::VALUE;
+/// assert_eq!(C.index(2), Ok(8));
+/// ```
+///
+/// Runtime leaves have no constant value:
+/// ```compile_fail
+/// use noodle_cute::{DynInt, Int, StaticValue, algebra::TypedComposition, layout::Layout};
+/// const C: TypedComposition<Layout<Int<8>, Int<1>>, Layout<DynInt, Int<1>>> = StaticValue::VALUE;
+/// ```
+/// A static stride that violates the divisibility condition is rejected at compile time:
+/// ```compile_fail
+/// use noodle_cute::{Int, IntTuple, Nil, StaticValue, algebra::TypedComposition, layout::Layout};
+/// type Pair<const A: isize, const B: isize> = IntTuple<Int<A>, IntTuple<Int<B>, Nil>>;
+/// const C: TypedComposition<Layout<Pair<4, 6>, Pair<6, 1>>, Layout<Int<8>, Int<5>>> =
+///     StaticValue::VALUE;
+/// ```
+/// So is a static shape that violates it:
+/// ```compile_fail
+/// use noodle_cute::{Int, IntTuple, Nil, StaticValue, algebra::TypedComposition, layout::Layout};
+/// type Pair<const A: isize, const B: isize> = IntTuple<Int<A>, IntTuple<Int<B>, Nil>>;
+/// const C: TypedComposition<Layout<Pair<4, 6>, Pair<6, 1>>, Layout<Int<3>, Int<3>>> =
+///     StaticValue::VALUE;
+/// ```
+/// A static stride product that overflows:
+/// ```compile_fail
+/// use noodle_cute::{Int, StaticValue, algebra::TypedComposition, layout::Layout};
+/// const C: TypedComposition<Layout<Int<2>, Int<{ isize::MAX }>>, Layout<Int<2>, Int<2>>> =
+///     StaticValue::VALUE;
+/// ```
+/// And shape/stride profiles that differ:
+/// ```compile_fail
+/// use noodle_cute::{Int, IntTuple, Nil, StaticValue, algebra::TypedComposition, layout::Layout};
+/// const C: TypedComposition<Layout<Int<4>, Int<1>>, Layout<IntTuple<Int<2>, Nil>, Int<1>>> =
+///     StaticValue::VALUE;
+/// ```
 pub type TypedComposition<A, B> = <A as TypedCompose<B>>::Output;
 
 /// 类型化布局的受检组合；全静态入口复用此 trait 的结果类型。
@@ -347,16 +392,6 @@ impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
     }
 }
 
-impl DynLayout {
-    /// 组合运行时仿射布局，保留 RHS 的顶层分组，返回受检的运行时元数据。
-    ///
-    /// 与 composition_layout 使用相同算法；输入的负逻辑编号、不可整除与溢出
-    /// 分别返回 CoordinateOutOfBounds、NotDivisible 与 Overflow。
-    pub fn composition<B: AffineLayoutMap>(&self, rhs: &B) -> Result<GroupedLayout> {
-        composition_layout(self, rhs)
-    }
-}
-
 type CompositionTree<S, D, RS, RD> = <Layout<RS, RD> as ComposeTree<CoalescedLhs<S, D>>>::Output;
 
 impl<S, D, RS, RD> TypedCompose<Layout<RS, RD>> for Layout<S, D>
@@ -384,92 +419,6 @@ where
     }
 }
 
-/// 全静态组合的结果类型与常量值。
-///
-/// 不经过 `DynLayout`，因此不受运行时 `MAX_RANK` 缓冲区限制。
-pub trait StaticCompose<Rhs>: Copy {
-    type Output: StaticValue;
-    const OUTPUT: Self::Output = Self::Output::VALUE;
-}
-
-/// 两个静态布局组合后得到的具体 `Layout` 类型。
-pub type StaticComposition<A, B> = <A as StaticCompose<B>>::Output;
-
-/// 在编译期组合两个全静态布局，保留 RHS 的嵌套结构。
-///
-/// 与 CuTe 一样允许扩展域和负 stride；这不是 `Layout::new` 的运行时
-/// 地址范围验证入口。静态中间运算必须可由 `isize` 表示。
-/// 空 RHS 保留为空 tuple；空 LHS 按本库标量约定扩展为 `1:0`。
-///
-/// ```
-/// use noodle_cute::{Int, layout::{Layout, LayoutMap}};
-/// use noodle_cute::algebra::static_composition;
-/// const A: Layout<Int<8>, Int<2>> = Layout { shape: Int, stride: Int };
-/// const B: Layout<Int<3>, Int<2>> = Layout { shape: Int, stride: Int };
-/// const C: Layout<Int<3>, Int<4>> = static_composition(A, B);
-/// assert_eq!(C.index(2), Ok(8));
-/// ```
-///
-/// 动态值不能进入全静态入口：
-/// ```compile_fail
-/// use noodle_cute::{DynInt, Int, layout::Layout};
-/// use noodle_cute::algebra::static_composition;
-/// let a = Layout { shape: Int::<8>, stride: Int::<1> };
-/// let b = Layout { shape: DynInt(3), stride: Int::<1> };
-/// let _ = static_composition(a, b);
-/// ```
-/// 不可整除的静态 stride 在编译期拒绝：
-/// ```compile_fail
-/// use noodle_cute::{Int, layout::Layout, shape, stride};
-/// use noodle_cute::algebra::static_composition;
-/// let a = Layout { shape: shape![Int::<4>, Int::<6>], stride: stride![Int::<6>, Int::<1>] };
-/// let b = Layout { shape: Int::<8>, stride: Int::<5> };
-/// let _ = static_composition(a, b);
-/// ```
-///
-/// 不可整除的静态 shape 在编译期拒绝：
-/// ```compile_fail
-/// use noodle_cute::{Int, layout::Layout, shape, stride};
-/// use noodle_cute::algebra::static_composition;
-/// let a = Layout { shape: shape![Int::<4>, Int::<6>], stride: stride![Int::<6>, Int::<1>] };
-/// let b = Layout { shape: Int::<3>, stride: Int::<3> };
-/// let _ = static_composition(a, b);
-/// ```
-///
-/// 静态 stride 乘积溢出在编译期拒绝：
-/// ```compile_fail
-/// use noodle_cute::{Int, layout::Layout};
-/// use noodle_cute::algebra::static_composition;
-/// let a = Layout { shape: Int::<2>, stride: Int::<{ isize::MAX }> };
-/// let b = Layout { shape: Int::<2>, stride: Int::<2> };
-/// let _ = static_composition(a, b);
-/// ```
-///
-/// shape 与 stride 的嵌套 profile 必须一致：
-/// ```compile_fail
-/// use noodle_cute::{Int, layout::Layout, shape};
-/// use noodle_cute::algebra::static_composition;
-/// let a = Layout { shape: Int::<4>, stride: Int::<1> };
-/// let b = Layout { shape: shape![Int::<2>], stride: Int::<1> };
-/// let _ = static_composition(a, b);
-/// ```
-pub const fn static_composition<A: StaticCompose<B>, B: Copy>(_: A, _: B) -> A::Output {
-    A::OUTPUT
-}
-
-impl<S, D, RS, RD> StaticCompose<Layout<RS, RD>> for Layout<S, D>
-where
-    S: StaticValue,
-    D: StaticValue,
-    RS: StaticValue,
-    RD: StaticValue,
-    Self: TypedCompose<Layout<RS, RD>>,
-    TypedComposition<Self, Layout<RS, RD>>: StaticValue,
-{
-    type Output = TypedComposition<Self, Layout<RS, RD>>;
-}
-
-#[doc(hidden)]
 pub trait ComposeTree<Lhs> {
     type Output: LayoutParts;
     fn compose_tree(self, lhs: &Lhs) -> Result<Self::Output>;
@@ -515,29 +464,25 @@ where
     }
 }
 
-#[doc(hidden)]
-pub use crate::Assert as Select;
-#[doc(hidden)]
 pub const ZERO_STRIDE<D: Integer>: bool = matches!(D::STATIC, Some(0));
-#[doc(hidden)]
 pub trait ComposeLeaf<Lhs, S, D> {
     type Output: LayoutParts;
     fn compose_leaf(lhs: &Lhs, s: S, d: D) -> Result<Self::Output>;
 }
 impl<Lhs, S: Integer, D: Integer> ComposeTree<Lhs> for Layout<S, D>
 where
-    Select<{ ZERO_STRIDE::<D> }>: ComposeLeaf<Lhs, S, D>,
+    Bool<{ ZERO_STRIDE::<D> }>: ComposeLeaf<Lhs, S, D>,
 {
-    type Output = <Select<{ ZERO_STRIDE::<D> }> as ComposeLeaf<Lhs, S, D>>::Output;
+    type Output = <Bool<{ ZERO_STRIDE::<D> }> as ComposeLeaf<Lhs, S, D>>::Output;
     fn compose_tree(self, lhs: &Lhs) -> Result<Self::Output> {
-        <Select<{ ZERO_STRIDE::<D> }> as ComposeLeaf<Lhs, S, D>>::compose_leaf(
+        <Bool<{ ZERO_STRIDE::<D> }> as ComposeLeaf<Lhs, S, D>>::compose_leaf(
             lhs,
             self.shape,
             self.stride,
         )
     }
 }
-impl<Lhs, S, D> ComposeLeaf<Lhs, S, D> for Select<true> {
+impl<Lhs, S, D> ComposeLeaf<Lhs, S, D> for Bool<true> {
     type Output = Layout<S, D>;
     fn compose_leaf(_: &Lhs, s: S, d: D) -> Result<Layout<S, D>> {
         Ok(Layout {
@@ -546,7 +491,7 @@ impl<Lhs, S, D> ComposeLeaf<Lhs, S, D> for Select<true> {
         })
     }
 }
-impl<Lhs, S, D> ComposeLeaf<Lhs, S, D> for Select<false>
+impl<Lhs, S, D> ComposeLeaf<Lhs, S, D> for Bool<false>
 where
     Lhs: Clone + Fold<S, D, Nil, Nil>,
 {
@@ -556,7 +501,6 @@ where
     }
 }
 
-#[doc(hidden)]
 pub struct StepData {
     pub skip: bool,
     pub next_shape: isize,
@@ -613,59 +557,50 @@ const fn step(s: isize, d: isize, cs: isize) -> StepData {
     }
 }
 
-#[doc(hidden)]
 pub const STEP_STATIC<S: Integer, D: Integer, CS: Integer>: bool =
     S::STATIC.is_some() && D::STATIC.is_some() && CS::STATIC.is_some();
-#[doc(hidden)]
 pub const REST_STATIC<S: Integer, D: Integer, CS: Integer>: bool =
     matches!(S::STATIC, Some(0)) || STEP_STATIC::<S, D, CS>;
-#[doc(hidden)]
 pub const STRIDE_STATIC<D: Integer, CS: Integer>: bool =
     D::STATIC.is_some() && CS::STATIC.is_some();
-#[doc(hidden)]
 pub const SKIP<S: Integer, D: Integer, CS: Integer>: bool = matches!(S::STATIC, Some(1))
     || match (D::STATIC, CS::STATIC) {
         (Some(d), Some(cs)) => step(1, d, cs).next_shape == 1,
         _ => false,
     };
-#[doc(hidden)]
 pub const EXTENT<S: Integer, D: Integer, CS: Integer>: isize =
     match (S::STATIC, D::STATIC, CS::STATIC) {
         (Some(s), Some(d), Some(cs)) => step(s, d, cs).extent,
         _ => 0,
     };
-#[doc(hidden)]
 pub const REST<S: Integer, D: Integer, CS: Integer>: isize =
     match (S::STATIC, D::STATIC, CS::STATIC) {
         (Some(0), _, _) => 0,
         (Some(s), Some(d), Some(cs)) => step(s, d, cs).rest,
         _ => 0,
     };
-#[doc(hidden)]
 pub const STRIDE<D: Integer, CS: Integer>: isize = match (D::STATIC, CS::STATIC) {
     (Some(d), Some(cs)) => step(1, d, cs).stride,
     _ => 0,
 };
 
-#[doc(hidden)]
 pub trait StepNumber<const N: isize> {
     type Output: Integer;
     fn make(value: isize) -> Self::Output;
 }
-impl<const N: isize> StepNumber<N> for Select<true> {
+impl<const N: isize> StepNumber<N> for Bool<true> {
     type Output = Int<N>;
     fn make(_: isize) -> Self::Output {
         Int
     }
 }
-impl<const N: isize> StepNumber<N> for Select<false> {
+impl<const N: isize> StepNumber<N> for Bool<false> {
     type Output = DynInt;
     fn make(value: isize) -> Self::Output {
         DynInt(value)
     }
 }
 
-#[doc(hidden)]
 pub trait TypedStep<S, D, CS> {
     type Extent: Integer;
     type Rest: Integer;
@@ -674,14 +609,13 @@ pub trait TypedStep<S, D, CS> {
 }
 impl<S: Integer, D: Integer, CS: Integer> TypedStep<S, D, CS> for ()
 where
-    Select<{ STEP_STATIC::<S, D, CS> }>: StepNumber<{ EXTENT::<S, D, CS> }>,
-    Select<{ REST_STATIC::<S, D, CS> }>: StepNumber<{ REST::<S, D, CS> }>,
-    Select<{ STRIDE_STATIC::<D, CS> }>: StepNumber<{ STRIDE::<D, CS> }>,
+    Bool<{ STEP_STATIC::<S, D, CS> }>: StepNumber<{ EXTENT::<S, D, CS> }>,
+    Bool<{ REST_STATIC::<S, D, CS> }>: StepNumber<{ REST::<S, D, CS> }>,
+    Bool<{ STRIDE_STATIC::<D, CS> }>: StepNumber<{ STRIDE::<D, CS> }>,
 {
-    type Extent =
-        <Select<{ STEP_STATIC::<S, D, CS> }> as StepNumber<{ EXTENT::<S, D, CS> }>>::Output;
-    type Rest = <Select<{ REST_STATIC::<S, D, CS> }> as StepNumber<{ REST::<S, D, CS> }>>::Output;
-    type Stride = <Select<{ STRIDE_STATIC::<D, CS> }> as StepNumber<{ STRIDE::<D, CS> }>>::Output;
+    type Extent = <Bool<{ STEP_STATIC::<S, D, CS> }> as StepNumber<{ EXTENT::<S, D, CS> }>>::Output;
+    type Rest = <Bool<{ REST_STATIC::<S, D, CS> }> as StepNumber<{ REST::<S, D, CS> }>>::Output;
+    type Stride = <Bool<{ STRIDE_STATIC::<D, CS> }> as StepNumber<{ STRIDE::<D, CS> }>>::Output;
     fn run(s: S, d: D, cs: CS) -> Result<(Self::Extent, Self::Rest, Self::Stride)> {
         let shape = s.value();
         if shape < 0 {
@@ -706,20 +640,18 @@ where
             };
         }
         Ok((
-            <Select<{ STEP_STATIC::<S, D, CS> }> as StepNumber<{ EXTENT::<S, D, CS> }>>::make(
+            <Bool<{ STEP_STATIC::<S, D, CS> }> as StepNumber<{ EXTENT::<S, D, CS> }>>::make(
                 v.extent,
             ),
-            <Select<{ REST_STATIC::<S, D, CS> }> as StepNumber<{ REST::<S, D, CS> }>>::make(v.rest),
-            <Select<{ STRIDE_STATIC::<D, CS> }> as StepNumber<{ STRIDE::<D, CS> }>>::make(v.stride),
+            <Bool<{ REST_STATIC::<S, D, CS> }> as StepNumber<{ REST::<S, D, CS> }>>::make(v.rest),
+            <Bool<{ STRIDE_STATIC::<D, CS> }> as StepNumber<{ STRIDE::<D, CS> }>>::make(v.stride),
         ))
     }
 }
 
-#[doc(hidden)]
 pub const PRODUCT_STATIC<A: Integer, B: Integer>: bool = matches!(A::STATIC, Some(0))
     || matches!(B::STATIC, Some(0))
     || (A::STATIC.is_some() && B::STATIC.is_some());
-#[doc(hidden)]
 pub const PRODUCT<A: Integer, B: Integer>: isize = match (A::STATIC, B::STATIC) {
     (Some(0), _) | (_, Some(0)) => 0,
     (Some(a), Some(b)) => a * b,
@@ -727,25 +659,23 @@ pub const PRODUCT<A: Integer, B: Integer>: isize = match (A::STATIC, B::STATIC) 
 };
 
 // CuTe 的静态零乘动态值仍是静态零，不能用本库的普通混合乘法推导类型。
-#[doc(hidden)]
 pub trait ComposeProduct<A, B> {
     type Output: Integer;
     fn product(a: A, b: B) -> Result<Self::Output>;
 }
 impl<A: Integer, B: Integer> ComposeProduct<A, B> for ()
 where
-    Select<{ PRODUCT_STATIC::<A, B> }>: StepNumber<{ PRODUCT::<A, B> }>,
+    Bool<{ PRODUCT_STATIC::<A, B> }>: StepNumber<{ PRODUCT::<A, B> }>,
 {
-    type Output = <Select<{ PRODUCT_STATIC::<A, B> }> as StepNumber<{ PRODUCT::<A, B> }>>::Output;
+    type Output = <Bool<{ PRODUCT_STATIC::<A, B> }> as StepNumber<{ PRODUCT::<A, B> }>>::Output;
     fn product(a: A, b: B) -> Result<Self::Output> {
         let value = mul(a.value(), b.value())?;
-        Ok(<Select<{ PRODUCT_STATIC::<A, B> }> as StepNumber<
+        Ok(<Bool<{ PRODUCT_STATIC::<A, B> }> as StepNumber<
             { PRODUCT::<A, B> },
         >>::make(value))
     }
 }
 
-#[doc(hidden)]
 pub trait Fold<S, D, OS, OD> {
     type Output: LayoutParts;
     fn fold(self, s: S, d: D, os: OS, od: OD) -> Result<Self::Output>;
@@ -766,10 +696,10 @@ where
 impl<S: Integer, D: Integer, CS: Integer, CD, SH, ST, DH, DT, OS, OD> Fold<S, D, OS, OD>
     for Layout<IntTuple<CS, IntTuple<SH, ST>>, IntTuple<CD, IntTuple<DH, DT>>>
 where
-    Select<{ SKIP::<S, D, CS> }>:
+    Bool<{ SKIP::<S, D, CS> }>:
         FoldStep<Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>, S, D, CS, CD, OS, OD>,
 {
-    type Output = <Select<{ SKIP::<S, D, CS> }> as FoldStep<
+    type Output = <Bool<{ SKIP::<S, D, CS> }> as FoldStep<
         Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>,
         S,
         D,
@@ -779,7 +709,7 @@ where
         OD,
     >>::Output;
     fn fold(self, s: S, d: D, os: OS, od: OD) -> Result<Self::Output> {
-        <Select<{ SKIP::<S, D, CS> }> as FoldStep<
+        <Bool<{ SKIP::<S, D, CS> }> as FoldStep<
             Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>,
             S,
             D,
@@ -802,13 +732,12 @@ where
     }
 }
 
-#[doc(hidden)]
 pub trait FoldStep<Tail, S, D, CS, CD, OS, OD> {
     type Output: LayoutParts;
     fn run(tail: Tail, s: S, d: D, cs: CS, cd: CD, os: OS, od: OD) -> Result<Self::Output>;
 }
 impl<Tail, S: Integer, D: Integer, CS: Integer, CD, OS, OD> FoldStep<Tail, S, D, CS, CD, OS, OD>
-    for Select<true>
+    for Bool<true>
 where
     (): TypedStep<S, D, CS>,
     Tail: Fold<S, <() as TypedStep<S, D, CS>>::Stride, OS, OD>,
@@ -820,7 +749,7 @@ where
     }
 }
 impl<Tail, S: Integer, D: Integer, CS: Integer, CD: Integer, OS, OD>
-    FoldStep<Tail, S, D, CS, CD, OS, OD> for Select<false>
+    FoldStep<Tail, S, D, CS, CD, OS, OD> for Bool<false>
 where
     (): ComposeProduct<D, CD>,
     (): TypedStep<S, D, CS>,
@@ -851,7 +780,6 @@ where
     }
 }
 
-#[doc(hidden)]
 pub trait Finish<S, D, CD> {
     type Output: LayoutParts;
     fn finish(self, s: S, d: D, cd: CD) -> Result<Self::Output>;
@@ -873,14 +801,13 @@ where
         })
     }
 }
-#[doc(hidden)]
 pub const UNIT<S: Integer>: bool = matches!(S::STATIC, Some(1));
 impl<S: Integer, D, CD, SH, ST, DH, DT> Finish<S, D, CD>
     for Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>
 where
-    Select<{ UNIT::<S> }>: FinishNonempty<IntTuple<SH, ST>, IntTuple<DH, DT>, S, D, CD>,
+    Bool<{ UNIT::<S> }>: FinishNonempty<IntTuple<SH, ST>, IntTuple<DH, DT>, S, D, CD>,
 {
-    type Output = <Select<{ UNIT::<S> }> as FinishNonempty<
+    type Output = <Bool<{ UNIT::<S> }> as FinishNonempty<
         IntTuple<SH, ST>,
         IntTuple<DH, DT>,
         S,
@@ -888,7 +815,7 @@ where
         CD,
     >>::Output;
     fn finish(self, s: S, d: D, cd: CD) -> Result<Self::Output> {
-        <Select<{ UNIT::<S> }> as FinishNonempty<IntTuple<SH, ST>, IntTuple<DH, DT>, S, D, CD>>::run(
+        <Bool<{ UNIT::<S> }> as FinishNonempty<IntTuple<SH, ST>, IntTuple<DH, DT>, S, D, CD>>::run(
             self.shape,
             self.stride,
             s,
@@ -897,12 +824,11 @@ where
         )
     }
 }
-#[doc(hidden)]
 pub trait FinishNonempty<OS, OD, S, D, CD> {
     type Output: LayoutParts;
     fn run(os: OS, od: OD, s: S, d: D, cd: CD) -> Result<Self::Output>;
 }
-impl<OS: Unwrap, OD: Unwrap, S, D, CD> FinishNonempty<OS, OD, S, D, CD> for Select<true> {
+impl<OS: Unwrap, OD: Unwrap, S, D, CD> FinishNonempty<OS, OD, S, D, CD> for Bool<true> {
     type Output = Layout<OS::Output, OD::Output>;
     fn run(os: OS, od: OD, _: S, _: D, _: CD) -> Result<Self::Output> {
         Ok(Layout {
@@ -911,7 +837,7 @@ impl<OS: Unwrap, OD: Unwrap, S, D, CD> FinishNonempty<OS, OD, S, D, CD> for Sele
         })
     }
 }
-impl<OS, OD, S, D: Integer, CD: Integer> FinishNonempty<OS, OD, S, D, CD> for Select<false>
+impl<OS, OD, S, D: Integer, CD: Integer> FinishNonempty<OS, OD, S, D, CD> for Bool<false>
 where
     (): ComposeProduct<D, CD>,
     OS: Append<IntTuple<S, Nil>>,

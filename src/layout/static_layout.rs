@@ -41,12 +41,11 @@ pub struct Layout<S, D> {
     pub stride: D,
 }
 
-/// 类型化代数结果的 shape/stride 接口，支持尚未校验的中间布局。
-#[doc(hidden)]
+/// Shape/stride projection of typed algebra results, including unvalidated intermediates.
 pub trait LayoutParts {
     type Shape;
     type Stride;
-    /// 返回布局值，不执行校验或归一。
+    /// Returns the layout value without validation or normalization.
     fn into_layout(self) -> Layout<Self::Shape, Self::Stride>;
 }
 impl<S, D> LayoutParts for Layout<S, D> {

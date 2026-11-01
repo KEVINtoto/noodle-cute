@@ -6,7 +6,7 @@ use crate::tuple::{Append, Item};
 use crate::{Int, IntTuple, Nil, Result};
 use core::fmt::Debug;
 
-use super::coalesce::Decision;
+use super::{FLAT, LOGICAL, TILED, ZIPPED};
 
 pub type Pair<A, B> = IntTuple<A, IntTuple<B, Nil>>;
 pub type Joined<A, B> = Layout<
@@ -263,13 +263,13 @@ pub trait Regroup<const KIND: u8> {
     type Output: LayoutParts;
     fn regroup(self) -> Self::Output;
 }
-impl<L: Split> Regroup<1> for L {
+impl<L: Split> Regroup<{ ZIPPED }> for L {
     type Output = Self;
     fn regroup(self) -> Self {
         self
     }
 }
-impl<TS, RS: Wrap, TD, RD: Wrap> Regroup<2> for Layout<Pair<TS, RS>, Pair<TD, RD>> {
+impl<TS, RS: Wrap, TD, RD: Wrap> Regroup<{ TILED }> for Layout<Pair<TS, RS>, Pair<TD, RD>> {
     type Output = Layout<IntTuple<TS, RS::Output>, IntTuple<TD, RD::Output>>;
     fn regroup(self) -> Self::Output {
         Layout {
@@ -278,7 +278,8 @@ impl<TS, RS: Wrap, TD, RD: Wrap> Regroup<2> for Layout<Pair<TS, RS>, Pair<TD, RD
         }
     }
 }
-impl<TS: Wrap, RS: Wrap, TD: Wrap, RD: Wrap> Regroup<3> for Layout<Pair<TS, RS>, Pair<TD, RD>>
+impl<TS: Wrap, RS: Wrap, TD: Wrap, RD: Wrap> Regroup<{ FLAT }>
+    for Layout<Pair<TS, RS>, Pair<TD, RD>>
 where
     TS::Output: Append<RS::Output>,
     TD::Output: Append<RD::Output>,
@@ -294,93 +295,70 @@ where
         }
     }
 }
+
+/// Selects how a typed divide or product arranges its `(tile, rest)` result.
+pub struct Kind<const KIND: u8>;
 pub trait Arrange<L, T> {
     type Output: LayoutParts;
     fn arrange(layout: L) -> Self::Output;
 }
-impl<L: LayoutParts, T> Arrange<L, T> for Decision<0> {
+impl<L: LayoutParts, T> Arrange<L, T> for Kind<{ LOGICAL }> {
     type Output = L;
     fn arrange(layout: L) -> L {
         layout
     }
 }
 macro_rules! arrange {
-    ($($k:literal),*) => {$ (
-        impl<L: Unzip<T>, T> Arrange<L, T> for Decision<$k>
-        where L::Output: Regroup<$k>,
+    ($($kind:ident),*) => {$ (
+        impl<L: Unzip<T>, T> Arrange<L, T> for Kind<{ $kind }>
+        where L::Output: Regroup<{ $kind }>,
         {
-            type Output = <L::Output as Regroup<$k>>::Output;
+            type Output = <L::Output as Regroup<{ $kind }>>::Output;
             fn arrange(layout: L) -> Self::Output { layout.unzip().regroup() }
         }
     )*};
 }
-arrange!(1, 2, 3);
-
-pub trait ValidateTiler<L, T> {
-    fn validate(layout: &L, tiler: &T) -> Result<()>;
-}
-impl<L, T> ValidateTiler<L, T> for () {
-    fn validate(_: &L, _: &T) -> Result<()> {
-        Ok(())
-    }
-}
+arrange!(ZIPPED, TILED, FLAT);
 
 pub type Transformed<L, T, Op> = <L as Transform<T, Op>>::Output;
 pub type Arranged<L, T, Op, const KIND: u8> =
-    <Decision<KIND> as Arrange<Transformed<L, T, Op>, T>>::Output;
+    <Kind<KIND> as Arrange<Transformed<L, T, Op>, T>>::Output;
 
 macro_rules! operation_api {
-    ($trait:ident, $alias:ident, $static_trait:ident, $op:ty, $apply:ident, $validator:ty;
-     $(($kind:literal, $method:ident, $static_fn:ident)),+ $(,)?) => {
-        /// 类型化布局变换；KIND 的分组编码与 tiler 约束见所在模块文档。
-        pub trait $trait<T, const KIND: u8 = 0> {
+    ($trait:ident, $alias:ident, $op:ty, $apply:ident; $(($kind:ident, $method:ident)),+ $(,)?) => {
+        /// Typed layout transform; `KIND` is one of the grouping constants such as [`LOGICAL`](super::LOGICAL).
+        pub trait $trait<T, const KIND: u8 = { super::LOGICAL }> {
             type Output: crate::layout::LayoutMap;
             fn $apply(self, tiler: T) -> crate::Result<Self::Output>;
         }
-        /// 保留静态整数与完整层级的变换结果。
-        pub type $alias<L, T, const KIND: u8 = 0> = <L as $trait<T, KIND>>::Output;
+        /// Result type of the typed transform, keeping static integers and the full hierarchy.
+        ///
+        /// For fully static inputs, `<Alias as StaticValue>::VALUE` is the result as a constant.
+        pub type $alias<L, T, const KIND: u8 = { super::LOGICAL }> = <L as $trait<T, KIND>>::Output;
         impl<S: crate::layout::Shape, D: crate::tuple::Item<Profile = S::Profile>, T, const KIND: u8>
             $trait<T, KIND> for crate::layout::Layout<S, D>
         where
             Self: super::typed::Transform<T, $op>,
-            $validator: super::typed::ValidateTiler<Self, T>,
-            super::coalesce::Decision<KIND>: super::typed::Arrange<super::typed::Transformed<Self, T, $op>, T>,
+            super::typed::Kind<KIND>: super::typed::Arrange<super::typed::Transformed<Self, T, $op>, T>,
             super::typed::Arranged<Self, T, $op, KIND>: super::typed::Checked,
         {
             type Output = <super::typed::Arranged<Self, T, $op, KIND> as super::typed::Checked>::Output;
             fn $apply(self, tiler: T) -> crate::Result<Self::Output> {
                 use super::typed::{Arrange, Checked, Transform};
                 self.size()?;
-                <$validator as super::typed::ValidateTiler<Self, T>>::validate(&self, &tiler)?;
                 let logical = self.transform(tiler)?;
-                <super::coalesce::Decision<KIND> as Arrange<_, T>>::arrange(logical).checked()
+                <super::typed::Kind<KIND> as Arrange<_, T>>::arrange(logical).checked()
             }
         }
-        /// 全静态变换的结果与常量值，不经过运行时数组。
-        pub trait $static_trait<T, const KIND: u8 = 0>: Copy {
-            type Output: crate::StaticValue;
-            const OUTPUT: Self::Output = <Self::Output as crate::StaticValue>::VALUE;
-        }
-        impl<S: crate::StaticValue, D: crate::StaticValue, T: crate::StaticValue, const KIND: u8>
-            $static_trait<T, KIND> for crate::layout::Layout<S, D>
-        where Self: $trait<T, KIND>, $alias<Self, T, KIND>: crate::StaticValue,
-        { type Output = $alias<Self, T, KIND>; }
-        $(
-            /// 编译期变换，保留上游分组；静态非法运算在实例化时拒绝。
-            ///
-            /// 常量入口不执行最终运行时 size/address_range 校验；受检值入口使用同名方法。
-            pub const fn $static_fn<L: $static_trait<T, $kind>, T: Copy>(_: L, _: T) -> L::Output {
-                L::OUTPUT
-            }
-        )+
         impl<S: crate::layout::Shape, D: crate::tuple::Item<Profile = S::Profile>> crate::layout::Layout<S, D> {
             $(
-                /// 按模块定义的 tiler 与分组规则进行受检变换，保留静态整数及嵌套 profile。
+                /// Checked typed transform with the tiler and grouping rules of this module,
+                /// keeping static integers and nested profiles.
                 ///
-                /// 具体 tiler 类型、rank 与整除约束见模块文档；动态错误通过 Result 返回。
-                /// 仅静态信息改变结构，类型化结果不受 MAX_RANK 限制。
-                pub fn $method<T>(&self, tiler: T) -> crate::Result<$alias<Self, T, $kind>>
-                where Self: $trait<T, $kind>,
+                /// Runtime errors are returned through `Result`; only static facts change the
+                /// structure, and typed results are not limited by `MAX_RANK`.
+                pub fn $method<T>(&self, tiler: T) -> crate::Result<$alias<Self, T, { super::$kind }>>
+                where Self: $trait<T, { super::$kind }>,
                 { self.clone().$apply(tiler) }
             )+
         }

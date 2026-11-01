@@ -46,14 +46,13 @@ Integer values use `isize`, so their range depends on the target platform's poin
 | `Int<const N: isize>` | A zero-sized integer with its value encoded in its type; read it through `Int::<N>::VALUE` or `.value()` |
 | `DynInt(pub isize)` | A runtime integer; read it through `.0` or `.value()` |
 | `Integer` | A shared interface for `Int<N>`, `DynInt`, and native `isize`, providing `STATIC` and `value()`; downstream crates cannot implement this trait |
-| `NON_NEGATIVE::<N>` | Tests whether the compile-time integer `N` is nonnegative |
 
 `Integer::STATIC` indicates whether the type determines the value. It is `Some(N)` for `Int<N>` and `None` for `DynInt` and `isize`, even when they happen to hold the same value.
 
 `Int` and `DynInt` support `+`, `-`, `*`, `/`, `%`, and unary negation. Arithmetic between two `Int` values produces another `Int`. Operations with a runtime operand and either wrapper produce `DynInt`. These operators follow Rust's integer arithmetic rules and do not return `Result`. Unlike CuTe, a static zero does not absorb a runtime operand: `Int::<0>` times a `DynInt` is a `DynInt`, while CuTe returns `_0`. The layout algebra applies CuTe's static-zero rules internally where they affect result types.
 
 ```rust
-use noodle_cute::int::{DynInt, Int, Integer, NON_NEGATIVE};
+use noodle_cute::int::{DynInt, Int, Integer};
 
 fn main() {
     let sum: Int<5> = Int::<2> + Int::<3>;
@@ -68,7 +67,6 @@ fn main() {
     assert_eq!(<Int<7> as Integer>::STATIC, Some(7));
     assert_eq!(<DynInt as Integer>::STATIC, None);
     assert_eq!(<isize as Integer>::STATIC, None);
-    assert!(NON_NEGATIVE::<0>);
 
     let runtime: DynInt = 11isize.into();
     assert_eq!(runtime, DynInt(11));
@@ -89,7 +87,6 @@ Use `int_tuple!` to construct these structures. Commas separate top-level modes,
 | `Get<INDEX>` / `.get::<INDEX>()` | Borrows a top-level mode by a compile-time index, preserving its concrete type and nesting; invalid indices fail to compile |
 | `Append<R>` / `.append(rhs)` | Replaces the tuple chain's terminating `Nil` with `rhs`; passing another tuple concatenates the chains |
 | `Flatten` / `.flatten()` | Flattens the structure in head-first, depth-first order, preserving leaf order and types; a bare integer becomes a one-element tuple (CuTe `flatten_to_tuple`, not `flatten`) |
-| `Unwrap` / `.unwrap()` | 静态推导辅助操作：取出非空 tuple 的唯一模式；多个模式时保留原 tuple，不递归展平 |
 | `Product` / `.product_typed()` | Computes the product, keeping a static result type when every leaf is static |
 
 `Item` provides the structural metadata `RANK`, `DEPTH`, `LEAVES`, and the associated type `Profile`:
@@ -123,20 +120,6 @@ fn main() {
     assert_eq!(second.get::<1>().value(), 4);
     assert_eq!(nested.product(), Ok(24));
 }
-```
-
-`tuple::GetHead<B>` 与 `algebra::composition::Select<B>` 共用 `Assert<B>` 布尔分派标记，旧名称及 `GetHead::<true>` / `Select::<false>` 的构造语法保留。`Unwrap` 位于 `tuple` 模块，原 `algebra::composition::Unwrap` 路径继续通过重导出提供；空 tuple 没有 `Unwrap` 实现。
-
-```rust
-use noodle_cute::{Int, int_tuple};
-use noodle_cute::tuple::Unwrap;
-
-let leaf: Int<2> = int_tuple![Int::<2>].unwrap();
-assert_eq!(leaf.value(), 2);
-let pair = int_tuple![Int::<2>, Int::<3>];
-assert_eq!(pair.unwrap(), pair);
-let nested = int_tuple![(Int::<2>, Int::<3>)];
-assert_eq!(nested.unwrap(), pair);
 ```
 
 The two product interfaces serve different purposes:

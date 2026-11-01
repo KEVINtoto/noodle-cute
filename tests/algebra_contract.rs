@@ -5,14 +5,10 @@
 //! rather than computing expectations through another transformation under test.
 
 use noodle_cute::Error;
-use noodle_cute::algebra::divide::{
-    DividedAxes, flat_divide_axes, flat_divide_modes, logical_divide, logical_divide_axes,
-    logical_divide_modes, tiled_divide_axes, tiled_divide_modes, zipped_divide_axes,
-    zipped_divide_modes,
-};
-use noodle_cute::algebra::inverse::{left_inverse, right_inverse};
-use noodle_cute::algebra::product::logical_product;
+use noodle_cute::algebra::logical_divide;
+use noodle_cute::algebra::logical_product;
 use noodle_cute::algebra::{Grouping, TileRest};
+use noodle_cute::algebra::{left_inverse, right_inverse};
 use noodle_cute::layout::{DynLayout, GroupedLayout, LayoutMap};
 
 pub mod common;
@@ -258,39 +254,6 @@ fn tile_rest_affine_export_injectivity_and_capacity_or_overflow_errors() {
 // ---------------------------------------------------------------------------
 // 7. Cross-Module Algebraic Laws & Capacity Boundaries
 // ---------------------------------------------------------------------------
-
-#[test]
-fn divide_axes_and_divide_modes_agree_across_all_four_groupings() {
-    let base = dyn_layout(&[6, 8], &[11, 1]);
-    let tile_extents = [2, 4];
-    let mode_tiler = [dyn_layout(&[2], &[1]), dyn_layout(&[4], &[1])];
-
-    let check_pair = |axes: &DividedAxes<DynLayout>, modes: &GroupedLayout| {
-        assert_eq!(axes.rank(), modes.rank());
-        assert_eq!(axes.size(), modes.size());
-        for a in 0..axes.rank() {
-            assert_eq!(axes.extent(a), modes.extent(a));
-        }
-        assert_eq!(values(axes), values(modes));
-    };
-
-    check_pair(
-        &logical_divide_axes(base, &tile_extents).unwrap(),
-        &logical_divide_modes(&base, &mode_tiler).unwrap(),
-    );
-    check_pair(
-        &zipped_divide_axes(base, &tile_extents).unwrap(),
-        &zipped_divide_modes(&base, &mode_tiler).unwrap(),
-    );
-    check_pair(
-        &tiled_divide_axes(base, &tile_extents).unwrap(),
-        &tiled_divide_modes(&base, &mode_tiler).unwrap(),
-    );
-    check_pair(
-        &flat_divide_axes(base, &tile_extents).unwrap(),
-        &flat_divide_modes(&base, &mode_tiler).unwrap(),
-    );
-}
 
 #[test]
 fn product_divide_and_inverse_form_round_trip_bijections() {

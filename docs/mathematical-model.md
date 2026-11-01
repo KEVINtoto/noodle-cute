@@ -241,7 +241,7 @@ $$
 
 `composition` 遇到这种可规范化的仿射输入会缓存规范结果，`is_normalized()` 返回 `true`。若 shape/stride 规则报 `NotDivisible`，通用 `composition` 仍可保留逐点求值；非仿射 outer 也走逐点路径。因此不能把所有组合都解释成一个没有例外的 $A(B(i))$，也不能把所有 `composition` 对象都当成已成功规范化的仿射布局。
 
-类型化入口 `Layout::composition` 与全静态 `static_composition` 共用上述代数规则，保留 RHS 的嵌套树；输出结构只受静态事实控制，动态值为 1 的模式不会在类型层被消去。运行时 `DynLayout::composition` 则可以按实际数值简化结构，结果由 `GroupedLayout` 表示。类型化 Rust 方法补充检查上游省略的动态整除断言，并以 `Result` 报告整除、除零及溢出错误。
+The typed `Layout::composition` and the fully static `TypedComposition` constant share the algebra above, 保留 RHS 的嵌套树；输出结构只受静态事实控制，动态值为 1 的模式不会在类型层被消去。The runtime `composition_layout` may simplify the structure using actual values; 结果由 `GroupedLayout` 表示。类型化 Rust 方法补充检查上游省略的动态整除断言，并以 `Result` 报告整除、除零及溢出错误。
 
 ## 8. 补布局：描述空隙与重复间距
 
@@ -334,7 +334,7 @@ $$
 
 **分组**改变顶层模式边界；把坐标的位置交换称为**重排**。logical 的叶子次序与其余三者不同，所以同一个线性编号不一定访问同一原坐标。`GroupedLayout` 只保留顶层分组，表中更深的边界是概念说明。
 
-`*_divide_modes` 允许不整除并补齐，未提供 tiler 的末尾模式归入 rest。另一组 `*_divide_axes` 必须覆盖全部顶层轴且逐轴整除，它们保留原逻辑大小，并用惰性视图恢复原坐标。对于单个布局 tiler 的普通 `logical_divide` 与 `zipped_divide`，两者都只有 `(tile,rest)` 两组，不存在逐轴分组交换。
+`*_divide_modes` 允许不整除并补齐，未提供 tiler 的末尾模式归入 rest。对于单个布局 tiler 的普通 `logical_divide` 与 `zipped_divide`，两者都只有 `(tile,rest)` 两组，不存在逐轴分组交换。
 
 ### 9.3 乘积表示重复铺放
 

@@ -1,35 +1,33 @@
-//! 全静态、混合类型与运行时布局的 product。
+//! Product for static, mixed, and runtime layouts.
 //!
-//! 类型化方法支持整数、布局和嵌套 tuple tiler，复用 complement_extended 和
-//! composition。blocked/raked 先把 tiler 按顶层模式补齐 1:0 再组合，最后逐模式 zip。
-//! 运行时自由函数保留惰性组合；`*_product_modes` 支持部分 tuple tiler。
+//! Typed methods accept integer, layout, and nested tuple tilers and reuse
+//! `complement_extended` and composition. Blocked and raked products pad the tiler with
+//! `1:0` modes before composing, then zip the block and rest mode by mode. The runtime
+//! functions keep the lazy composition; `*_product_modes` accept partial tuple tilers.
 //!
 //! ```
-//! use noodle_cute::{Int, IntTuple, Nil, DynInt, layout::{Layout, LayoutMap}};
-//! use noodle_cute::algebra::static_logical_product;
+//! use noodle_cute::{DynInt, Int, IntTuple, Nil, StaticValue};
+//! use noodle_cute::algebra::TypedProductLayout;
+//! use noodle_cute::layout::{Layout, LayoutMap};
 //! type Pair<A, B> = IntTuple<A, IntTuple<B, Nil>>;
-//! const C: Layout<Pair<Int<2>, Int<3>>, Pair<Int<1>, Int<2>>> = static_logical_product(
-//!     Layout { shape: Int::<2>, stride: Int::<1> }, Int::<3>,
-//! );
+//! const C: Layout<Pair<Int<2>, Int<3>>, Pair<Int<1>, Int<2>>> =
+//!     <TypedProductLayout<Layout<Int<2>, Int<1>>, Int<3>> as StaticValue>::VALUE;
 //! let block = Layout::new(DynInt(2), Int::<1>)?;
 //! let result = block.logical_product(Int::<3>)?;
 //! assert_eq!(result.index(5)?, 5);
 //! # Ok::<(), noodle_cute::Error>(())
 //! ```
 //! ```compile_fail
-//! use noodle_cute::{Int, layout::Layout, algebra::static_logical_product};
-//! let _ = static_logical_product(Layout { shape: Int::<0>, stride: Int::<1> }, Int::<3>);
+//! use noodle_cute::{Int, StaticValue, algebra::TypedProductLayout, layout::Layout};
+//! const C: TypedProductLayout<Layout<Int<0>, Int<1>>, Int<3>> = StaticValue::VALUE;
 //! ```
 //! ```compile_fail
-//! use noodle_cute::{Int, layout::Layout, algebra::static_logical_product};
-//! let _ = static_logical_product(
-//!     Layout { shape: Int::<2>, stride: Int::<2> },
-//!     Layout { shape: Int::<2>, stride: Int::<3> },
-//! );
+//! use noodle_cute::{Int, StaticValue, algebra::TypedProductLayout, layout::Layout};
+//! const C: TypedProductLayout<Layout<Int<2>, Int<2>>, Layout<Int<2>, Int<3>>> = StaticValue::VALUE;
 //! ```
 //! ```compile_fail
-//! use noodle_cute::{Int, DynInt, layout::Layout, algebra::static_logical_product};
-//! let _ = static_logical_product(Layout { shape: Int::<2>, stride: Int::<1> }, DynInt(3));
+//! use noodle_cute::{DynInt, Int, StaticValue, algebra::TypedProductLayout, layout::Layout};
+//! const C: TypedProductLayout<Layout<Int<2>, Int<1>>, DynInt> = StaticValue::VALUE;
 //! ```
 //! ```compile_fail
 //! use noodle_cute::{Int, int_tuple, layout::Layout};
@@ -42,21 +40,20 @@ use crate::layout::{
 };
 use crate::{Error, Int, IntTuple, Nil, Result};
 
-use super::coalesce::Decision;
 use super::complement::complement_extended;
 use super::composition::{Composition, composition, composition_layout};
-use super::typed::{Arrange, IntoModes, Split};
-use super::{Grouping, Leaves, TileRest};
+use super::typed::{Arrange, IntoModes, Kind, Split};
+use super::{BLOCKED, Grouping, Leaves, RAKED, TileRest};
 
 /// Product layout formed by adding a tile address to a rest address mapped through the complement of the tile.
-pub type Product<A, B> = TileRest<A, Composition<DynLayout, B>>;
+pub type Produced<A, B> = TileRest<A, Composition<DynLayout, B>>;
 
 // Construct a product layout from a block and a tiler layout, returning a composed layout.
 fn product<A: AffineLayoutMap, B: LayoutMap>(
     block: A,
     tiler: B,
     grouping: Grouping,
-) -> Result<Product<A, B>> {
+) -> Result<Produced<A, B>> {
     // CuTe: logical_product(block, tiler) = (block, complement(block) o tiler), with complement
     // having no cotarget; rest values extend through its terminal 1:(s_last*d_last) mode.
     let complement = complement_extended(block.clone())?;
@@ -75,7 +72,7 @@ fn product<A: AffineLayoutMap, B: LayoutMap>(
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::algebra::product::logical_product;
+/// use noodle_cute::algebra::logical_product;
 /// use noodle_cute::layout::{DynLayout, LayoutMap};
 ///
 /// let block = DynLayout::new(&[2], &[1])?;
@@ -96,7 +93,7 @@ fn product<A: AffineLayoutMap, B: LayoutMap>(
 pub fn logical_product<A: AffineLayoutMap, B: LayoutMap>(
     block: A,
     tiler: B,
-) -> Result<Product<A, B>> {
+) -> Result<Produced<A, B>> {
     product(block, tiler, Grouping::Logical)
 }
 
@@ -105,7 +102,7 @@ pub fn logical_product<A: AffineLayoutMap, B: LayoutMap>(
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::algebra::product::zipped_product;
+/// use noodle_cute::algebra::zipped_product;
 /// use noodle_cute::layout::{DynLayout, LayoutMap};
 ///
 /// let block = DynLayout::new(&[2], &[1])?;
@@ -122,7 +119,7 @@ pub fn logical_product<A: AffineLayoutMap, B: LayoutMap>(
 pub fn zipped_product<A: AffineLayoutMap, B: LayoutMap>(
     block: A,
     tiler: B,
-) -> Result<Product<A, B>> {
+) -> Result<Produced<A, B>> {
     product(block, tiler, Grouping::Zipped)
 }
 
@@ -131,7 +128,7 @@ pub fn zipped_product<A: AffineLayoutMap, B: LayoutMap>(
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::algebra::product::tiled_product;
+/// use noodle_cute::algebra::tiled_product;
 /// use noodle_cute::layout::{DynLayout, LayoutMap};
 ///
 /// let block = DynLayout::new(&[2], &[1])?;
@@ -147,7 +144,7 @@ pub fn zipped_product<A: AffineLayoutMap, B: LayoutMap>(
 pub fn tiled_product<A: AffineLayoutMap, B: LayoutMap>(
     block: A,
     tiler: B,
-) -> Result<Product<A, B>> {
+) -> Result<Produced<A, B>> {
     product(block, tiler, Grouping::Tiled)
 }
 
@@ -156,7 +153,7 @@ pub fn tiled_product<A: AffineLayoutMap, B: LayoutMap>(
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::algebra::product::flat_product;
+/// use noodle_cute::algebra::flat_product;
 /// use noodle_cute::layout::{DynLayout, LayoutMap};
 ///
 /// let block = DynLayout::new(&[2], &[1])?;
@@ -169,7 +166,10 @@ pub fn tiled_product<A: AffineLayoutMap, B: LayoutMap>(
 /// # Errors
 ///
 /// See [`logical_product`].
-pub fn flat_product<A: AffineLayoutMap, B: LayoutMap>(block: A, tiler: B) -> Result<Product<A, B>> {
+pub fn flat_product<A: AffineLayoutMap, B: LayoutMap>(
+    block: A,
+    tiler: B,
+) -> Result<Produced<A, B>> {
     product(block, tiler, Grouping::Flat)
 }
 
@@ -221,7 +221,7 @@ fn rank_product<A: AffineLayoutMap, B: AffineLayoutMap>(
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::algebra::product::blocked_product;
+/// use noodle_cute::algebra::blocked_product;
 /// use noodle_cute::layout::{DynLayout, LayoutMap};
 ///
 /// let block = DynLayout::new(&[2], &[1])?;
@@ -252,7 +252,7 @@ pub fn blocked_product<A: AffineLayoutMap, B: AffineLayoutMap>(
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::algebra::product::raked_product;
+/// use noodle_cute::algebra::raked_product;
 /// use noodle_cute::layout::{DynLayout, LayoutMap};
 ///
 /// let block = DynLayout::new(&[2], &[1])?;
@@ -274,10 +274,8 @@ pub fn raked_product<A: AffineLayoutMap, B: AffineLayoutMap>(
     rank_product(&block, &tiler, true)
 }
 
-#[doc(hidden)]
 pub struct ProductOp<const RANKED: bool>;
-#[doc(hidden)]
-pub const RANKED<const KIND: u8>: bool = KIND >= 4;
+pub const RANKED<const KIND: u8>: bool = KIND >= BLOCKED;
 impl<S, D, TS, TD> super::typed::Binary<Layout<S, D>, Layout<TS, TD>> for ProductOp<false>
 where
     S: crate::layout::Shape,
@@ -315,7 +313,6 @@ where
     }
 }
 
-#[doc(hidden)]
 pub trait PadModes<B> {
     type Output;
     fn pad_modes(self) -> Self::Output;
@@ -382,28 +379,15 @@ where
 type ProductRest<S, D, TS, TD> =
     super::TypedComposition<super::TypedComplement<Layout<S, D>, crate::Nil, true>, Layout<TS, TD>>;
 
-super::typed::operation_api!(TypedProduct, TypedProductLayout, StaticProduct, ProductOp<{ RANKED::<KIND> }>, product_typed, ();
-    (0, logical_product, static_logical_product),
-    (1, zipped_product, static_zipped_product),
-    (2, tiled_product, static_tiled_product),
-    (3, flat_product, static_flat_product),
-    (4, blocked_product, static_blocked_product),
-    (5, raked_product, static_raked_product),
+super::typed::operation_api!(TypedProduct, TypedProductLayout, ProductOp<{ RANKED::<KIND> }>, product_typed;
+    (LOGICAL, logical_product),
+    (ZIPPED, zipped_product),
+    (TILED, tiled_product),
+    (FLAT, flat_product),
+    (BLOCKED, blocked_product),
+    (RAKED, raked_product),
 );
 
-macro_rules! dynamic_product_methods {
-    ($($name:ident),*) => {$ (
-        impl DynLayout {
-            /// 运行时乘积入口，沿用自由函数的补布局、扩展域与错误规则。
-            pub fn $name<T: LayoutMap>(&self, tiler: T) -> Result<Product<Self, T>> {
-                $name(*self, tiler)
-            }
-        }
-    )*};
-}
-dynamic_product_methods!(logical_product, zipped_product, tiled_product, flat_product);
-
-#[doc(hidden)]
 pub trait ZipModes<R> {
     type Output: LayoutParts;
     fn zip_modes(self, rhs: R) -> Self::Output;
@@ -482,7 +466,7 @@ where
 }
 type BlockModes<L> = <<L as Split>::Tile as IntoModes>::Output;
 type RestModes<L> = <<L as Split>::Rest as IntoModes>::Output;
-impl<L: Split, S, D> Arrange<L, Layout<S, D>> for Decision<4>
+impl<L: Split, S, D> Arrange<L, Layout<S, D>> for Kind<{ BLOCKED }>
 where
     L::Tile: IntoModes,
     L::Rest: IntoModes,
@@ -494,7 +478,7 @@ where
         block.into_modes().zip_modes(rest.into_modes())
     }
 }
-impl<L: Split, S, D> Arrange<L, Layout<S, D>> for Decision<5>
+impl<L: Split, S, D> Arrange<L, Layout<S, D>> for Kind<{ RAKED }>
 where
     L::Tile: IntoModes,
     L::Rest: IntoModes,
@@ -506,17 +490,6 @@ where
         rest.into_modes().zip_modes(block.into_modes())
     }
 }
-impl DynLayout {
-    /// 运行时 blocked_product，缺失模式以 1:0 补齐。
-    pub fn blocked_product<T: AffineLayoutMap>(&self, tiler: T) -> Result<GroupedLayout> {
-        blocked_product(*self, tiler)
-    }
-    /// 运行时 raked_product，各模式中 rest 位于 block 之前。
-    pub fn raked_product<T: AffineLayoutMap>(&self, tiler: T) -> Result<GroupedLayout> {
-        raked_product(*self, tiler)
-    }
-}
-
 fn product_modes<L: AffineLayoutMap>(
     block: &L,
     tiler: &[DynLayout],
@@ -539,23 +512,55 @@ fn product_modes<L: AffineLayoutMap>(
     }
     super::group_modes(&blocks, &rests, grouping)
 }
-macro_rules! runtime_product_modes {
-    ($(($name:ident, $group:ident)),*) => {$ (
-        /// 按各顶层模式独立求 product；未覆盖的尾部模式保留原值。
-        ///
-        /// tiler 超过 rank 返回 StructureMismatch；补布局或组合失败沿用相应错误。
-        pub fn $name<L: AffineLayoutMap>(block: &L, tiler: &[DynLayout]) -> Result<GroupedLayout> {
-            product_modes(block, tiler, Grouping::$group)
-        }
-        impl DynLayout {
-            /// 运行时 tuple tiler 乘积，与同名自由函数共用算法。
-            pub fn $name(&self, tiler: &[DynLayout]) -> Result<GroupedLayout> { $name(self, tiler) }
-        }
-    )*};
+/// CuTe `logical_product(block, tiler)` with a per-mode tuple tiler: mode `m` becomes
+/// `(block_m, complement(block_m) ∘ tiler[m])`; trailing modes not covered by `tiler` are kept.
+///
+/// # Errors
+///
+/// - Returns [`Error::StructureMismatch`] if `tiler.len() > block.rank()`.
+/// - Returns complement or composition errors of the individual modes.
+pub fn logical_product_modes<L: AffineLayoutMap>(
+    block: &L,
+    tiler: &[DynLayout],
+) -> Result<GroupedLayout> {
+    product_modes(block, tiler, Grouping::Logical)
 }
-runtime_product_modes!(
-    (logical_product_modes, Logical),
-    (zipped_product_modes, Zipped),
-    (tiled_product_modes, Tiled),
-    (flat_product_modes, Flat)
-);
+
+/// CuTe `zipped_product(block, tiler)` with a per-mode tuple tiler:
+/// `((block_0, block_1, ...), (rest_0, rest_1, ..., trailing_modes...))`.
+///
+/// # Errors
+///
+/// See [`logical_product_modes`].
+pub fn zipped_product_modes<L: AffineLayoutMap>(
+    block: &L,
+    tiler: &[DynLayout],
+) -> Result<GroupedLayout> {
+    product_modes(block, tiler, Grouping::Zipped)
+}
+
+/// CuTe `tiled_product(block, tiler)` with a per-mode tuple tiler:
+/// `((block_0, block_1, ...), rest_0, rest_1, ...)`.
+///
+/// # Errors
+///
+/// See [`logical_product_modes`].
+pub fn tiled_product_modes<L: AffineLayoutMap>(
+    block: &L,
+    tiler: &[DynLayout],
+) -> Result<GroupedLayout> {
+    product_modes(block, tiler, Grouping::Tiled)
+}
+
+/// CuTe `flat_product(block, tiler)` with a per-mode tuple tiler:
+/// `(block_0, block_1, ..., rest_0, rest_1, ...)`.
+///
+/// # Errors
+///
+/// See [`logical_product_modes`].
+pub fn flat_product_modes<L: AffineLayoutMap>(
+    block: &L,
+    tiler: &[DynLayout],
+) -> Result<GroupedLayout> {
+    product_modes(block, tiler, Grouping::Flat)
+}
