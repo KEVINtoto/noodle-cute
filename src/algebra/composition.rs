@@ -1,8 +1,9 @@
-//! 全静态、混合类型与运行时布局的 composition，以及通用惰性组合。
+//! Composition for static, mixed, and runtime layouts, plus the generic lazy composition.
 //!
-//! 对应 CuTe layout.hpp 的 composition_impl；coalesce_x 复用公共 coalesce 模块。
-//! 全静态结果使用 [`TypedComposition`] 与 `StaticValue`；混合使用 [`Layout::composition`]，保留类型。
-//! [`DynLayout::composition`] 返回运行时元数据；通用 [`composition`] 保留惰性回退。
+//! Follows CuTe `layout.hpp` `composition_impl`; `coalesce_x` reuses the shared coalesce module.
+//! Fully static results are read through [`TypedComposition`] and `StaticValue`, mixed layouts
+//! use [`Layout::composition`], [`composition_layout`] returns runtime metadata, and the generic
+//! [`composition`] keeps the lazy fallback.
 
 use crate::int::{Integer, ceil_div, mul};
 use crate::layout::{
@@ -53,13 +54,18 @@ fn compose_grouped(outer: &DynLayout, rhs: &GroupedLayout) -> Result<GroupedLayo
     let lhs = outer.coalesce_extended()?;
     let mut out = LayoutBuilder::new();
     if rhs.is_integral() {
-        compose_leaf(&lhs, rhs.shape(0)?, rhs.stride(0)?, &mut out)?;
+        compose_leaf(&lhs, rhs.leaf_shape(0)?, rhs.leaf_stride(0)?, &mut out)?;
         return GroupedLayout::from_flat(out.finish_flat()?);
     }
     let mut leaf = 0;
     for count in rhs.groups() {
         for _ in 0..count {
-            compose_leaf(&lhs, rhs.shape(leaf)?, rhs.stride(leaf)?, &mut out)?;
+            compose_leaf(
+                &lhs,
+                rhs.leaf_shape(leaf)?,
+                rhs.leaf_stride(leaf)?,
+                &mut out,
+            )?;
             leaf += 1;
         }
         out.close_mode()?;
@@ -268,7 +274,7 @@ impl<A: LayoutMap, B: LayoutMap> LayoutMap for Composition<A, B> {
         // Fast path when `outer` has a cheap stride-separation proof on its logical domain;
         // if `outer` is non-affine, inconclusive, or exceeded by `inner`, enumerate the composed domain.
         let outer_proven = match self.outer.as_affine() {
-            Ok(Some(a)) => affine_injective(&a, a.leaves())? == Some(true),
+            Ok(Some(a)) => affine_injective(&a, 0..a.leaf_count())? == Some(true),
             Ok(None) | Err(Error::CapacityExceeded) => false,
             Err(e) => return Err(e),
         };
@@ -337,19 +343,21 @@ type CoalescedLhs<S, D> =
 /// ```
 pub type TypedComposition<A, B> = <A as TypedCompose<B>>::Output;
 
-/// 类型化布局的受检组合；全静态入口复用此 trait 的结果类型。
+/// Checked composition of typed layouts; fully static results use this trait's output type.
 pub trait TypedCompose<Rhs> {
     type Output: LayoutMap;
     fn compose(self, rhs: Rhs) -> Result<Self::Output>;
 }
 
 impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
-    /// 按 CuTe composition_impl 组合静态或混合布局，保留结果类型。
+    /// Composes static or mixed layouts with CuTe `composition_impl`, keeping the result type.
     ///
-    /// 只有静态已知的 0 stride、单位 shape 才能改变输出结构；运行时巧合的
-    /// 单位模式会保留。允许负 stride 和扩展域，输出经过 Layout::new 校验。
-    /// 动态整除失败返回 NotDivisible；多模式中动态零 stride 导致的零除返回
-    /// InvalidShape。纯静态错误在类型实例化时拒绝，不受 MAX_RANK 限制。
+    /// Only statically known zero strides and unit shapes change the output structure; modes
+    /// that happen to be units at runtime are kept. Negative strides and the extended domain
+    /// are allowed, and the output is validated by `Layout::new`. A dynamic divisibility failure
+    /// returns `NotDivisible`, and a division by a dynamic zero stride in a multi-mode LHS
+    /// returns `InvalidShape`. Purely static errors fail at instantiation; the result is not
+    /// limited by `MAX_RANK`.
     ///
     /// ```
     /// use noodle_cute::{DynInt, Int, layout::{Layout, LayoutMap}};
@@ -360,7 +368,8 @@ impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
     /// # Ok::<(), noodle_cute::Error>(())
     /// ```
     ///
-    /// 混合输入中，静态已知的 stride 整除错误同样在编译期拒绝：
+    /// With mixed inputs, a statically known stride divisibility error is also rejected at
+    /// compile time:
     /// ```compile_fail
     /// use noodle_cute::{DynInt, Int, shape, stride, layout::Layout};
     /// let a = Layout::new(shape![Int::<4>, Int::<6>], stride![DynInt(6), Int::<1>]).unwrap();
@@ -612,7 +621,7 @@ where
             v.rest = shape;
         } else {
             v.extent = v.next_shape.min(shape);
-            // CuTe 的静态零分子除动态值仍为静态零，不执行运行时除法。
+            // CuTe's `_0 / x` is a static `_0`, so no runtime division happens.
             v.rest = if matches!(S::STATIC, Some(0)) {
                 0
             } else {
@@ -644,7 +653,7 @@ pub const PRODUCT<A: Integer, B: Integer>: isize = match (A::STATIC, B::STATIC) 
     _ => 0,
 };
 
-// CuTe 的静态零乘动态值仍是静态零，不能用本库的普通混合乘法推导类型。
+// CuTe's `_0 * x` is a static `_0`, which this crate's mixed multiplication does not model.
 pub trait ComposeProduct<A, B> {
     type Output: Integer;
     fn product(a: A, b: B) -> Result<Self::Output>;

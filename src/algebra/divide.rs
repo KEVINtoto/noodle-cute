@@ -32,12 +32,20 @@
 //! const C: TypedDivided<Layout<DynInt, Int<1>>, Int<2>> = StaticValue::VALUE;
 //! ```
 
-use crate::layout::{AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutBuilder, LayoutMap};
+use crate::layout::{
+    AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutBuilder, LayoutMap, LayoutParts, Shape,
+};
+use crate::tuple::{Flatten, Item};
 use crate::{Error, Result};
 
+use super::coalesce::{CoalesceFold, FinishCoalesce};
 use super::complement::{complement, complement_shape};
 use super::composition::{Composition, composition, composition_layout};
-use super::{Grouping, TileRest};
+use super::typed::{Binary, Joined, join};
+use super::{
+    CoalescedLayout, Complement, Grouping, TileRest, TypedComplement, TypedCompose,
+    TypedComposition,
+};
 
 /// Composed layout dividing an original layout via a tile and its complement layout.
 pub type Divided<A, B> = Composition<A, TileRest<B, DynLayout>>;
@@ -327,35 +335,32 @@ pub trait CoalesceTarget {
 }
 impl<S, D> CoalesceTarget for Layout<S, D>
 where
-    S: crate::layout::Shape + crate::tuple::Flatten,
-    D: crate::tuple::Item<Profile = S::Profile> + crate::tuple::Flatten,
-    Layout<S::Output, D::Output>: super::coalesce::CoalesceFold,
-    <Layout<S::Output, D::Output> as super::coalesce::CoalesceFold>::Output:
-        super::coalesce::FinishCoalesce,
-    super::CoalescedLayout<S, D>: crate::layout::LayoutParts,
+    S: Shape + Flatten,
+    D: Item<Profile = S::Profile> + Flatten,
+    Layout<S::Output, D::Output>: CoalesceFold,
+    <Layout<S::Output, D::Output> as CoalesceFold>::Output: FinishCoalesce,
+    CoalescedLayout<S, D>: LayoutParts,
 {
-    type Shape = <super::CoalescedLayout<S, D> as crate::layout::LayoutParts>::Shape;
+    type Shape = <CoalescedLayout<S, D> as LayoutParts>::Shape;
     fn cotarget(&self) -> Result<Self::Shape> {
-        use crate::layout::LayoutParts;
         Ok(self.coalesce()?.into_layout().shape)
     }
 }
-type DivideInner<L, T> =
-    super::typed::Joined<T, super::TypedComplement<T, <L as CoalesceTarget>::Shape>>;
-impl<L, T> super::typed::Binary<L, T> for DivideOp
+type DivideInner<L, T> = Joined<T, TypedComplement<T, <L as CoalesceTarget>::Shape>>;
+impl<L, T> Binary<L, T> for DivideOp
 where
-    L: CoalesceTarget + super::TypedCompose<DivideInner<L, T>>,
-    T: LayoutMap + Clone + crate::layout::LayoutParts + super::Complement<L::Shape>,
-    super::TypedComplement<T, L::Shape>: crate::layout::LayoutParts,
-    super::TypedComposition<L, DivideInner<L, T>>: crate::layout::LayoutParts,
+    L: CoalesceTarget + TypedCompose<DivideInner<L, T>>,
+    T: LayoutMap + Clone + LayoutParts + Complement<L::Shape>,
+    TypedComplement<T, L::Shape>: LayoutParts,
+    TypedComposition<L, DivideInner<L, T>>: LayoutParts,
 {
-    type Output = super::TypedComposition<L, DivideInner<L, T>>;
+    type Output = TypedComposition<L, DivideInner<L, T>>;
     fn run(layout: L, tiler: T) -> Result<Self::Output> {
         if tiler.size()? == 0 {
             return Err(Error::InvalidShape);
         }
         let rest = tiler.clone().complement_typed(layout.cotarget()?)?;
-        layout.compose(super::typed::join(tiler, rest))
+        layout.compose(join(tiler, rest))
     }
 }
 

@@ -32,7 +32,7 @@ crate 默认是 `no_std`，不依赖堆分配，也没有外部 Rust 依赖。�
 
 ## layout 中的有符号与无符号边界
 
-`LayoutMap::size/extent`、`AffineLayoutMap::shape` 和运行时 `shapes()` 使用 `usize`；stride、地址、坐标以及 `cosize/address_end` 仍使用 `isize`。`DynLayout::new/left/right` 保留接受 `&[isize]` 的接口并检查负 extent；`DynLayout::new_unsigned` 接受 `&[usize]`，两种入口都验证逻辑大小和可达地址范围。typed layout 的整数叶子接口仍为 `isize`，在 shape 访问边界拒绝负值后转换为 `usize`。
+`LayoutMap::size/extent`、`AffineLayoutMap::leaf_shape` 和运行时 `shapes()` 使用 `usize`；stride、地址、坐标以及 `cosize/address_end` 仍使用 `isize`。`DynLayout::new/left/right` 保留接受 `&[isize]` 的接口并检查负 extent；`DynLayout::new_unsigned` 接受 `&[usize]`，两种入口都验证逻辑大小和可达地址范围。typed layout 的整数叶子接口仍为 `isize`，在 shape 访问边界拒绝负值后转换为 `usize`。
 
 大小与地址分别检查溢出。例如 `usize::MAX:0` 是合法的广播布局，逻辑大小为 `usize::MAX`，可达地址只有 0；不能因为大小超过 `isize::MAX` 就把它截断成负数。坐标与 stride 相乘使用宽整数中间值，并检查结果能否转换回 `isize`，因此零 stride 和可达 `isize::MIN` 的负 stride 都能正确处理。将多维坐标编码成线性编号时，结果仍须能由现有 `index(isize)` 接口表示，否则返回 `Error::Overflow`。
 
@@ -237,11 +237,11 @@ fn main() -> noodle_cute::Result<()> {
     let block = DynLayout::new(&[4], &[2])?;
     assert_eq!(block.cosize()?, 7);
     let rest = complement(block, 24)?;
-    assert_eq!(rest.shape(), &[2, 3]);
-    assert_eq!(rest.stride(), &[1, 8]);
+    assert_eq!(rest.leaf_shape(), &[2, 3]);
+    assert_eq!(rest.leaf_stride(), &[1, 8]);
     let repeated = complement_extended(block)?;
-    assert_eq!(repeated.shape(), &[2, 1]);
-    assert_eq!(repeated.stride(), &[1, 8]);
+    assert_eq!(repeated.leaf_shape(), &[2, 1]);
+    assert_eq!(repeated.leaf_stride(), &[1, 8]);
 
     let divided = logical_divide(DynLayout::left(&[6])?, DynLayout::left(&[4])?)?;
     assert_eq!(divided.size()?, 8);
@@ -401,8 +401,8 @@ fn main() -> noodle_cute::Result<()> {
     assert_eq!(mma.tile_size_mnk()?, [2, 4, 1]);
     let c = DynLayout::left(&[8, 8])?;
     let (fragment, offset) = mma.partition_c(&c, 5)?;
-    assert_eq!(fragment.shape(), &[1, 4, 2]);
-    assert_eq!(fragment.stride(), &[0, 2, 32]);
+    assert_eq!(fragment.leaf_shape(), &[1, 4, 2]);
+    assert_eq!(fragment.leaf_stride(), &[0, 2, 32]);
     assert_eq!(offset, 17);
     assert_eq!(offset + fragment.index_of_coord(&[0, 1, 1])?, c.index_of_coord(&[3, 6])?);
     assert_eq!(mma.layout_c_tv()?.index_of_coord(&[5, 0])?, 5);

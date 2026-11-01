@@ -149,13 +149,13 @@ fn main() {
 }
 ```
 
-### layout 的整数范围
+### Integer range of layouts
 
-layout 的 `size()`、`extent()`、`shape()` 和运行时 `shapes()` 使用 `usize`；stride、坐标和地址使用 `isize`。`DynLayout::new(&[isize], &[isize])` 保留负 shape 检查；`DynLayout::new_unsigned(&[usize], &[isize])` 支持无符号 shape。大小乘积超过 `usize` 或地址/线性编号超过 `isize` 时返回 `Error::Overflow`，不会通过强制转换截断。typed tuple 的 `Item::leaf/product` 仍使用 `isize`。
+Layouts use `isize` for extents, sizes, strides, coordinates, and addresses. `DynLayout::new` rejects negative extents with `Error::InvalidShape`; a size product or address that does not fit in `isize` returns `Error::Overflow` instead of wrapping.
 
 ```rust
 use noodle_cute::layout::{DynLayout, LayoutMap};
-let layout = DynLayout::new_unsigned(&[2usize, 3], &[1isize, -2]).unwrap();
-assert_eq!(layout.size().unwrap(), 6usize);
-assert_eq!(layout.index_of_coord(&[1, 2]).unwrap(), -3isize);
+let layout = DynLayout::new(&[2, 3], &[1, -2]).unwrap();
+assert_eq!(layout.size(), Ok(6));
+assert_eq!(layout.index_of_coord(&[1, 2]), Ok(-3));
 ```

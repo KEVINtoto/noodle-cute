@@ -1,8 +1,9 @@
-//! 全静态、混合类型与运行时布局的结构 inverse，以及运行时枚举逆。
+//! Structural inverses for static, mixed, and runtime layouts, plus enumerated runtime inverses.
 //!
-//! 类型化右逆忽略动态 stride，并只接续静态已知的 stride 链；类型化左逆要求
-//! coalesce 后的 stride 全部静态已知。运行时自由函数按当前数值计算，不受上述
-//! 类型约束。`dense_*_inverse` 是面向任意 LayoutMap 的运行时枚举辅助接口。
+//! The typed right inverse ignores dynamic strides and extends only the statically known
+//! stride chain; the typed left inverse requires all strides to be static after coalescing.
+//! The runtime free functions use the current values without these type constraints, and
+//! `dense_*_inverse` enumerate any `LayoutMap`.
 //!
 //! ```
 //! use noodle_cute::{Int, DynInt, layout::{Layout, LayoutMap}};
@@ -38,7 +39,7 @@ use crate::layout::{
     MAX_RANK, Shape, affine_injective,
 };
 use crate::tuple::{Flatten, Item};
-use crate::{Bool, Error, Int, IntTuple, Nil, Result, True};
+use crate::{Bool, Error, Int, IntTuple, Nil, Result, StaticValue, True};
 
 use super::coalesce::{CoalesceFold, FinishCoalesce};
 use super::complement::{Sort, UnwrapLayout};
@@ -63,7 +64,7 @@ fn sorted_leaves<L: AffineLayoutMap>(layout: &L) -> Result<SortedLeaves> {
     let mut acc = 1;
     for a in 0..flat.rank() {
         preprod[a] = acc;
-        acc = mul(acc, flat.shape(a)?)?;
+        acc = mul(acc, flat.leaf_shape(a)?)?;
         order[a] = a;
     }
     order[..flat.rank()].sort_unstable_by_key(|&a| (flat.strides()[a], a));
@@ -103,7 +104,7 @@ pub fn right_inverse<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
     let mut leaves = LayoutBuilder::new();
     let mut current = 1;
     for &a in &sorted.order[..flat.rank()] {
-        let (s, d) = (flat.shape(a)?, flat.stride(a)?);
+        let (s, d) = (flat.leaf_shape(a)?, flat.leaf_stride(a)?);
         if d == current {
             leaves.push(s, sorted.preprod[a])?;
             current = mul(s, d)?;
@@ -147,7 +148,7 @@ pub fn left_inverse<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
     let mut covered = 1;
     let mut min_stride = 1;
     for &a in &sorted.order[..rank] {
-        let d = flat.stride(a)?;
+        let d = flat.leaf_stride(a)?;
         if d == 0 {
             continue;
         }
@@ -163,10 +164,10 @@ pub fn left_inverse<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
         shape[len] = d / covered;
         stride[len + 1] = sorted.preprod[a];
         covered = mul(covered, shape[len])?;
-        min_stride = mul(flat.shape(a)?, d)?;
+        min_stride = mul(flat.leaf_shape(a)?, d)?;
         len += 1;
     }
-    shape[len] = flat.shape(sorted.order[rank - 1])?;
+    shape[len] = flat.leaf_shape(sorted.order[rank - 1])?;
     let mut leaves = LayoutBuilder::new();
     // Without leading holes (min stride 1), the initial 1:0 is eliminated by coalesce; skip it to prevent overflow on full-capacity layouts.
     let start = usize::from(len > 0 && shape[0] == 1);
@@ -297,7 +298,9 @@ pub fn dense_right_inverse<L: LayoutMap>(layout: L) -> Result<Inverse<L>> {
     }
     // When the codomain and domain have equal size, any injective map onto [0, size) is a bijection.
     let proven_bijection = match layout.as_affine() {
-        Ok(Some(a)) if size == domain_size => affine_injective(&a, a.leaves())? == Some(true),
+        Ok(Some(a)) if size == domain_size => {
+            affine_injective(&a, 0..a.leaf_count())? == Some(true)
+        }
         Ok(_) | Err(Error::CapacityExceeded) => false,
         Err(e) => return Err(e),
     };
@@ -318,7 +321,7 @@ pub fn dense_right_inverse<L: LayoutMap>(layout: L) -> Result<Inverse<L>> {
     Ok(Inverse { layout, size })
 }
 
-/// 类型化结构逆；LEFT 为 false 时求右逆，为 true 时求左逆。
+/// Typed structural inverse: the right inverse, or the left inverse when `LEFT`.
 pub trait TypedInvert<const LEFT: bool = false> {
     type Output: LayoutMap;
     fn invert(self) -> Result<Self::Output>;
@@ -349,11 +352,13 @@ pub trait TypedInvert<const LEFT: bool = false> {
 /// ```
 pub type TypedInverse<L, const LEFT: bool = false> = <L as TypedInvert<LEFT>>::Output;
 
-impl<S: crate::layout::Shape, D: crate::tuple::Item<Profile = S::Profile>> Layout<S, D> {
-    /// 保留类型的右逆，仅使用静态 stride，并只延续静态已知匹配的地址链。
+impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
+    /// Typed right inverse that uses only static strides and extends only statically matched
+    /// address chains.
     ///
-    /// 动态 shape 可保留为结果叶子，但其后运行时才成立的 stride 等式不会改变结构。
-    /// 运行时乘积溢出返回 Overflow，不受 MAX_RANK 限制。
+    /// A dynamic shape may become a result leaf, but stride equalities that hold only at runtime
+    /// do not change the structure. Runtime product overflow returns `Overflow`; the result is
+    /// not limited by `MAX_RANK`.
     pub fn right_inverse(&self) -> Result<TypedInverse<Self>>
     where
         Self: TypedInvert,
@@ -361,10 +366,11 @@ impl<S: crate::layout::Shape, D: crate::tuple::Item<Profile = S::Profile>> Layou
         self.clone().invert()
     }
 
-    /// 保留类型的左逆；coalesce 后的 stride 必须全部静态已知。
+    /// Typed left inverse; every stride must be static after coalescing.
     ///
-    /// 动态形状导致的重叠和溢出返回 NonInjective 或 Overflow；地址空隙保留为准逆。
-    /// 任意动态 stride 求值使用 as_flat_layout 后的运行时入口。
+    /// Overlap or overflow caused by dynamic shapes returns `NonInjective` or `Overflow`; address
+    /// gaps keep CuTe's quasi-inverse. For dynamic strides, use the runtime [`left_inverse`] on
+    /// `as_flat_layout()`.
     pub fn left_inverse(&self) -> Result<TypedInverse<Self, true>>
     where
         Self: TypedInvert<true>,
@@ -448,7 +454,7 @@ pub trait SelectStrides<const LEFT: bool> {
     type Output: LayoutParts;
     fn select_strides(self) -> Self::Output;
 }
-impl<S, D: crate::StaticValue> SelectStrides<true> for Layout<S, D> {
+impl<S, D: StaticValue> SelectStrides<true> for Layout<S, D> {
     type Output = Self;
     fn select_strides(self) -> Self {
         self

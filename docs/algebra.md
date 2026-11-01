@@ -450,7 +450,7 @@ let flat = flat.filter()?;
 #### 10.3 全广播特例
 
 ```rust
-if flat.rank() == 1 && flat.stride(0)? == 0 {
+if flat.rank() == 1 && flat.leaf_stride(0)? == 0 {
     return Ok(None);
 }
 ```
@@ -466,7 +466,7 @@ complement_extended(4:0) = 1:1
 
 ```rust
 for (a, slot) in order.iter_mut().enumerate().take(flat.rank()) {
-    if flat.stride(a)? < 0 {
+    if flat.leaf_stride(a)? < 0 {
         return Err(Error::Unsupported);
     }
     *slot = a;
@@ -481,7 +481,7 @@ for (a, slot) in order.iter_mut().enumerate().take(flat.rank()) {
 let mut prefix = LayoutBuilder::new();
 let mut current = 1;
 for &a in &order[..flat.rank()] {
-    let (s, d) = (flat.shape(a)?, flat.stride(a)?);
+    let (s, d) = (flat.leaf_shape(a)?, flat.leaf_stride(a)?);
     let (gap, next) = complement_step(s, d, current)?;
     if gap > 1 {
         prefix.push(gap, current)?;
@@ -768,7 +768,7 @@ left_inverse (4:2) = (2,4):(0,1)    // 左逆在 0..7 全有定义，空洞处�
 let flat = layout.as_flat_layout()?.coalesce()?;          // ①
 for a in 0..flat.rank() {
     preprod[a] = acc;                                     // ②
-    acc = mul(acc, flat.shape(a)?)?;
+    acc = mul(acc, flat.leaf_shape(a)?)?;
     order[a] = a;
 }
 order[..flat.rank()].sort_unstable_by_key(|&a| (flat.strides()[a], a));   // ③
@@ -848,7 +848,7 @@ if d < min_stride   { return Err(Error::NonInjective); }
 shape[len]      = d / covered;        // 这一位的进制
 stride[len + 1] = sorted.preprod[a];  // 错开一格：配给下一个槽位
 covered    = mul(covered, shape[len])?; // covered 变成 d
-min_stride = mul(flat.shape(a)?, d)?;   // 下一非广播叶子的最小不重叠步长
+min_stride = mul(flat.leaf_shape(a)?, d)?;   // 下一非广播叶子的最小不重叠步长
 ```
 
 **不变量：每轮结束后 `covered == 当前叶子的步长 d`**（因为 `covered · (d/covered) = d`），`min_stride == s · d`（当前叶子覆盖到的地址上界）。因此：

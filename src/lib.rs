@@ -69,7 +69,7 @@ pub enum Error {
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let message = match self {
-            Self::InvalidShape => "shape extents must be nonnegative",
+            Self::InvalidShape => "invalid shape extent or size parameter",
             Self::StructureMismatch => "shape, stride, or coordinate structures differ",
             Self::CoordinateOutOfBounds => "coordinate is outside the layout domain",
             Self::AxisOutOfBounds => "axis is outside the layout rank",

@@ -1,7 +1,8 @@
-//! 全静态、混合类型与运行时布局的 complement。
+//! Complement for static, mixed, and runtime layouts.
 //!
-//! 对应 CuTe `layout.hpp` 的 filter、complement_prefix 与 complement。
-//! 类型化入口仅根据静态信息改变结构；运行时入口按当前数值排序和化简。
+//! Follows CuTe `layout.hpp` `filter`, `complement_prefix`, and `complement`. Typed entry
+//! points change structure only from static facts; runtime entry points sort and simplify by
+//! the current values.
 
 use core::ops::{Div, Mul};
 
@@ -37,12 +38,12 @@ fn complement_prefix<L: AffineLayoutMap>(layout: &L) -> Result<Option<(LayoutBui
         return Err(Error::Unsupported);
     }
     let flat = flat.filter()?;
-    if flat.rank() == 1 && flat.stride(0)? == 0 {
+    if flat.rank() == 1 && flat.leaf_stride(0)? == 0 {
         return Ok(None);
     }
     let mut order = [0usize; MAX_RANK];
     for (a, slot) in order.iter_mut().enumerate().take(flat.rank()) {
-        if flat.stride(a)? < 0 {
+        if flat.leaf_stride(a)? < 0 {
             return Err(Error::Unsupported);
         }
         *slot = a;
@@ -52,7 +53,7 @@ fn complement_prefix<L: AffineLayoutMap>(layout: &L) -> Result<Option<(LayoutBui
     let mut prefix = LayoutBuilder::new();
     let mut current = 1;
     for &a in &order[..flat.rank()] {
-        let (s, d) = (flat.shape(a)?, flat.stride(a)?);
+        let (s, d) = (flat.leaf_shape(a)?, flat.leaf_stride(a)?);
         // Floor: non-divisible gaps round down as in CuTe; the complement may overlap with the original layout at holes.
         let (gap, next) = complement_step(s, d, current)?;
         // Gaps of length 1 are eliminated by final coalesce and do not consume leaf capacity here.
@@ -229,19 +230,21 @@ pub fn complement_extended<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
 pub type TypedComplement<L, C = Nil, const EXTENDED: bool = false> =
     <L as Complement<C, EXTENDED>>::Output;
 
-/// 静态与混合布局共用的受检 complement。
+/// Checked complement shared by static and mixed layouts.
 pub trait Complement<C, const EXTENDED: bool = false> {
     type Output: LayoutMap;
     fn complement_typed(self, cotarget: C) -> Result<Self::Output>;
 }
 
 impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
-    /// 求补并保留静态叶子；cotarget 可为整数或嵌套 shape。
+    /// Complement keeping static leaves; the cotarget may be an integer or a nested shape.
     ///
-    /// 与 CuTe 一致，过滤后的多模式布局要求静态 stride；动态 stride 仅支持
-    /// 单模式。动态单位 shape 和零 stride 不会改变类型，后者返回 NonInjective。
-    /// 空域、负 stride 返回 Unsupported，负 cotarget 返回 InvalidShape，溢出返回
-    /// Overflow；静态已知的非法输入在编译期拒绝。结果不受 MAX_RANK 限制。
+    /// As in CuTe, a filtered multi-mode layout needs static strides; dynamic strides are
+    /// supported only for a single mode. Dynamic unit shapes and zero strides do not change
+    /// the type, and a dynamic zero stride returns `NonInjective`. An empty domain or a negative
+    /// stride returns `Unsupported`, a negative cotarget `InvalidShape`, and overflow `Overflow`;
+    /// statically known illegal inputs are rejected at compile time. The result is not limited
+    /// by `MAX_RANK`.
     ///
     /// ```
     /// use noodle_cute::{DynInt, Int, IntTuple, Nil, layout::Layout};
@@ -252,7 +255,7 @@ impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
     /// # Ok::<(), noodle_cute::Error>(())
     /// ```
     ///
-    /// 多模式动态 stride 应先转为 DynLayout：
+    /// Multi-mode dynamic strides should go through `DynLayout` instead:
     /// ```compile_fail
     /// use noodle_cute::{DynInt, Int, shape, stride, layout::Layout};
     /// let a = Layout::new(shape![Int::<2>, Int::<2>], stride![DynInt(1), DynInt(6)]).unwrap();
@@ -265,9 +268,9 @@ impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
         self.clone().complement_typed(cotarget)
     }
 
-    /// 求不带 cotarget 的类型化补布局，保留末尾 `1:重复步长`。
+    /// Typed complement without a cotarget, keeping the terminal `1:repetition-stride` mode.
     ///
-    /// 错误条件与 [`Self::complement`] 相同；空 tuple 按标量约定返回 `1:1`。
+    /// Errors match [`Self::complement`]; an empty tuple returns `1:1` by the scalar convention.
     pub fn complement_extended(&self) -> Result<TypedComplement<Self, Nil, true>>
     where
         Self: Complement<Nil, true>,
@@ -516,7 +519,7 @@ where
     }
 }
 
-// 零 cotarget 的反向 ceil_div 在 C++ 中无定义；沿用运行时入口的零域扩展，保持 rest。
+// The reverse ceil_div by a zero cotarget is undefined in C++; like the runtime path, keep `rest`.
 const fn target_ceil(a: isize, b: isize) -> isize {
     assert!(a >= 0 && b >= 0, "Invalid complement cotarget");
     if b == 0 { a } else { ceil_div(a, b) }
@@ -620,7 +623,8 @@ pub trait TargetStrides<C> {
     type Output: LayoutParts;
     fn target_strides(self, current: C) -> Result<Self::Output>;
 }
-// Compact 会额外计算未使用的末尾 size*stride；这里只计算实际 stride，避免无关溢出。
+// `Compact` also computes the unused trailing size*stride; computing only the needed strides
+// avoids unrelated overflow.
 impl<S, C> TargetStrides<C> for IntTuple<S, Nil> {
     type Output = Layout<Self, IntTuple<C, Nil>>;
     fn target_strides(self, current: C) -> Result<Self::Output> {
@@ -702,7 +706,7 @@ pub trait Complete<C, End, const EXTENDED: bool> {
     fn complete(self, cotarget: C, end: End) -> Result<Self::Output>;
 }
 
-// coalesce 的公共结果保留单叶 tuple；CuTe complement 的最终布局需要整数 profile。
+// The shared coalesce keeps a one-leaf tuple; CuTe's complement result needs an integral profile.
 pub trait UnwrapLayout {
     type Output: LayoutParts;
     fn unwrap_layout(self) -> Self::Output;

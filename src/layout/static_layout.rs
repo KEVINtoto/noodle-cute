@@ -17,9 +17,8 @@ use super::{AffineLayoutMap, DynLayout, GroupedLayout, LayoutMap, MAX_RANK, Shap
 /// Negative and zero strides are allowed; [`LayoutMap::is_injective`] checks
 /// whether distinct logical coordinates can share an address.
 ///
-/// Public fields allow construction without validation. Use [`Layout::new`] to
-/// check the shape and address arithmetic. The coalescing fold also builds
-/// unchecked `Layout { shape, stride }` intermediates before validating its result.
+/// Public fields allow construction without validation, for example in `const`
+/// items. Use [`Layout::new`] to check the shape and address arithmetic.
 ///
 /// ```
 /// use noodle_cute::{DynInt, Int, shape, stride};
@@ -93,16 +92,16 @@ impl<S: Shape, D: Item<Profile = S::Profile>> AffineLayoutMap for Layout<S, D> {
         S::RANK
     }
 
-    fn shape(&self, leaf: usize) -> Result<isize> {
+    fn leaf_shape(&self, leaf: usize) -> Result<isize> {
         self.shape.leaf(leaf)
     }
 
-    fn stride(&self, leaf: usize) -> Result<isize> {
+    fn leaf_stride(&self, leaf: usize) -> Result<isize> {
         self.stride.leaf(leaf)
     }
 
-    fn leaves(&self) -> core::ops::Range<usize> {
-        0..S::LEAVES
+    fn leaf_count(&self) -> usize {
+        S::LEAVES
     }
 
     fn mode_span(&self, axis: usize) -> Result<(usize, usize)> {

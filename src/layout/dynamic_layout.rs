@@ -109,7 +109,7 @@ impl DynLayout {
         &self.shape[..self.rank]
     }
 
-    /// Returns the signed address strides corresponding to `Self::shape`.
+    /// Returns the signed address strides corresponding to [`Self::shapes`].
     pub fn strides(&self) -> &[isize] {
         &self.stride[..self.rank]
     }
@@ -178,22 +178,22 @@ impl AffineLayoutMap for DynLayout {
     }
 
     // Each axis is a single leaf, so leaf and axis indices coincide.
-    fn shape(&self, leaf: usize) -> Result<isize> {
+    fn leaf_shape(&self, leaf: usize) -> Result<isize> {
         self.shapes()
             .get(leaf)
             .copied()
             .ok_or(Error::AxisOutOfBounds)
     }
 
-    fn stride(&self, leaf: usize) -> Result<isize> {
+    fn leaf_stride(&self, leaf: usize) -> Result<isize> {
         self.strides()
             .get(leaf)
             .copied()
             .ok_or(Error::AxisOutOfBounds)
     }
 
-    fn leaves(&self) -> core::ops::Range<usize> {
-        0..self.rank
+    fn leaf_count(&self) -> usize {
+        self.rank
     }
 
     fn mode_span(&self, axis: usize) -> Result<(usize, usize)> {
@@ -325,16 +325,16 @@ impl AffineLayoutMap for GroupedLayout {
         self.rank
     }
 
-    fn shape(&self, leaf: usize) -> Result<isize> {
-        self.flat.shape(leaf)
+    fn leaf_shape(&self, leaf: usize) -> Result<isize> {
+        self.flat.leaf_shape(leaf)
     }
 
-    fn stride(&self, leaf: usize) -> Result<isize> {
-        self.flat.stride(leaf)
+    fn leaf_stride(&self, leaf: usize) -> Result<isize> {
+        self.flat.leaf_stride(leaf)
     }
 
-    fn leaves(&self) -> core::ops::Range<usize> {
-        self.flat.leaves()
+    fn leaf_count(&self) -> usize {
+        self.flat.leaf_count()
     }
 
     fn mode_span(&self, axis: usize) -> Result<(usize, usize)> {

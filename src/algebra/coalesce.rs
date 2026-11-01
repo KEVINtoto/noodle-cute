@@ -1,8 +1,9 @@
-//! 类型化与运行时布局的 coalesce，以及组合使用的 coalesce_x。
+//! Coalesce for typed and runtime layouts, and the `coalesce_x` used by composition.
 //!
-//! 对应 CuTe `layout.hpp` 的 coalesce 与 `bw_coalesce`。类型化布局仅使用
-//! 类型已知的事实改变结构，两条类型层路径共用反向折叠与 Prepend。
-//! 运行时布局按当前数值化简；空输入按本库标量约定归一为 `1:0`。
+//! Follows CuTe `layout.hpp` `coalesce` and `bw_coalesce`. Typed layouts change structure only
+//! from facts known to the type, and both type-level paths share the backward fold and `Prepend`.
+//! Runtime layouts simplify by their current values; an empty input is normalized to `1:0` by
+//! this crate's scalar convention.
 
 use core::ops::Mul;
 
@@ -64,7 +65,7 @@ pub const UNIT_DECISION<S: Integer>: u8 = unit_decision(S::STATIC);
 pub const MERGE_DECISION<S: Integer, D: Integer, TS: Integer, TD: Integer>: u8 =
     merge_decision(S::STATIC, D::STATIC, TS::STATIC, TD::STATIC);
 
-/// 将叶子加入空尾部；EXTENDED 为真时用 extent 2 保留末尾静态单位轴。
+/// Adds a leaf to an empty tail; with `EXTENDED`, a trailing static unit extent becomes 2 to keep its stride.
 pub trait PrependToEmpty<S, D, const EXTENDED: bool = false> {
     type Output;
     fn apply(s: S, d: D) -> Self::Output;
@@ -177,7 +178,7 @@ where
 ///
 /// The result can still be empty when the input is empty or every extent is a
 /// static one; [`FinishCoalesce`] normalizes that case.
-/// `EXTENDED` 选择 coalesce_x 的初始叶子，保留末尾 stride。
+/// `EXTENDED` selects the `coalesce_x` seed, which keeps the trailing stride.
 pub trait CoalesceFold<const EXTENDED: bool = false> {
     type Output;
     fn fold(self) -> Self::Output;
@@ -205,7 +206,7 @@ where
 }
 
 impl CoalesceFold<true> for Layout<Nil, Nil> {
-    // 上游要求非空输入；这里沿用本库空布局的标量约定。
+    // Upstream requires a nonempty input; an empty layout follows this crate's scalar convention.
     type Output = Layout<IntTuple<Int<1>, Nil>, IntTuple<Int<0>, Nil>>;
     fn fold(self) -> Self::Output {
         Layout {
@@ -325,8 +326,9 @@ where
     /// static values prove `shape * stride == next_stride`. Static result leaves
     /// remain encoded in their types; runtime values never alter the tuple
     /// profile. An empty result is normalized to the scalar layout `1:0`.
-    /// 合并要求尾部 shape 也为静态值，与 CuTe 的 bw_coalesce 一致。
-    /// 输入 shape 和输出布局在运行时校验；静态合并乘积溢出在实例化时报错。
+    /// As in CuTe's `bw_coalesce`, merging also requires the tail's leading shape to be static.
+    /// The input shape and output layout are validated at runtime; a static merge product
+    /// that overflows fails at instantiation.
     pub fn coalesce(&self) -> Result<CoalescedLayout<S, D>> {
         self.size()?;
         self.clone().flatten().fold().finish()
@@ -338,12 +340,13 @@ where
     Layout<S::Output, D::Output>: CoalesceFold<true>,
     <Layout<S::Output, D::Output> as CoalesceFold<true>>::Output: FinishCoalesce,
 {
-    /// 保留扩展域映射的类型化化简，支持静态和动态叶子混合。
+    /// Typed CuTe `coalesce_x`: simplifies while keeping the extended-domain mapping, for
+    /// static and mixed leaves.
     ///
-    /// 与 CuTe coalesce_x 一样，末尾静态 shape-1 换成 2，动态 shape-1 保留原值。
-    /// 因此结果的逻辑大小可能增大。输入非空且前导 extent 为正时，扩展映射保持不变。
-    /// 合并仅使用静态信息；空输入归一为 1:0。
-    /// 输入 shape 与输出的大小、地址范围都经过校验。
+    /// Like CuTe, a trailing static unit extent becomes 2 while a dynamic one keeps its value,
+    /// so the logical size may grow. For a nonempty input with positive leading extents the
+    /// extended mapping is unchanged. Merging uses only static facts; an empty input becomes
+    /// `1:0`. The input shape and the output size and address range are validated.
     ///
     /// ```
     /// use noodle_cute::{DynInt, Int, shape, stride};
@@ -384,18 +387,20 @@ impl DynLayout {
         self.coalesce_impl(false)
     }
 
-    /// 对应 CuTe coalesce_x，保留决定扩展方向的末尾 stride。
+    /// CuTe `coalesce_x`: keeps the trailing stride that determines the extended direction.
     ///
-    /// 末尾 shape-1 保留真实 extent，除非与前一叶子合并。因此 (2,1):(2,8)
-    /// 保持不变，(2,1):(1,2) 化为 2:1。逻辑大小不变；输入非空且前导 extent
-    /// 为正时扩展映射不变。零 extent 仍按 CuTe 的代数规则化简，不保证保留
-    /// 原布局扩展解码因零除而产生的错误。
-    /// 空输入归一为 1:0，额外允许正扩展索引并将其映射到地址 0。
+    /// A trailing unit extent keeps its actual value unless it merges with the previous leaf, so
+    /// `(2,1):(2,8)` is unchanged and `(2,1):(1,2)` becomes `2:1`. The logical size is unchanged,
+    /// and the extended mapping is preserved for a nonempty input with positive leading extents.
+    /// Zero extents still simplify by CuTe's algebra, which need not keep the division-by-zero
+    /// errors of the original extended decoding. An empty input becomes `1:0`, which also accepts
+    /// positive extended indices and maps them to address 0.
     pub fn coalesce_extended(&self) -> Result<Self> {
         self.coalesce_impl(true)
     }
 
-    // 运行时用真实末尾 extent 保留扩展步长，避免静态占位 2 引入额外溢出。
+    // At runtime the actual trailing extent keeps the extended stride, avoiding the overflow a
+    // placeholder extent of 2 could add.
     fn coalesce_impl(&self, extended: bool) -> Result<Self> {
         let mut out = Self::scalar();
         for a in (0..self.rank).rev() {

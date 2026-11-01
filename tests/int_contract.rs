@@ -116,7 +116,10 @@ fn equality_and_ordering_are_derived_structurally() {
 fn error_variants_report_distinct_human_readable_messages() {
     use std::string::ToString;
     let cases = [
-        (Error::InvalidShape, "shape extents must be nonnegative"),
+        (
+            Error::InvalidShape,
+            "invalid shape extent or size parameter",
+        ),
         (
             Error::StructureMismatch,
             "shape, stride, or coordinate structures differ",

@@ -36,14 +36,17 @@
 //! ```
 
 use crate::layout::{
-    AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutBuilder, LayoutMap, LayoutParts,
+    AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutBuilder, LayoutMap, LayoutParts, Shape,
 };
+use crate::tuple::Item;
 use crate::{Error, Int, IntTuple, Nil, Result};
 
 use super::complement::complement_extended;
 use super::composition::{Composition, composition, composition_layout};
-use super::typed::{Arrange, IntoModes, Kind, Split};
-use super::{BLOCKED, Grouping, RAKED, TileRest};
+use super::typed::{Arrange, Binary, IntoModes, Joined, Kind, Pair, Split, join};
+use super::{
+    BLOCKED, Complement, Grouping, RAKED, TileRest, TypedComplement, TypedCompose, TypedComposition,
+};
 
 /// Product layout formed by adding a tile address to a rest address mapped through the complement of the tile.
 pub type Produced<A, B> = TileRest<A, Composition<DynLayout, B>>;
@@ -272,37 +275,36 @@ pub fn raked_product<A: AffineLayoutMap, B: AffineLayoutMap>(
 
 pub struct ProductOp<const RANKED: bool>;
 pub const RANKED<const KIND: u8>: bool = KIND >= BLOCKED;
-impl<S, D, TS, TD> super::typed::Binary<Layout<S, D>, Layout<TS, TD>> for ProductOp<false>
+impl<S, D, TS, TD> Binary<Layout<S, D>, Layout<TS, TD>> for ProductOp<false>
 where
-    S: crate::layout::Shape,
-    D: crate::tuple::Item<Profile = S::Profile>,
-    TS: crate::layout::Shape,
-    TD: crate::tuple::Item<Profile = TS::Profile>,
-    Layout<S, D>: super::Complement<crate::Nil, true>,
-    super::TypedComplement<Layout<S, D>, crate::Nil, true>: super::TypedCompose<Layout<TS, TD>>,
-    ProductRest<S, D, TS, TD>: crate::layout::LayoutParts,
+    S: Shape,
+    D: Item<Profile = S::Profile>,
+    TS: Shape,
+    TD: Item<Profile = TS::Profile>,
+    Layout<S, D>: Complement<Nil, true>,
+    TypedComplement<Layout<S, D>, Nil, true>: TypedCompose<Layout<TS, TD>>,
+    ProductRest<S, D, TS, TD>: LayoutParts,
 {
-    type Output = super::typed::Joined<Layout<S, D>, ProductRest<S, D, TS, TD>>;
+    type Output = Joined<Layout<S, D>, ProductRest<S, D, TS, TD>>;
     fn run(layout: Layout<S, D>, tiler: Layout<TS, TD>) -> Result<Self::Output> {
-        use super::{Complement, TypedCompose};
-        let complement = layout.clone().complement_typed(crate::Nil)?;
+        let complement = layout.clone().complement_typed(Nil)?;
         let rest = complement.compose(tiler)?;
-        Ok(super::typed::join(layout, rest))
+        Ok(join(layout, rest))
     }
 }
 type PaddedTiler<B, T> = <<T as IntoModes>::Output as PadModes<<B as IntoModes>::Output>>::Output;
 // CuTe blocked/raked_product pad both sides to the larger rank before logical_product, so each
 // tiler mode composes into exactly one rest mode, even when it yields a multi-mode layout.
-impl<B, T> super::typed::Binary<B, T> for ProductOp<true>
+impl<B, T> Binary<B, T> for ProductOp<true>
 where
     B: IntoModes,
     T: IntoModes,
     T::Output: PadModes<B::Output>,
-    ProductOp<false>: super::typed::Binary<B, PaddedTiler<B, T>>,
+    ProductOp<false>: Binary<B, PaddedTiler<B, T>>,
 {
-    type Output = <ProductOp<false> as super::typed::Binary<B, PaddedTiler<B, T>>>::Output;
+    type Output = <ProductOp<false> as Binary<B, PaddedTiler<B, T>>>::Output;
     fn run(block: B, tiler: T) -> Result<Self::Output> {
-        <ProductOp<false> as super::typed::Binary<B, PaddedTiler<B, T>>>::run(
+        <ProductOp<false> as Binary<B, PaddedTiler<B, T>>>::run(
             block,
             tiler.into_modes().pad_modes(),
         )
@@ -373,7 +375,7 @@ where
 }
 
 type ProductRest<S, D, TS, TD> =
-    super::TypedComposition<super::TypedComplement<Layout<S, D>, crate::Nil, true>, Layout<TS, TD>>;
+    TypedComposition<TypedComplement<Layout<S, D>, Nil, true>, Layout<TS, TD>>;
 
 super::typed::operation_api!(TypedProduct, TypedProductLayout, ProductOp<{ RANKED::<KIND> }>, product_typed;
     (LOGICAL, logical_product),
@@ -401,16 +403,16 @@ where
 {
     type Output = Layout<
         IntTuple<
-            super::typed::Pair<S, R>,
+            Pair<S, R>,
             <<Layout<ST, DT> as ZipModes<Layout<RT, ET>>>::Output as LayoutParts>::Shape,
         >,
         IntTuple<
-            super::typed::Pair<D, E>,
+            Pair<D, E>,
             <<Layout<ST, DT> as ZipModes<Layout<RT, ET>>>::Output as LayoutParts>::Stride,
         >,
     >;
     fn zip_modes(self, rhs: Layout<IntTuple<R, RT>, IntTuple<E, ET>>) -> Self::Output {
-        let head = super::typed::join(
+        let head = join(
             Layout {
                 shape: self.shape.0,
                 stride: self.stride.0,

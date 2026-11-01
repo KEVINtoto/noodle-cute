@@ -12,6 +12,14 @@
 
 use core::ops::Range;
 
+mod dynamic_layout;
+mod static_layout;
+
+pub(crate) use dynamic_layout::LayoutBuilder;
+pub use dynamic_layout::{DynLayout, GroupedLayout, MAX_RANK};
+pub(crate) use static_layout::LayoutParts;
+pub use static_layout::{Compact, Layout, LayoutLeft, LayoutRight};
+
 use crate::int::{DynInt, Int, NON_NEGATIVE, add, checked_product, mul};
 use crate::tuple::{Item, Nil, Tuple};
 use crate::{Bool, Error, IntTuple, Result, True};
@@ -197,17 +205,15 @@ pub trait AffineLayoutMap: LayoutMap {
     ///
     /// Unlike [`LayoutMap::extent`], nested modes are not multiplied together.
     /// An invalid leaf returns [`Error::AxisOutOfBounds`].
-    fn shape(&self, leaf: usize) -> Result<isize>;
+    fn leaf_shape(&self, leaf: usize) -> Result<isize>;
 
     /// Returns the signed address stride of flat leaf `leaf`.
     ///
-    /// Uses the same leaf numbering and errors as [`AffineLayoutMap::shape`].
-    fn stride(&self, leaf: usize) -> Result<isize>;
+    /// Uses the same leaf numbering and errors as [`AffineLayoutMap::leaf_shape`].
+    fn leaf_stride(&self, leaf: usize) -> Result<isize>;
 
-    /// Returns the range of flat leaf indices for this layout.
-    ///
-    /// The range is half-open, starting at zero and ending at the number of leaves.
-    fn leaves(&self) -> Range<usize>;
+    /// Returns the number of flat leaves; leaf indices are `0..leaf_count()`.
+    fn leaf_count(&self) -> usize;
 
     /// Returns the start index and length of the flat leaf span for top-level mode `axis`.
     ///
@@ -234,16 +240,16 @@ impl<T: AffineLayoutMap> LayoutMap for T {
     }
 
     fn size(&self) -> Result<isize> {
-        checked_size(self, self.leaves())
+        checked_size(self, 0..self.leaf_count())
     }
 
     fn index(&self, linear: isize) -> Result<isize> {
-        affine_index(self, self.leaves(), linear)
+        affine_index(self, 0..self.leaf_count(), linear)
     }
 
     fn index_extended(&self, linear: isize) -> Result<isize> {
         self.size()?;
-        affine_index_extended(self, self.leaves(), linear)
+        affine_index_extended(self, 0..self.leaf_count(), linear)
     }
 
     fn index_extended_of_coord(&self, coord: &[isize]) -> Result<isize> {
@@ -261,11 +267,11 @@ impl<T: AffineLayoutMap> LayoutMap for T {
     }
 
     fn address_range(&self) -> Result<Option<(isize, isize)>> {
-        affine_address_range(self, self.leaves())
+        affine_address_range(self, 0..self.leaf_count())
     }
 
     fn is_injective(&self) -> Result<bool> {
-        let proof = affine_injective(self, self.leaves())?;
+        let proof = affine_injective(self, 0..self.leaf_count())?;
         // The fast proof uses a sufficient condition. Fall back to exact
         // enumeration when it cannot decide an irregular stride pattern.
         match proof {
@@ -370,7 +376,7 @@ pub fn get_flat_coord<L: AffineLayoutMap>(
         let (start, len) = layout.mode_span(m)?;
         let (mut c, mut scale) = (0, 1);
         for i in start..start + len {
-            let (s, d) = (layout.shape(i)?, layout.stride(i)?);
+            let (s, d) = (layout.leaf_shape(i)?, layout.leaf_stride(i)?);
             if s != 1 {
                 if s <= 0 || d <= 0 {
                     return Err(Error::Unsupported);
@@ -386,7 +392,7 @@ pub fn get_flat_coord<L: AffineLayoutMap>(
 
 //-----------------------------------------------------------------------------
 // These affine algorithms access shape and stride by leaf index through
-// `AffineLayoutMap::shape` and `AffineLayoutMap::stride`, so both `Layout` and
+// `AffineLayoutMap::leaf_shape` and `AffineLayoutMap::leaf_stride`, so both `Layout` and
 // `DynLayout` can use them. Typed layouts call them directly, without converting
 // to fixed-capacity runtime metadata.
 
@@ -397,11 +403,11 @@ pub fn get_flat_coord<L: AffineLayoutMap>(
 /// logical size. The product of an empty range is one.
 pub(crate) fn checked_size<L: AffineLayoutMap>(layout: &L, leaves: Range<usize>) -> Result<isize> {
     for i in leaves.clone() {
-        if layout.shape(i)? < 0 {
+        if layout.leaf_shape(i)? < 0 {
             return Err(Error::InvalidShape);
         }
     }
-    checked_product(leaves.map(|i| layout.shape(i)))
+    checked_product(leaves.map(|i| layout.leaf_shape(i)))
 }
 
 /// Decodes a bounded linear index as left-major mixed-radix leaf coordinates.
@@ -419,8 +425,8 @@ pub(crate) fn affine_index<L: AffineLayoutMap>(
     }
     let mut result = 0;
     for i in leaves {
-        let s = layout.shape(i)?;
-        result = add(result, mul(linear % s, layout.stride(i)?)?)?;
+        let s = layout.leaf_shape(i)?;
+        result = add(result, mul(linear % s, layout.leaf_stride(i)?)?)?;
         linear /= s;
     }
     Ok(result)
@@ -450,14 +456,14 @@ pub(crate) fn affine_index_extended<L: AffineLayoutMap>(
     let last = leaves.end - 1;
     let mut result = 0;
     for i in leaves.start..last {
-        let s = layout.shape(i)?;
+        let s = layout.leaf_shape(i)?;
         if s <= 0 {
             return Err(Error::CoordinateOutOfBounds);
         }
-        result = add(result, mul(linear % s, layout.stride(i)?)?)?;
+        result = add(result, mul(linear % s, layout.leaf_stride(i)?)?)?;
         linear /= s;
     }
-    add(result, mul(linear, layout.stride(last)?)?)
+    add(result, mul(linear, layout.leaf_stride(last)?)?)
 }
 
 /// Computes inclusive address bounds by summing each leaf's signed endpoint.
@@ -473,7 +479,7 @@ pub(crate) fn affine_address_range<L: AffineLayoutMap>(
     let mut min = 0;
     let mut max = 0;
     for i in leaves {
-        let delta = mul(layout.shape(i)? - 1, layout.stride(i)?)?;
+        let delta = mul(layout.leaf_shape(i)? - 1, layout.leaf_stride(i)?)?;
         min = add(min, delta.min(0))?;
         max = add(max, delta.max(0))?;
     }
@@ -503,10 +509,10 @@ pub(crate) fn affine_injective<L: AffineLayoutMap>(
         let mut next = None;
         for i in leaves.clone() {
             // Unit extents cannot introduce overlap.
-            if layout.shape(i)? <= 1 {
+            if layout.leaf_shape(i)? <= 1 {
                 continue;
             }
-            let d = layout.stride(i)?;
+            let d = layout.leaf_stride(i)?;
             if d == 0 {
                 return Ok(Some(false));
             }
@@ -524,15 +530,7 @@ pub(crate) fn affine_injective<L: AffineLayoutMap>(
         if d <= span {
             return Ok(None);
         }
-        span = add(span, mul(layout.shape(i)? - 1, d)?)?;
+        span = add(span, mul(layout.leaf_shape(i)? - 1, d)?)?;
         prev = Some((abs, i));
     }
 }
-
-mod dynamic_layout;
-mod static_layout;
-
-pub(crate) use dynamic_layout::LayoutBuilder;
-pub use dynamic_layout::{DynLayout, GroupedLayout, MAX_RANK};
-pub(crate) use static_layout::LayoutParts;
-pub use static_layout::{Compact, Layout, LayoutLeft, LayoutRight};

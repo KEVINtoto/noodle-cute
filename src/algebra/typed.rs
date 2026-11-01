@@ -1,4 +1,4 @@
-//! divide/product 共用的类型化 tiler 遍历、tile_unzip 与分组。
+//! Typed tiler traversal, `tile_unzip`, and grouping shared by divide and product.
 
 use crate::int::Integer;
 use crate::layout::{Layout, LayoutMap, LayoutParts, Shape};
