@@ -1,58 +1,58 @@
-# noodle-cute 的工程实现
+# Engineering implementation of noodle-cute
 
-本文对应[数学模型](mathematical-model.md)，解释当前代码怎样表示布局、执行布局代数、检查 Tensor 访问，并生成同义的索引表达式。文中的“数学 §N”指配套文档的第 N 节。示例使用现有公开 API，不需要 CUDA 或其他设备后端。
+This document accompanies the [mathematical model](mathematical-model.md) and explains how the current code represents layouts, executes the layout algebra, checks Tensor accesses, and generates semantically equivalent index expressions. "Math §N" refers to section N of the companion document. The examples use the existing public API and need no CUDA or other device backend.
 
-## 1. 模块如何对应数学模型
+## 1. How modules map to the mathematical model
 
-| 模块 | 主要类型或入口 | 对应数学模型 |
+| Module | Main types or entry points | Mathematical model counterpart |
 |---|---|---|
-| [int.rs](../src/int.rs) | `Int<N>`、`DynInt`、`Integer` | 整数叶子与静态值 |
-| [tuple.rs](../src/tuple.rs) | `IntTuple`、`Nil`、`Node`、`Shape` | §2 的形状树 |
-| [layout.rs](../src/layout.rs) | `LayoutMap`、`Layout`、`DynLayout`、`GroupedLayout` | §1–6 的索引、范围和化简 |
-| [algebra.rs](../src/algebra.rs) | 组合、补布局、求逆、divide/product、局部视图 | §6–12 的布局变换 |
-| [partition.rs](../src/partition.rs) | Copy/MMA 描述符及线程—值映射 | §12–13 的线程分工 |
-| [swizzle.rs](../src/swizzle.rs) | `Swizzle`、`SwizzledLayout`、`StagedTile` | §14 的地址位变换 |
-| [tensor.rs](../src/tensor.rs) | 引擎、`Tensor`、复制与矩阵算法 | §15 的逻辑元素读写 |
-| [expr.rs](../src/expr.rs) | `Expr`、`Pred`、`IndexExpr` | §16 的符号公式与有效域 |
-| [lib.rs](../src/lib.rs) | 模块导出、`Error`、受检 `add/mul` | 公共边界与错误传递 |
+| [int.rs](../src/int.rs) | `Int<N>`, `DynInt`, `Integer` | Integer leaves and static values |
+| [tuple.rs](../src/tuple.rs) | `IntTuple`, `Nil`, `Node`, `Shape` | Shape trees of §2 |
+| [layout.rs](../src/layout.rs) | `LayoutMap`, `Layout`, `DynLayout`, `GroupedLayout` | Indexing, range, and simplification of §1–6 |
+| [algebra.rs](../src/algebra.rs) | Composition, complement, inverse, divide/product, local views | Layout transformations of §6–12 |
+| [partition.rs](../src/partition.rs) | Copy/MMA descriptors and thread–value mappings | Thread work assignment of §12–13 |
+| [swizzle.rs](../src/swizzle.rs) | `Swizzle`, `SwizzledLayout`, `StagedTile` | Address bit transformations of §14 |
+| [tensor.rs](../src/tensor.rs) | Engines, `Tensor`, copy and matrix algorithms | Logical element reads and writes of §15 |
+| [expr.rs](../src/expr.rs) | `Expr`, `Pred`, `IndexExpr` | Symbolic formulas and valid domains of §16 |
+| [lib.rs](../src/lib.rs) | Module exports, `Error`, checked `add/mul` | Public boundary and error propagation |
 
-实际数据访问分成下面几步。布局变换通常只改变中间的地址公式，不搬动元素：
+An actual data access goes through the steps below. Layout transformations usually change only the address formula in the middle; they do not move elements:
 
 ```mermaid
 flowchart LR
-    C[顶层坐标] --> I[左序逻辑编号]
-    I --> L[LayoutMap 计算相对地址]
-    L --> O[叠加 Tensor offset]
-    O --> B[检查存储边界]
-    B --> E[Engine 读写元素]
-    L -. alloc feature .-> X[Expr 地址树 + Pred 有效域]
+    C[Top-level coordinate] --> I[Left-major logical index]
+    I --> L[LayoutMap computes relative address]
+    L --> O[Add Tensor offset]
+    O --> B[Check storage bounds]
+    B --> E[Engine reads/writes element]
+    L -. alloc feature .-> X[Expr address tree + Pred valid domain]
 ```
 
-crate 默认是 `no_std`，不依赖堆分配，也没有外部 Rust 依赖。启用 `alloc` 只增加表达式树使用的 `Box`、`String`、`Vec`，不隐式启用 `std` 或 GPU 后端。CPU 参考算法可使用借用切片或固定数组；“CPU 参考”不意味着核心必须依赖标准库。
+The crate is `no_std` by default, needs no heap allocation, and has no external Rust dependencies. Enabling `alloc` only adds the `Box`, `String`, and `Vec` used by expression trees; it does not implicitly enable `std` or a GPU backend. CPU reference algorithms can use borrowed slices or fixed arrays; "CPU reference" does not mean the core must depend on the standard library.
 
-## layout 中的有符号与无符号边界
+## Signed and unsigned boundaries in layout
 
-`LayoutMap::size/extent`、`AffineLayoutMap::leaf_shape` 和运行时 `shapes()` 使用 `usize`；stride、地址、坐标以及 `cosize/address_end` 仍使用 `isize`。`DynLayout::new/left/right` 保留接受 `&[isize]` 的接口并检查负 extent；`DynLayout::new_unsigned` 接受 `&[usize]`，两种入口都验证逻辑大小和可达地址范围。typed layout 的整数叶子接口仍为 `isize`，在 shape 访问边界拒绝负值后转换为 `usize`。
+`LayoutMap::size/extent`, `AffineLayoutMap::leaf_shape`, and the runtime `shapes()` use `usize`; strides, addresses, coordinates, and `cosize/address_end` still use `isize`. `DynLayout::new/left/right` keep their `&[isize]` interfaces and check for negative extents; `DynLayout::new_unsigned` accepts `&[usize]`, and both entry points validate the logical size and the reachable address range. The integer-leaf interface of typed layouts is still `isize`; negative values are rejected at the shape-access boundary before conversion to `usize`.
 
-大小与地址分别检查溢出。例如 `usize::MAX:0` 是合法的广播布局，逻辑大小为 `usize::MAX`，可达地址只有 0；不能因为大小超过 `isize::MAX` 就把它截断成负数。坐标与 stride 相乘使用宽整数中间值，并检查结果能否转换回 `isize`，因此零 stride 和可达 `isize::MIN` 的负 stride 都能正确处理。将多维坐标编码成线性编号时，结果仍须能由现有 `index(isize)` 接口表示，否则返回 `Error::Overflow`。
+Size and address are checked for overflow separately. For example, `usize::MAX:0` is a valid broadcast layout whose logical size is `usize::MAX` and whose only reachable address is 0; it must not be truncated to a negative number just because the size exceeds `isize::MAX`. Coordinate–stride products use a wide integer intermediate and check that the result converts back to `isize`, so zero strides and negative strides that reach `isize::MIN` are both handled correctly. When a multi-dimensional coordinate is encoded as a linear index, the result must still be representable by the existing `index(isize)` interface; otherwise `Error::Overflow` is returned.
 
-与 CuTe `layout.hpp` / `stride.hpp` 一致，左序坐标解码、扩展域的最后一维和 coalesce 的合并条件不变。Rust 不采用 C++ 的隐式有符号/无符号提升：越界转换返回 `Error::Overflow`。现有 algebra 的部分中间值和 shape 参数仍为 `isize`，接收无符号 layout 元数据时显式检查转换，因此这些路径仍有有符号范围限制。空域先识别零 extent，再计算大小乘积；coalesce 实际生成的 extent 则仍必须能由 `usize` 表示。
+As in CuTe's `layout.hpp` / `stride.hpp`, left-major coordinate decoding, the last mode of the extended domain, and the merge condition of coalesce are unchanged. Rust does not adopt C++'s implicit signed/unsigned promotion: out-of-range conversions return `Error::Overflow`. Some intermediate values and shape parameters in the existing algebra are still `isize`, and conversions are checked explicitly when they receive unsigned layout metadata, so these paths still have signed range limits. Empty domains are detected by zero extents before the size product is computed; extents actually produced by coalesce must still be representable by `usize`.
 
-## 2. 把整数与树结构放进类型系统
+## 2. Putting integers and tree structure into the type system
 
-### 2.1 静态叶子与动态叶子
+### 2.1 Static leaves and dynamic leaves
 
-`Int<const N: i64>` 没有运行时字段，数字编码在类型参数里，因此是零大小类型。`DynInt(i64)` 以及原生 `i64` 保存运行时值。`Integer::STATIC` 让算法区分“类型已知的常量”和“这次运行恰好取某个值的变量”。
+`Int<const N: i64>` has no runtime fields; the number is encoded in the type parameter, so it is a zero-sized type. `DynInt(i64)` and plain `i64` hold runtime values. `Integer::STATIC` lets algorithms distinguish "a constant known in the type" from "a variable that happens to take some value on this run".
 
-`binary!` 宏为加、减、乘、除、余数生成实现：两个 `Int` 运算，结果仍是 `Int`；出现动态操作数，结果变成 `DynInt`。静态结果通过命名 const item 与 `core::gca!` 表达，trait 约束和关联类型复用同一个 const 定义。
+The `binary!` macro generates implementations for addition, subtraction, multiplication, division, and remainder: an operation on two `Int`s yields an `Int`; if a dynamic operand is involved, the result becomes `DynInt`. Static results are expressed through named const items and `core::gca!`, and trait bounds and associated types reuse the same const definition.
 
-这里的 GCA 是 Generic Const Arguments（泛型常量参数），属于 nightly 特性。`core::gca!` 引用命名的常量定义，使 `Int<N>` 的类型参数可以参与编译期算术推导，并把结果继续放在类型中。trait 约束规定类型必须满足的能力，关联类型则声明该能力产生什么结果类型。
+GCA here stands for Generic Const Arguments, a nightly feature. `core::gca!` refers to a named const definition, which lets the type parameter of `Int<N>` take part in compile-time arithmetic and keeps the result in the type. A trait bound specifies a capability a type must have; an associated type declares what result type that capability produces.
 
-这里的整数运算符遵循普通 Rust 整数规则，不返回 `Result`。不能因为布局 API 有溢出检查，就认为直接写 `DynInt(a) * DynInt(b)` 也会返回 `Error::Overflow`。需要受检乘积时，使用 `Node::product` / `LayoutMap::size`；`product_typed` / `size_typed` 用来保留结果类型。
+These integer operators follow ordinary Rust integer rules and do not return `Result`. The overflow checks in the layout API do not imply that writing `DynInt(a) * DynInt(b)` directly also returns `Error::Overflow`. When a checked product is needed, use `Node::product` / `LayoutMap::size`; `product_typed` / `size_typed` preserve the result type.
 
-### 2.2 异构列表保存嵌套形状
+### 2.2 Heterogeneous lists hold nested shapes
 
-`IntTuple<H,T>` 是递归异构列表：H 是当前模式，T 是同层余下模式，`Nil` 表示结尾。H 可以再次是 `IntTuple`，形成嵌套；T 的链长不增加嵌套深度。
+`IntTuple<H,T>` is a recursive heterogeneous list: H is the current mode, T is the remaining modes at the same level, and `Nil` marks the end. H can itself be an `IntTuple`, forming nesting; the length of the T chain does not increase the nesting depth.
 
 `Item` provides `RANK`, `DEPTH`, `LEAVES`, and leaf access. `mode_span(axis)` returns the `(start, count)` of a top-level mode in the flattened leaf sequence, so algorithms can walk leaves while keeping top-level boundaries. `Profile` records only the tree shape, not values or static-ness.
 
@@ -81,7 +81,7 @@ fn main() -> noodle_cute::Result<()> {
 }
 ```
 
-本例只有一个动态字段，所以布局占 8 字节。自动构造 stride 时，依赖动态长度的步长也会成为动态字段；并非“一个动态 shape 叶子永远只增加一个字段”。
+This example has only one dynamic field, so the layout occupies 8 bytes. When strides are constructed automatically, strides that depend on a dynamic extent also become dynamic fields; it is not true that "one dynamic shape leaf always adds exactly one field".
 
 ### 2.3 Shared machinery for typed algebra
 
@@ -99,7 +99,7 @@ One marker type, the crate-private `Bool<B>`, carries compile-time conditions bo
 
 The algorithm reuses `Flatten` / `Append` / `Unwrap`, coalesce's `Prepend` / `CoalesceFold` / `FinishCoalesce`, integer multiplication/division and `ceil_div`, and composition's `StepNumber` / `ZERO_STRIDE` / `ComposeProduct` dispatch. `complement_step` checks each gap and next stride for both the typed and runtime paths. Typed sorting follows upstream's requirement of static strides for multi-mode layouts; runtime sorting uses `LayoutBuilder` and `MAX_RANK` arrays.
 
-Tests live in [`tests/complement_contract.rs`](../tests/complement_contract.rs). Entry points, type-preservation rules, and upstream deviations are described in [layout algebra §14.2](algebra.md#142-全静态混合与运行时入口).
+Tests live in [`tests/complement_contract.rs`](../tests/complement_contract.rs). Entry points, type-preservation rules, and upstream deviations are described in [layout algebra §14.2](algebra.md#142-fully-static-mixed-and-runtime-entry-points).
 
 ### 2.5 Typed inverse, divide, and product
 
@@ -111,90 +111,90 @@ Tests live in [`tests/complement_contract.rs`](../tests/complement_contract.rs).
 
 Fully static results read through `StaticValue` skip the final runtime size, address-range, and tiler checks; mixed methods keep dynamic fields and validate inputs and results before returning `Result`. Typed paths never go through runtime arrays, so their inputs and outputs may exceed `MAX_RANK`; runtime entry points keep the fixed capacity and the lazy maps.
 
-Contracts live in [`inverse_contract.rs`](../tests/inverse_contract.rs), [`divide_contract.rs`](../tests/divide_contract.rs), and [`product_contract.rs`](../tests/product_contract.rs); `algebra_contract.rs` keeps `Grouping` / `TileRest` and cross-module laws. Algorithms, static-ness rules, and upstream deviations are in [layout algebra §21.1](algebra.md#211-inverse-的全静态混合与运行时入口), [§27.1](algebra.md#271-divide-的全静态混合与运行时入口), and [§35.1](algebra.md#351-product-的全静态混合与运行时入口).
+Contracts live in [`inverse_contract.rs`](../tests/inverse_contract.rs), [`divide_contract.rs`](../tests/divide_contract.rs), and [`product_contract.rs`](../tests/product_contract.rs); `algebra_contract.rs` keeps `Grouping` / `TileRest` and cross-module laws. Algorithms, static-ness rules, and upstream deviations are in [layout algebra §21.1](algebra.md#211-fully-static-mixed-and-runtime-entry-points-for-inverse), [§27.1](algebra.md#271-fully-static-mixed-and-runtime-entry-points-for-divide), and [§35.1](algebra.md#351-fully-static-mixed-and-runtime-entry-points-for-product).
 
-## 3. 三种布局表示与公共契约
+## 3. Three layout representations and their common contract
 
-### 3.1 根据结构何时确定来选择表示
+### 3.1 Choosing a representation by when the structure is known
 
-| 表示 | 保存内容 | 适用情形 |
+| Representation | Stored content | When to use |
 |---|---|---|
-| `Layout<S,D>` | 两棵保留静态/动态叶子类型的树 | 结构在编译期确定；全静态时零大小 |
-| `DynLayout` | 两个 `[i64;32]` 数组和 rank | 运行时计算出的扁平 shape/stride |
-| `GroupedLayout` | `DynLayout`、每个顶层模式的叶子数、`integral` 标志 | 布局代数结果，需要保留一层模式边界 |
+| `Layout<S,D>` | Two trees that keep static/dynamic leaf types | Structure known at compile time; zero-sized when fully static |
+| `DynLayout` | Two `[i64;32]` arrays and a rank | Flat shape/stride computed at runtime |
+| `GroupedLayout` | `DynLayout`, the leaf count of each top-level mode, and an `integral` flag | Layout algebra results that must keep one level of mode boundaries |
 
-`MAX_RANK=32` 限制固定元数据缓冲区。类型化 tuple 本身没有这个上限：`Layout` 的扩展域求值与单射证明直接按叶子下标读取 shape/stride，不经转换；只有 `to_dyn`、`as_affine` 这类导出运行时元数据的操作会返回 `CapacityExceeded`。
+`MAX_RANK=32` bounds the fixed metadata buffers. Typed tuples themselves have no such limit: extended-domain evaluation and the injectivity proof of `Layout` read shape/stride directly by leaf index without conversion; only operations that export runtime metadata, such as `to_dyn` and `as_affine`, return `CapacityExceeded`.
 
-`GroupedLayout::groups()` 的各项之和必须等于扁平叶子数。例如 shape `(2,(2,3))` 可保存为叶子 `[2,2,3]` 和分组 `[1,2]`。它不保留任意深度的全部嵌套边界。`integral` 区分 CuTe 意义上的整数 shape 与 rank 为 1 的 tuple，组合时二者的顶层分配规则可能不同。
+The entries of `GroupedLayout::groups()` must sum to the number of flat leaves. For example, shape `(2,(2,3))` can be stored as leaves `[2,2,3]` with groups `[1,2]`. It does not keep all nesting boundaries of arbitrary depth. `integral` distinguishes an integer shape in the CuTe sense from a rank-1 tuple; the two may follow different top-level distribution rules under composition.
 
-例如与 outer `(4,6):(6,1)` 组合时，整数 inner `8:3` 的结果为 `(2,4):(18,1)`，有两个顶层模式，`groups=[1,1]`；单元素元组 inner `(8,):(3,)` 则把相同的两片叶子保留在一个顶层模式内，`groups=[2]`。地址计算相同，但坐标分组不同，具体分支见 §5.2 的 `compose_grouped`。
+For example, when composed with outer `(4,6):(6,1)`, the integer inner `8:3` gives `(2,4):(18,1)` with two top-level modes, `groups=[1,1]`; the single-element tuple inner `(8,):(3,)` keeps the same two leaves in one top-level mode, `groups=[2]`. The addresses are the same, but the coordinate grouping differs; see `compose_grouped` in §5.2 for the branch.
 
-### 3.2 `LayoutMap` 表示可执行映射
+### 3.2 `LayoutMap` represents an executable mapping
 
-trait 的必要入口是 `size`、`rank`、`extent`、`index`。其他方法给出坐标入口、扩展域、地址区间、单射性和可选仿射元数据。
+The required entry points of the trait are `size`, `rank`, `extent`, and `index`. The other methods provide coordinate entry points, the extended domain, the address interval, injectivity, and optional affine metadata.
 
-`Layout::new` 先验证所有 shape 叶子非负，再检查逻辑大小和地址端点的整数溢出。它允许零/负 stride，也允许地址重复。`Tensor` 是否能写这个布局，是后面的独立问题。
+`Layout::new` first validates that all shape leaves are non-negative, then checks the logical size and address endpoints for integer overflow. It allows zero/negative strides and repeated addresses. Whether a `Tensor` can write through this layout is a separate, later question.
 
-默认 `index_of_coord` 通过 `coord_to_linear` 逐顶层轴检查边界，使用 extent 前缀积生成逻辑编号，再交给 `index`。基础布局的 `index` 对全部叶子做数学 §3 的解码，其算法骨架是：
+The default `index_of_coord` checks bounds per top-level axis through `coord_to_linear`, builds the logical index from the extent prefix products, and passes it to `index`. The `index` of a basic layout decodes all leaves as in math §3; the skeleton of the algorithm is:
 
 ```text
-先检查 0 <= linear < size
+first check 0 <= linear < size
 address = 0
-依次读取每个 shape/stride 叶子 (s,d)：
+for each shape/stride leaf (s,d) in order:
     coordinate = linear % s
     linear = linear / s
     address = checked_add(address, checked_mul(coordinate,d))
 ```
 
-先验证非空有效域，才会执行除余。`checked_size`（`Layout` 经 `shape_size` 调用）先看完所有叶子，确保零长度不会掩盖另一个负长度；确认存在零长度后，大小直接为 0，避免无意义的乘积溢出。
+Division and remainder are executed only after the non-empty valid domain has been verified. `checked_size` (called by `Layout` through `shape_size`) first scans all leaves, so that a zero extent cannot mask another negative extent; once a zero extent is confirmed, the size is 0 directly, avoiding a meaningless product overflow.
 
-`affine_index_extended` 对最后一个叶子不取余，对无叶子域单独处理。`index_extended_of_coord` 对每个顶层模式分别调用该规则（`Layout` 用 `mode_span` 取得模式的叶子区间）；`DynLayout` 每轴只有一个叶子，所以直接累加 `coord[a] * stride[a]`。通用映射默认只能在支持仿射元数据时延伸，`SwizzledLayout` 等包装并不自动获得无限扩展能力。
+`affine_index_extended` does not take the remainder for the last leaf and handles a leafless domain separately. `index_extended_of_coord` applies this rule to each top-level mode separately (`Layout` obtains the mode's leaf range with `mode_span`); `DynLayout` has only one leaf per axis, so it accumulates `coord[a] * stride[a]` directly. A generic mapping can by default only be extended when it supports affine metadata; wrappers such as `SwizzledLayout` do not automatically gain unbounded extension.
 
-### 3.3 范围与单射性的实现成本
+### 3.3 Implementation cost of range and injectivity
 
-仿射布局用数学 §4 的端点公式求范围，时间随叶子数线性增长；通用 `LayoutMap` 默认枚举所有有效编号。`cosize` 与 `address_end` 基于范围计算，不直接使用 shape 的乘积。
+Affine layouts compute the range with the endpoint formula of math §4, in time linear in the number of leaves; a generic `LayoutMap` enumerates all valid indices by default. `cosize` and `address_end` are computed from the range, not directly from the product of the shape.
 
-`Layout` 与 `DynLayout` 的 `is_injective` 共用 `affine_injective`：长度大于 1 的零步长叶子直接判为重叠，其余叶子按 `(|stride|, 叶下标)` 升序逐个选取并尝试区间不重叠证明。每轮线性扫描选出下一个叶子，代价为叶子数的平方，但不需要排序缓冲区，因此类型化布局不受 `MAX_RANK` 限制。证明失败后逐对枚举。通常写作 `O(n²)`，意思是逻辑元素数扩大一倍，地址比较次数可能接近四倍；每次索引自身还要遍历叶子。它适合作为正确性检查，不能假定任意大布局的检查都很便宜。
+`is_injective` of `Layout` and `DynLayout` shares `affine_injective`: a zero-stride leaf of length greater than 1 is immediately judged overlapping; the remaining leaves are picked one by one in ascending `(|stride|, leaf index)` order, and a proof of non-overlapping intervals is attempted. Each round selects the next leaf with a linear scan, so the cost is quadratic in the number of leaves, but no sort buffer is needed, so typed layouts are not limited by `MAX_RANK`. If the proof fails, pairs are enumerated. This is usually written `O(n²)`, meaning that doubling the number of logical elements can nearly quadruple the number of address comparisons; each index evaluation also walks the leaves. It is suitable as a correctness check; do not assume the check is cheap for arbitrarily large layouts.
 
-## 4. 紧凑步长与类型保留的化简
+## 4. Compact strides and type-preserving simplification
 
-`Compact<LayoutLeft, Start>` 和 `Compact<LayoutRight, Start>` 递归传递一个累积步长 `Start`，返回 `(Stride,End)`。叶子使用当前 `Start` 作为 stride，再把 `Start * extent` 传给下一叶子。`LayoutLeft::make` 从左向右，`LayoutRight::make` 从右向左，起始类型都是 `Int<1>`。
+`Compact<LayoutLeft, Start>` and `Compact<LayoutRight, Start>` recursively pass an accumulated stride `Start` and return `(Stride,End)`. A leaf uses the current `Start` as its stride and passes `Start * extent` to the next leaf. `LayoutLeft::make` goes from left to right and `LayoutRight::make` from right to left; both start from type `Int<1>`.
 
-这正是数学 §3 的前缀积/后缀积构造。构造器先用受检算术预检，再执行保留类型的递归乘法。即使某个形状最终大小为零，中间步长构造仍可能要求一个无法表示的乘积，并返回 `Overflow`。
+This is exactly the prefix-product/suffix-product construction of math §3. The constructor first pre-checks with checked arithmetic, then performs the type-preserving recursive multiplication. Even if a shape's final size is zero, constructing the intermediate strides may still require an unrepresentable product and return `Overflow`.
 
-coalesce 算法集中在 [`src/algebra/coalesce.rs`](../src/algebra/coalesce.rs)，有三条入口，共用反向折叠的丢弃/合并规则：
+The coalesce algorithm lives in [`src/algebra/coalesce.rs`](../src/algebra/coalesce.rs) and has three entry points that share the discard/merge rules of the reverse fold:
 
-| 输入 | 普通化简 | 保留扩展映射 |
+| Input | Plain simplification | Preserving the extended mapping |
 |---|---|---|
 | Fully static `Layout` | `<CoalescedLayout<S, D> as StaticValue>::VALUE` | `<CoalescedLayout<S, D, true> as StaticValue>::VALUE` |
-| 混合或全动态叶子的 `Layout` | `Layout::coalesce` | `Layout::coalesce_extended` |
-| 运行时元数据 `DynLayout` | `DynLayout::coalesce` | `DynLayout::coalesce_extended` |
+| `Layout` with mixed or fully dynamic leaves | `Layout::coalesce` | `Layout::coalesce_extended` |
+| Runtime metadata `DynLayout` | `DynLayout::coalesce` | `DynLayout::coalesce_extended` |
 
-The fully static result type comes from `CoalesceFold<EXTENDED>` and its value from `StaticValue`; there is no runtime recursion and no `DynLayout`, so it is not limited by `MAX_RANK`. The plain version normalizes an empty result to `1:0`; the extended version keeps the stride of a trailing shape-1 mode. Reading a constant this way skips `Layout::new`'s size and address-range validation;非法静态 shape 由 `Shape` 约束拒绝，静态合并乘积溢出在类型实例化时报错。
+The fully static result type comes from `CoalesceFold<EXTENDED>` and its value from `StaticValue`; there is no runtime recursion and no `DynLayout`, so it is not limited by `MAX_RANK`. The plain version normalizes an empty result to `1:0`; the extended version keeps the stride of a trailing shape-1 mode. Reading a constant this way skips `Layout::new`'s size and address-range validation; invalid static shapes are rejected by the `Shape` bound, and overflow of a static merge product is reported as an error at type instantiation.
 
-普通折叠与扩展折叠的空尾初始化共用 `PrependToEmpty<S,D,EXTENDED>`：保留分支不区分 EXTENDED，静态单位轴在普通分支被删除，在扩展分支以 extent 2 保留末尾 stride。三态合并策略与空输入的 `1:0` 约定保持不变。
+The plain fold and the extended fold share the empty-tail initialization `PrependToEmpty<S,D,EXTENDED>`: the retain branch does not depend on EXTENDED; a static unit mode is deleted in the plain branch and kept with extent 2 in the extended branch to preserve the trailing stride. The three-way merge policy and the `1:0` convention for empty input are unchanged.
 
-`Layout` 的两个方法仍可接受全静态输入，但它们是返回 `Result` 的运行时校验入口。先 flatten，再调用同一个 `CoalesceFold`。`UNIT_DECISION` 仅删除静态单位轴；`MERGE_DECISION` 要求当前 shape、当前 stride、尾部首个 shape 和尾部首个 stride 都是静态值，并满足 `s*d == next_stride`，与 CuTe `bw_coalesce` 一致。因此 `(Int<2>, DynInt(3)):(Int<1>, Int<2>)` 保留两个模式，运行时碰巧连续也不能改变类型。所有合并乘积都由静态整数计算，不再需要预检动态合并乘积。方法检查输入 shape 与结果的大小、地址范围。
+The two `Layout` methods still accept fully static input, but they are runtime-validating entry points that return `Result`. They flatten first and then call the same `CoalesceFold`. `UNIT_DECISION` deletes only static unit modes; `MERGE_DECISION` requires the current shape, the current stride, the first shape of the tail, and the first stride of the tail all to be static and to satisfy `s*d == next_stride`, matching CuTe's `bw_coalesce`. Hence `(Int<2>, DynInt(3)):(Int<1>, Int<2>)` keeps two modes; happening to be contiguous at runtime cannot change the type. All merge products are computed from static integers, so dynamic merge products no longer need a pre-check. The methods check the size and address range of the input shape and of the result.
 
-`DynLayout` 的两个方法共用 `coalesce_impl`，从右向左折叠，在反向工作区中组装结果，最后反转有效叶子。这里可使用当前数值删除单位轴、合并连续轴；合并 extent 用受检乘法。折叠顺序与类型层一致，例如 `(isize::MAX,2,0):(0,0,0)` 先合并 `2*0`，得到 `0:0`，不会因先算 `isize::MAX*2` 而误报溢出。
+The two `DynLayout` methods share `coalesce_impl`, which folds from right to left, assembles the result in a reversed workspace, and finally reverses the valid leaves. Here the current values may be used to delete unit modes and merge contiguous modes; merged extents use checked multiplication. The fold order matches the type level: for example, `(isize::MAX,2,0):(0,0,0)` first merges `2*0` into `0:0` and does not falsely report overflow by computing `isize::MAX*2` first.
 
-扩展版本对应 CuTe 的 `coalesce_x`，三个入口都保留决定扩展方向的末尾 stride。类型层将末尾静态 shape-1 换成 2；动态 shape-1 保留原值。因此类型化扩展结果的逻辑大小可能增加，`CoalescedLayout<S,D,true>` 表示其结果类型，普通版本仍使用默认的 `false`。`DynLayout` 通过非零 rank 保留末尾叶子，沿用真实 extent，避免占位长度引入额外溢出；扩展索引不使用最后一个 extent。这是与上游静态表示的明确差异，输出的逻辑大小仍等于原运行时布局。空布局沿用本库的标量约定，归一为 `1:0`。扩展映射等价要求原布局的前导 extent 为正；含零 extent 时仍按 CuTe 的代数规则化简，不保证保留原扩展解码的零除错误。
+The extended version corresponds to CuTe's `coalesce_x`; all three entry points keep the trailing stride that determines the extension direction. The type level replaces a trailing static shape-1 with 2; a dynamic shape-1 keeps its original value. Hence the logical size of a typed extended result may increase; `CoalescedLayout<S,D,true>` names its result type, while the plain version keeps the default `false`. `DynLayout` keeps the trailing leaf by keeping a nonzero rank and retains the real extent, avoiding extra overflow from a placeholder extent; extended indexing does not use the last extent. This is an explicit deviation from upstream's static representation; the output's logical size still equals that of the original runtime layout. An empty layout follows this library's scalar convention and is normalized to `1:0`. Equivalence of the extended mapping requires the leading extents of the original layout to be positive; with zero extents, simplification still follows CuTe's algebraic rules, and the division-by-zero error of the original extended decoding is not guaranteed to be preserved.
 
-## 5. 布局代数怎样执行
+## 5. How the layout algebra executes
 
-### 5.1 公共接口与工作缓冲区
+### 5.1 Public interface and working buffers
 
-`AffineLayout` 提供扁平元数据 `as_flat_layout` 和分组元数据 `as_grouped_layout`。`LayoutMap::as_affine` 则是通用映射上的可选能力，返回 `Option<GroupedLayout>`；`None` 表示当前没有已知的仿射表示。
+`AffineLayout` provides flat metadata through `as_flat_layout` and grouped metadata through `as_grouped_layout`. `LayoutMap::as_affine` is an optional capability on generic mappings that returns `Option<GroupedLayout>`; `None` means no affine representation is currently known.
 
-The crate-internal `LayoutBuilder` in `layout/dynamic_layout.rs` collects shape/stride leaves and top-level mode sizes in fixed arrays; `group_modes` in `algebra.rs` assembles the groupings shared by runtime divide/product.这些辅助结构把运行时选择出的结果装入 `DynLayout` 或 `GroupedLayout`，不会为每次代数操作申请堆内存。
+The crate-internal `LayoutBuilder` in `layout/dynamic_layout.rs` collects shape/stride leaves and top-level mode sizes in fixed arrays; `group_modes` in `algebra.rs` assembles the groupings shared by runtime divide/product. These helper structures place the results selected at runtime into a `DynLayout` or `GroupedLayout` without allocating heap memory for each algebra operation.
 
-### 5.2 组合算法的入口
+### 5.2 Entry points of the composition algorithm
 
-`composition_layout` 立即计算元数据。`compose_grouped` 先对 outer 做保留扩展域的合并，再按 inner 顶层模式分配；每个整数叶子 `s:d` 交给 `compose_leaf`。后者依据 outer 各模式长度、当前剩余长度与步长，使用除余和向上取整拆出结果叶子，并检查整除条件。
+`composition_layout` computes metadata immediately. `compose_grouped` first coalesces outer while preserving the extended domain, then distributes by inner's top-level modes; each integer leaf `s:d` is handed to `compose_leaf`. The latter uses the extents of outer's modes, the current remaining extent, and the stride to split off result leaves with division, remainder, and ceiling division, and checks the divisibility conditions.
 
-`composition` 构造 `Composition<A,B>` 时缓存满足规范化条件的仿射结果，即使弱整除导致它与逐点复合不同；不可整除或非仿射时保留逐点回退，其他错误直接返回。
+When constructing `Composition<A,B>`, `composition` caches the affine result that satisfies the normalization conditions, even if weak divisibility makes it differ from pointwise composition; when the operands are not divisible or the result is not affine, the pointwise fallback is kept; other errors are returned directly.
 
-`Composition::index` 因而只需在缓存布局求值与 `outer.index_extended(inner.index(i))` 之间选择。Its `size` comes from inner; `rank`/`extent` follow the normalized layout when there is one (matching `composition_layout`), and inner's modes otherwise.
+`Composition::index` therefore only chooses between evaluating the cached layout and `outer.index_extended(inner.index(i))`. Its `size` comes from inner; `rank`/`extent` follow the normalized layout when there is one (matching `composition_layout`), and inner's modes otherwise.
 
 ```rust
 use noodle_cute::algebra::{composition, composition_layout};
@@ -214,21 +214,21 @@ fn main() -> noodle_cute::Result<()> {
 }
 ```
 
-这组断言直接体现数学 §7 的例外，不能用“组合总是逐点代入”替换实现。
+These assertions directly show the exception in math §7; the implementation cannot be replaced by "composition is always pointwise substitution".
 
-When both sides have only `Int<N>` leaves, `TypedComposition<A, B>` runs the same algorithm during trait resolution:公共模块的 `CoalesceFold<true>` 做 `coalesce_x`；普通 `Layout::coalesce` 使用同一折叠的默认分支，两者共用 `Prepend` 的丢弃/合并规则，`ComposeTree` 按 inner 的树递归，`Fold` 的每一步数值由 `const fn step` 计算并以泛型常量写回类型。结果是零大小、可放进 `const` 的 `Layout`，不经过 `LayoutBuilder`/`DynLayout`；整除、溢出和 profile 错误都在实例化时编译失败。细节见[布局代数 7.1 节](algebra.md#71-fully-static-results)。
+When both sides have only `Int<N>` leaves, `TypedComposition<A, B>` runs the same algorithm during trait resolution: `CoalesceFold<true>` in the shared module performs `coalesce_x`; plain `Layout::coalesce` uses the default branch of the same fold, and both share the discard/merge rules of `Prepend`; `ComposeTree` recurses over inner's tree, and each step of `Fold` computes its values with `const fn step` and writes them back into the type as generic consts. The result is a zero-sized `Layout` that can be placed in a `const` and does not go through `LayoutBuilder`/`DynLayout`; divisibility, overflow, and profile errors all fail compilation at instantiation. See [layout algebra §7.1](algebra.md#71-fully-static-results) for details.
 
-全静态、混合及运行时 composition 都在 [`src/algebra/composition.rs`](../src/algebra/composition.rs) 中实现。A fully static result is read as `<TypedComposition<A,B> as StaticValue>::VALUE`; `Layout::composition` returns `Result<TypedComposition<A,B>>`; both share `ComposeTree` / `Fold` / `Finish` 的类型递归，阶段结果统一为 `Output: LayoutParts`。混合路径的 `TypedStep` 仅在相关参数静态已知时生成 `Int<N>`，否则生成 `DynInt`；运行时单位模式不会改变输出树。静态零乘动态值与静态零分子除动态值沿用 CuTe 的特殊规则。
+Fully static, mixed, and runtime composition are all implemented in [`src/algebra/composition.rs`](../src/algebra/composition.rs). A fully static result is read as `<TypedComposition<A,B> as StaticValue>::VALUE`; `Layout::composition` returns `Result<TypedComposition<A,B>>`; both share the type recursion of `ComposeTree` / `Fold` / `Finish`, with stage results unified as `Output: LayoutParts`. The mixed path's `TypedStep` produces `Int<N>` only when the relevant parameters are statically known, and `DynInt` otherwise; runtime unit modes do not change the output tree. A static zero multiplied by a dynamic value and a static zero numerator divided by a dynamic value follow CuTe's special rules.
 
-`composition_layout` returns a `GroupedLayout`; the generic `composition` keeps the lazy fallback.类型化方法允许负 stride，并检查动态整除、除零与溢出；与上游省略动态断言相比，这是显式的受检差异。类型化结果和常量结果不经过固定容量缓冲区，因此不受 `MAX_RANK` 限制。类型化 coalesce 与运行时 coalesce 可保留不同模式边界，弱整除时结果数值可能随静态信息不同而改变，见[布局代数 7.3 节](algebra.md#73-composition-的全静态混合与运行时入口)。Runtime, mixed, and static contracts are in [`tests/composition_contract.rs`](../tests/composition_contract.rs).
+`composition_layout` returns a `GroupedLayout`; the generic `composition` keeps the lazy fallback. The typed methods allow negative strides and check dynamic divisibility, division by zero, and overflow; compared with upstream, which omits dynamic assertions, this is an explicit checked deviation. Typed results and constant results do not go through fixed-capacity buffers, so they are not limited by `MAX_RANK`. Typed coalesce and runtime coalesce may keep different mode boundaries, and under weak divisibility the numeric result may change with the available static information; see [layout algebra §7.3](algebra.md#73-fully-static-mixed-and-runtime-entry-points-for-composition). Runtime, mixed, and static contracts are in [`tests/composition_contract.rs`](../tests/composition_contract.rs).
 
-### 5.3 补布局、划分与乘积
+### 5.3 Complement, divide, and product
 
-`complement_prefix` 先拒绝空域并 filter；若结果为 `1:0`，返回 `None` 作为特例标记，此时 `complement_shape` 直接返回 `prod(cotarget):1`，`complement_extended` 返回 `1:1`。否则按 `(stride,原序号)` 排序；第二个排序键保持相同步长时的确定顺序。常规路径维护数学 §8 的当前间距，追加空隙叶子；随后 `complement_shape` 逐目标叶子向上取整，`complement_extended` 保留末尾重复步长。
+`complement_prefix` first rejects empty domains and filters; if the result is `1:0`, it returns `None` as a special-case marker, in which case `complement_shape` returns `prod(cotarget):1` directly and `complement_extended` returns `1:1`. Otherwise it sorts by `(stride, original index)`; the second sort key keeps a deterministic order for equal strides. The regular path maintains the current gap of math §8 and appends gap leaves; then `complement_shape` takes the ceiling per target leaf, and `complement_extended` keeps the trailing repeat stride.
 
-`TileRest::index` 用 `i % tile_size` 选择 tile 编号、`i / tile_size` 选择 rest 编号，再将两个地址相加。单 tiler 的 divide 和 product 因此无需另写坐标引擎：前者构造补布局后组合到原布局，后者将 rest 组合到 block 的无 cotarget 补布局。
+`TileRest::index` uses `i % tile_size` to select the tile index and `i / tile_size` to select the rest index, then adds the two addresses. Single-tiler divide and product therefore need no separate coordinate engine: the former builds the complement and composes the result onto the original layout; the latter composes rest onto the block's complement without a cotarget.
 
-`divide_modes` 逐原顶层模式构造 tile/rest。四个公开 `*_divide_modes` 只负责不同的装组方式。`rank_product` 则按两侧较大的 rank 逐模式构造 blocked/raked 结果，保留补入的 `1:0` 叶子。
+`divide_modes` builds tile/rest per original top-level mode. The four public `*_divide_modes` only differ in how they group the result. `rank_product` builds blocked/raked results mode by mode up to the larger rank of the two sides, keeping the padded `1:0` leaves.
 
 ```rust
 use noodle_cute::{complement, complement_extended, logical_divide, DynLayout, LayoutMap};
@@ -250,42 +250,42 @@ fn main() -> noodle_cute::Result<()> {
 }
 ```
 
-最后一个地址可由布局求出，但六元素存储容不下它。实际使用需选择谓词化视图或准备足够的补齐存储。
+The last address can be computed from the layout, but six-element storage cannot hold it. In practice, choose a predicated view or provide sufficiently padded storage.
 
-### 5.4 结构化逆与枚举逆
+### 5.4 Structured inverse and enumerated inverse
 
-`sorted_leaves` 计算合并后 shape 的前缀积，并按 stride 排序。`right_inverse` 只接受 stride 等于当前已覆盖长度的叶子，输出 stride 使用该叶子的逻辑前缀积。`left_inverse` 使用相邻尺度的整除关系构造反向 shape，允许地址空洞，跳过零步长。
+`sorted_leaves` computes the prefix products of the coalesced shape and sorts by stride. `right_inverse` accepts only leaves whose stride equals the currently covered length, and the output stride uses that leaf's logical prefix product. `left_inverse` builds the reverse shape from the divisibility relation between adjacent scales, allows address holes, and skips zero strides.
 
-`dense_left_inverse` 先检查单射及地址范围，`dense_right_inverse` 枚举每个目标地址是否有原像。二者返回 `Inverse<L>`；它不建立堆上的查找表，`index(address)` 每次从原布局编号 0 开始扫描并返回首次命中。因此节省了分配，但一次查询可能需要扫描全部元素。该类型的表达式导出返回 `Unsupported`。
+`dense_left_inverse` first checks injectivity and the address range; `dense_right_inverse` enumerates whether each target address has a preimage. Both return `Inverse<L>`; it builds no heap lookup table, and `index(address)` scans from index 0 of the original layout on every call and returns the first hit. This saves allocation, but one query may need to scan all elements. Expression export for this type returns `Unsupported`.
 
-## 6. 切片和局部视图如何接到 Tensor
+## 6. How slices and local views connect to Tensor
 
-本节先介绍 Tensor 如何把 §3–5 的布局与局部视图接到内存引擎上，对应数学篇 §15 的存储模型。建立视图后，具体的复制与矩阵乘法参考算法放在 §11 讲解。
+This section first describes how Tensor attaches the layouts and local views of §3–5 to a memory engine, corresponding to the storage model of math §15. Once views are established, the concrete copy and matrix-multiplication reference algorithms are covered in §11.
 
-### 6.1 引擎、布局与偏移分别承担什么
+### 6.1 Roles of the engine, the layout, and the offset
 
-`Tensor<E,L>` 的三个私有字段是 `engine`、`layout`、`offset`。`ReadEngine` 定义长度和按存储编号读取值，`WriteEngine` 增加可变写入。当前提供：
+The three private fields of `Tensor<E,L>` are `engine`, `layout`, and `offset`. `ReadEngine` defines the length and reads values by storage index; `WriteEngine` adds mutable writes. Currently provided:
 
-| 引擎 | 存储关系 | 读取/写入 |
+| Engine | Storage relation | Read/write |
 |---|---|---|
-| `SliceEngine<'a,T>` | 借用 `&[T]` | 克隆读取 |
-| `SliceMutEngine<'a,T>` | 独占借用 `&mut [T]` | 克隆读取与写入 |
-| `ArrayEngine<T,N>` | 拥有 `[T;N]` | 克隆读取与写入 |
-| `IdentityEngine<R>` | 保存 shape，无元素数组 | 按左序编号生成 `[i64;R]` 坐标 |
+| `SliceEngine<'a,T>` | Borrows `&[T]` | Cloning reads |
+| `SliceMutEngine<'a,T>` | Exclusively borrows `&mut [T]` | Cloning reads and writes |
+| `ArrayEngine<T,N>` | Owns `[T;N]` | Cloning reads and writes |
+| `IdentityEngine<R>` | Stores the shape, no element array | Generates `[i64;R]` coordinates from the left-major index |
 
-`&E` 和 `&mut E` 也转发引擎 trait，所以 `view` / `subview` 可以借用同一个引擎，只复制布局元数据。可写视图通过 `&mut` 借用父对象，借用互斥由 Rust 检查。
+`&E` and `&mut E` also forward the engine traits, so `view` / `subview` can borrow the same engine and copy only the layout metadata. Writable views borrow the parent through `&mut`, and Rust checks the borrow exclusivity.
 
-构造 Tensor 时，`validate_range` 用整个可达地址范围检查 `offset + min/max` 是否落在引擎内。访问时，`storage_index` 仍会重新执行受检加法、转成 `usize` 并检查上界。必须先叠加有符号偏移，再转成无符号编号，才能正确处理数学 §15 的反向视图。
+When a Tensor is constructed, `validate_range` uses the whole reachable address range to check that `offset + min/max` lies within the engine. On access, `storage_index` again performs a checked addition, converts to `usize`, and checks the upper bound. The signed offset must be added before converting to an unsigned index, so that the reversed views of math §15 are handled correctly.
 
-可写构造器先检查单射性。所有写入口还会调用 `validate_write`，因为可写引擎也可能经通用只读构造器装入 Tensor。`copy_if`、`fill`、矩阵算法在循环前验证一次目标布局；逐元素 `set` 则每次检查。
+Writable constructors check injectivity first. All write entry points also call `validate_write`, because a writable engine may also be placed into a Tensor through the generic read-only constructor. `copy_if`, `fill`, and the matrix algorithms validate the destination layout once before the loop; per-element `set` checks on every call.
 
-### 6.2 切片返回布局与 offset
+### 6.2 Slicing returns a layout and an offset
 
-`DynLayout::slice` 遍历选择器，保留 `All` 轴，移除固定轴并累加地址偏移。通用 `slice` 保存选择器为 `Sliced<L>`，每次索引时重建原坐标，再减去预先返回的基址。它适用于无法直接拆成新 stride 的映射。
+`DynLayout::slice` walks the selectors, keeps `All` axes, removes fixed axes, and accumulates the address offset. The generic `slice` stores the selectors as `Sliced<L>`, rebuilds the original coordinate on every index, and subtracts the base address it returned up front. It suits mappings that cannot be split directly into new strides.
 
-两者对空视图的偏移规则有区别：`DynLayout::slice` 仍累加固定轴贡献；通用 `slice` 返回偏移 0。下游应使用实际返回的 offset，不自行假定两条路径的空视图基址相同。
+The two differ in the offset rule for empty views: `DynLayout::slice` still accumulates the contributions of fixed axes; the generic `slice` returns offset 0. Downstream code should use the offset actually returned and not assume that the two paths give the same base address for empty views.
 
-`Tensor::subview` 把传入 offset 加到父 Tensor 的 offset 上；它只要求新视图位于底层引擎范围内，不要求新坐标域一定是父视图的子集。
+`Tensor::subview` adds the given offset to the parent Tensor's offset; it only requires the new view to lie within the underlying engine, not that the new coordinate domain be a subset of the parent view.
 
 ```rust
 use noodle_cute::{copy, slice, DynLayout, Slice, Tensor};
@@ -310,11 +310,11 @@ fn main() -> noodle_cute::Result<()> {
 }
 ```
 
-### 6.3 两种尾块接口需要不同处理
+### 6.3 The two tail-tile interfaces need different handling
 
-`local_tile_layout` 调用 `inner_partition`，对 rest 做切片，返回 `GroupedLayout` 与 offset。它允许补齐槽位进入扩展域，适合需要自行控制谓词或补齐存储的调用方。`local_partition_layout` 先用 `get_flat_coord` 解码线程编号，再调用 `outer_partition`。
+`local_tile_layout` calls `inner_partition`, slices rest, and returns a `GroupedLayout` and an offset. It lets padding slots enter the extended domain and suits callers that control predicates or padded storage themselves. `local_partition_layout` first decodes the thread index with `get_flat_coord`, then calls `outer_partition`.
 
-`local_tile` 则保存原布局、tile shape 和全局原点。`global_coord` 对每个局部编号解码并检查边界，无效尾槽返回 `None`。其 `address_range` 只统计有效槽位，因此可以把尾块直接绑定到未补齐的原存储。
+`local_tile`, by contrast, stores the original layout, the tile shape, and the global origin. `global_coord` decodes each local index and checks bounds; invalid tail slots return `None`. Its `address_range` counts only valid slots, so a tail tile can be bound directly to the original unpadded storage.
 
 ```rust
 use noodle_cute::{copy_if, local_tile, DynLayout, Tensor};
@@ -331,15 +331,15 @@ fn main() -> noodle_cute::Result<()> {
 }
 ```
 
-这里闭包的 `unwrap` 依赖 `copy_if` 只传入 `[0,size)` 的编号。`copy_if` 先判断谓词，再计算源和目标地址；无效槽位既不读取源，也不修改目标。直接 `copy` 或 `fill` 不会自动跳过尾槽。
+The closure's `unwrap` here relies on `copy_if` passing only indices in `[0,size)`. `copy_if` evaluates the predicate first and then computes the source and destination addresses; invalid slots neither read the source nor modify the destination. A plain `copy` or `fill` does not skip tail slots automatically.
 
-一维 `local_partition` 保存线程数与线程编号，使用 `thread + i*threads` 转发到原布局，并计算该线程的真实大小，所以没有需要屏蔽的额外尾槽。
+The one-dimensional `local_partition` stores the thread count and the thread index, forwards to the original layout using `thread + i*threads`, and computes the thread's real size, so there are no extra tail slots to mask.
 
-## 7. Copy 分区如何实现线程所有权
+## 7. How Copy partitioning implements thread ownership
 
-`CopyAtom` 保存每次操作的值数量和对齐字节数。`TiledCopy` 保存 tile、线程数、元素数、每线程槽数，以及可选的 `ThreadValueLayout`。构造器检查正长度、乘积溢出和 atom 整除条件。
+`CopyAtom` stores the number of values per operation and the alignment in bytes. `TiledCopy` stores the tile, the thread count, the element count, the slots per thread, and an optional `ThreadValueLayout`. The constructors check for positive lengths, product overflow, and atom divisibility.
 
-`TiledCopy::new` 使用数学 §12 的循环公式；`with_layout` 则独立解码线程和值坐标，再执行 `t + v * thread_shape`。`linear_index` 保留尾部槽位，`coordinate` 用 `Option` 区分不活动尾槽与非法线程/值编号产生的 `Err`。`CopyPartition` 迭代器跳过不活动槽位。
+`TiledCopy::new` uses the cyclic formula of math §12; `with_layout` instead decodes thread and value coordinates independently and then computes `t + v * thread_shape`. `linear_index` keeps tail slots; `coordinate` uses `Option` to distinguish inactive tail slots from the `Err` produced by an invalid thread/value index. The `CopyPartition` iterator skips inactive slots.
 
 ```rust
 use noodle_cute::{CopyAtom, PartitionOrder, ThreadValueLayout, TiledCopy};
@@ -364,31 +364,31 @@ fn main() -> noodle_cute::Result<()> {
 }
 ```
 
-`cyclic_plan` 把已验证的循环分工转换为只含标量元数据的 `CyclicCopy`，方便设备代码内联。它仅支持循环分工。`coordinate` 没有 `Result`，外部必须先满足 `is_active`；域外算术使用 wrapping，不能把域外返回坐标用于存储访问。
+`cyclic_plan` converts a validated cyclic assignment into a `CyclicCopy` that holds only scalar metadata, making it easy to inline in device code. It supports only cyclic assignment. `coordinate` has no `Result`, so callers must satisfy `is_active` first; out-of-domain arithmetic uses wrapping, and coordinates returned for out-of-domain inputs must not be used for storage access.
 
-`make_layout_tv` 不调用上述受限二维公式，而是复用 `raked_product → right_inverse → composition_layout`。其返回值分别是 tile 坐标到 `(线程,值)` 编号的布局，以及反向 TV 布局。这条路径是从数学模型推导线程分工的直接实例。
+`make_layout_tv` does not call the restricted two-dimensional formula above; it reuses `raked_product → right_inverse → composition_layout`. It returns the layout from tile coordinates to `(thread, value)` indices and the reverse TV layout. This path is a direct instance of deriving thread assignment from the mathematical model.
 
-## 8. MMA 分区如何复用布局代数
+## 8. How MMA partitioning reuses the layout algebra
 
 ### 8.1 `MmaAtom` / `TiledMma`
 
-`MmaAtom` 保存形状、线程数及可选能力描述。`MmaCapabilities` 包含输入类型、累加类型与片段是否不透明；这些是后端匹配所需的标签，不会调用设备来检测支持情况。
+`MmaAtom` stores the shape, the thread count, and an optional capability description. `MmaCapabilities` contains the input type, the accumulator type, and whether fragments are opaque; these are tags needed for backend matching and do not query a device for support.
 
-`TiledMma::with_group_grid` 直接验证给定组网格。`new` 从总线程数推导组数，枚举可整除 atom 网格的 `(gm,gn)`，以组内高宽之差选出网格。`group_origin` 用余数和商解码组编号，`partition_a/b/c` 都返回标量 `TiledCopy`。这套 API 描述逻辑暂存分工，B 的形状是 `(K,N)`。
+`TiledMma::with_group_grid` validates the given group grid directly. `new` derives the group count from the total thread count, enumerates the `(gm,gn)` that evenly divide the atom grid, and selects the grid by the difference between the height and width within a group. `group_origin` decodes the group index with remainder and quotient, and `partition_a/b/c` all return scalar `TiledCopy`s. This API describes the logical staging assignment; the shape of B is `(K,N)`.
 
 ### 8.2 `MmaAtomLayout` / `TiledMmaLayout`
 
-这套 API 允许调用方显式提供硬件原子的 TV 描述。`MmaAtomLayout::new` 检查原子长度为正、TV rank 为 2、线程模式大小与 `ThrID` 大小一致、TV 总大小等于相应原子 tile 面积。它没有完整验证任意 TV 描述的双射性或硬件合法性。
+This API lets callers supply the TV description of a hardware atom explicitly. `MmaAtomLayout::new` checks that the atom extents are positive, the TV rank is 2, the size of the thread mode matches the size of `ThrID`, and the total TV size equals the area of the corresponding atom tile. It does not fully validate the bijectivity or hardware legality of an arbitrary TV description.
 
-`TiledMmaLayout::new` 用 `complement_extended(ThrID)` 和逐模式组合形成 VMNK 线程布局，其语义是数学 §13 的 `tiled_product`。缺失 M/N/K 模式补 `1:0`；单位叶子的步长置零以形成确定的输出形式。
+`TiledMmaLayout::new` forms the VMNK thread layout from `complement_extended(ThrID)` and per-mode composition; its semantics are the `tiled_product` of math §13. Missing M/N/K modes are padded with `1:0`; the strides of unit leaves are set to zero to obtain a deterministic output form.
 
-内部 `thrfrg` 根据操作数选择轴：A 为 `(M,K)`，B 为 `(N,K)`，C 为 `(M,N)`，随后：
+The internal `thrfrg` selects axes by operand: `(M,K)` for A, `(N,K)` for B, and `(M,N)` for C, then:
 
-1. 用每轴 permutation 做 `logical_divide_modes`。
-2. 按原子尺寸拆出原子 tile 与剩余位置。
-3. 将原子 tile 与调用方提供的原子 TV 做 `composition_layout`。
-4. 按 VMNK 的相关线程轴继续划分 rest。
-5. 分别返回线程模式和片段模式；`partition_*` 用具体线程坐标计算 offset。
+1. Apply `logical_divide_modes` with the per-axis permutation.
+2. Split off the atom tile and the remaining positions by the atom size.
+3. Apply `composition_layout` to the atom tile and the caller-provided atom TV.
+4. Further partition rest along the relevant VMNK thread axes.
+5. Return the thread modes and fragment modes separately; `partition_*` computes the offset from the concrete thread coordinate.
 
 ```rust
 use noodle_cute::{DynLayout, LayoutMap, MmaAtomLayout, TiledMmaLayout};
@@ -410,17 +410,17 @@ fn main() -> noodle_cute::Result<()> {
 }
 ```
 
-`layout_*_tv` 还会用零步长补入 A/B 不使用的线程维度，并通过结构化逆把线程编号映射回线程坐标。K 拆分时的 C 扩展域行为也来自这条构造链。它不会分配寄存器片段或执行跨线程归约。
+`layout_*_tv` also pads the thread dimensions that A/B do not use with zero strides, and maps thread indices back to thread coordinates through the structured inverse. The extended-domain behavior of C when K is split also comes from this construction chain. It does not allocate register fragments or perform cross-thread reductions.
 
-## 9. Swizzle 的受检路径与直接计算路径
+## 9. Checked and direct computation paths of Swizzle
 
-`Swizzle<B,M,S>` 是零大小类型，数学 §14 的三个参数都编码在类型中。`new` 用 const 约束验证位域不重叠且位于非符号位内。由于单位结构体和 `Default` 也能产生实例，`apply` 仍检查参数，并拒绝负地址。
+`Swizzle<B,M,S>` is a zero-sized type; the three parameters of math §14 are all encoded in the type. `new` uses a const bound to validate that the bit fields do not overlap and lie within the non-sign bits. Because unit structs and `Default` can also produce instances, `apply` still checks the parameters and rejects negative addresses.
 
-`apply` 先转成 `u64`，选中源位域、移动到目标位域，再 XOR 回原值。`SwizzledLayout::index` 在底层布局求地址后应用 swizzle；它转发单射性，因为合法 swizzle 是双射，但地址范围必须重新枚举。当前包装没有仿射元数据导出，也没有扩展索引的专门实现。
+`apply` first converts to `u64`, selects the source bit field, shifts it to the destination bit field, and XORs it back into the original value. `SwizzledLayout::index` applies the swizzle after the underlying layout computes the address; it forwards injectivity because a valid swizzle is a bijection, but the address range must be re-enumerated. The current wrapper has no affine metadata export and no dedicated implementation of extended indexing.
 
-`offset(usize)` 是 const、可内联、无 `Result` 的计算入口。`StagedTile::new` 验证每级大小和周期整除条件；`StagedTile::offset` 只执行公式，调用方负责 stage/row/col 边界。设备适配还需保证 `usize` 位宽足以容纳使用的位域和偏移。
+`offset(usize)` is a const, inlinable computation entry point without `Result`. `StagedTile::new` validates the size of each level and the period divisibility condition; `StagedTile::offset` only evaluates the formula, and the caller is responsible for stage/row/col bounds. Device adaptation must also ensure that `usize` is wide enough for the bit fields and offsets in use.
 
-在所用 nightly 下，调用带类型级布尔约束的 `Swizzle::new` 需要调用方也启用下面两项 feature：
+With the nightly in use, calling `Swizzle::new`, which carries type-level boolean bounds, requires the caller to enable the following two features as well:
 
 ```rust
 #![feature(gca_min_const_items, gca_const_items)]
@@ -439,32 +439,32 @@ fn main() -> noodle_cute::Result<()> {
 }
 ```
 
-## 10. 从 CPU 计算导出表达式树
+## 10. Exporting expression trees from the CPU computation
 
-### 10.1 AST 与求值器
+### 10.1 AST and evaluator
 
-启用 `alloc` 后，`Expr` 保存抽象语法树（AST）：常量 `Const`、命名参数 `Param`、坐标引用 `Coord`、算术/位运算节点，以及条件节点 `Select`。`Pred` 保存比较、与、或、非。
+With `alloc` enabled, `Expr` holds an abstract syntax tree (AST): constants `Const`, named parameters `Param`, coordinate references `Coord`, arithmetic/bitwise nodes, and the conditional node `Select`. `Pred` holds comparisons, and, or, and not.
 
-Rust 运算符重载用于构造树。只有两个操作数都为常量且受检计算成功时，构造器才把子树折叠成 `Const`；除零、溢出等节点保留到实际求值时报告错误。`Pred` 会简化恒真/恒假，保留下来的 `And`、`Or` 节点短路执行，`Select` 只执行被选中的分支。
+Rust operator overloading builds the trees. A constructor folds a subtree into a `Const` only when both operands are constants and the checked computation succeeds; nodes with division by zero, overflow, and similar errors are kept and reported at actual evaluation. `Pred` simplifies always-true/always-false predicates, the remaining `And` and `Or` nodes short-circuit, and `Select` evaluates only the selected branch.
 
-`Expr::eval` 使用参数查询回调和坐标切片，不依赖后端语言。整数除法向零截断；右移采用 Rust 有符号右移语义。移位检查的是位数是否合法，不会把移出的高位视为普通乘法溢出。
+`Expr::eval` takes a parameter lookup callback and a coordinate slice and does not depend on any backend language. Integer division truncates toward zero; right shift uses Rust's signed right-shift semantics. Shift checks verify that the shift amount is valid; bits shifted out at the top are not treated as ordinary multiplication overflow.
 
-### 10.2 基础布局导出同一套解码公式
+### 10.2 Basic layouts export the same decoding formula
 
-`IndexExpr` 的主要入口如下：
+The main entry points of `IndexExpr` are:
 
-| 方法 | 输出与用途 |
+| Method | Output and purpose |
 |---|---|
-| `index_expr` | 严格域中的线性编号到地址公式 |
-| `index_coord_expr` | 顶层坐标先线性化，再生成地址公式 |
-| `size_expr` / `extent_expr` | 总大小与单模式大小公式 |
-| `domain_pred` / `coord_domain_pred` | 线性编号或逐模式坐标的有效域 |
-| `index_expr_extended` / `extended_domain_pred` | 扩展索引公式及其有效域，取决于类型的支持情况 |
-| `expression_params` | 参数名与当前合法元数据值的绑定表 |
+| `index_expr` | Linear index to address formula on the strict domain |
+| `index_coord_expr` | Top-level coordinate is linearized first, then the address formula is generated |
+| `size_expr` / `extent_expr` | Formulas for the total size and the size of a single mode |
+| `domain_pred` / `coord_domain_pred` | Valid domain of a linear index or of per-mode coordinates |
+| `index_expr_extended` / `extended_domain_pred` | Extended index formula and its valid domain, depending on the type's support |
+| `expression_params` | Binding table of parameter names to their current valid metadata values |
 
-基础 `Layout` 每次访问叶子时查询 `leaf_static`。静态叶子直接生成常量；动态叶子生成 `{prefix}_shape_{leaf}` 或 `{prefix}_stride_{leaf}`。叶子编号按展平顺序计算。`DynLayout` 的每个叶子都导出为参数，哪怕当前值是 0 或 1。
+A basic `Layout` queries `leaf_static` each time it accesses a leaf. Static leaves produce constants directly; dynamic leaves produce `{prefix}_shape_{leaf}` or `{prefix}_stride_{leaf}`. Leaf numbers follow the flattened order. Every leaf of a `DynLayout` is exported as a parameter, even if its current value is 0 or 1.
 
-CPU 的“取余得到当前坐标、商继续解码、乘 stride 后求和”在表达式导出中逐步构造为同样的树。静态零长度可提前输出无害常量地址；动态空域依靠 `domain_pred` 保护。`nonnegative_product` 使用 `Select`，先确定所有长度为正再求乘积，避免 `[i64::MAX,2,0]` 这样的空域先发生乘积溢出。
+The CPU steps "take the remainder to get the current coordinate, keep decoding the quotient, multiply by the stride and sum" are built step by step into the same tree in expression export. A static zero extent can emit a harmless constant address early; a dynamic empty domain relies on `domain_pred` for protection. `nonnegative_product` uses `Select` to confirm that all extents are positive before computing the product, so that an empty domain such as `[i64::MAX,2,0]` does not overflow the product first.
 
 ```rust
 use noodle_cute::{shape, stride, DynInt, Expr, IndexExpr, Int, Layout, LayoutMap};
@@ -485,43 +485,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     assert_eq!(address.eval(&lookup, &[4])?, 2);
     assert!(!valid.eval(&lookup, &[6])?);
-    // 仅为展示越界回绕而求值；实际访问必须先通过 valid。
+    // Evaluated only to show out-of-bounds wraparound; real accesses must pass valid first.
     assert_eq!(address.eval(&lookup, &[6])?, 0);
     Ok(())
 }
 ```
 
-此示例需要 `alloc` feature。有效域与地址公式分开是一个执行契约：先判断谓词，再算地址，最后访问引擎。仅检查最终地址落在存储范围内不够，因为越界逻辑坐标可能经过余数运算回绕到一个合法地址。
+This example needs the `alloc` feature. Separating the valid domain from the address formula is an execution contract: evaluate the predicate first, then compute the address, and finally access the engine. Checking only that the final address lies within storage is not enough, because an out-of-bounds logical coordinate may wrap through the remainder operation to a valid address.
 
-这里 `i=6` 已越出大小为 6 的逻辑域，地址表达式却回绕到 0。该断言只展示这个具体表达式在无效输入上的行为；一般的地址表达式在谓词为假时可能除零或溢出，不能依赖其求值结果。
+Here `i=6` is outside the logical domain of size 6, yet the address expression wraps to 0. This assertion only shows the behavior of this particular expression on invalid input; in general, an address expression may divide by zero or overflow when the predicate is false, and its evaluation result must not be relied on.
 
-### 10.3 包装布局的递归导出
+### 10.3 Recursive export of wrapper layouts
 
-各包装沿用 CPU 路径，同时扩展参数命名空间：
+Each wrapper follows its CPU path while extending the parameter namespace:
 
-| 包装 | 公式如何构造 | 主要前缀或参数 |
+| Wrapper | How the formula is built | Main prefixes or parameters |
 |---|---|---|
-| `Composition` | inner 地址代入 outer 的扩展公式，或导出规范化缓存 | `_inner`、`_outer`、`_normalized` |
-| `OffsetLayout` | 底层地址加偏移 | `_layout`、`_offset` |
-| `TileRest` | 余数选 tile，商选 rest，两侧相加 | `_tile`、`_rest` |
-| `LocalTile` | 局部编号解码后加全局原点，调用父坐标公式 | `_tile_a`、`_origin_a`、`_layout` |
-| `LocalPartition` | 将编号变为 `thread + i*threads` | `_thread`、`_threads`、`_layout` |
-| `Sliced` | 重建父坐标，减去切片原点地址 | `_selected_a`、`_layout` |
-| `SwizzledLayout` | 对底层地址树添加掩码、移位、XOR | 沿用底层参数 |
+| `Composition` | Substitute the inner address into outer's extended formula, or export the normalized cache | `_inner`, `_outer`, `_normalized` |
+| `OffsetLayout` | Underlying address plus offset | `_layout`, `_offset` |
+| `TileRest` | Remainder selects tile, quotient selects rest, and the two are added | `_tile`, `_rest` |
+| `LocalTile` | Decode the local index, add the global origin, and call the parent coordinate formula | `_tile_a`, `_origin_a`, `_layout` |
+| `LocalPartition` | Turn the index into `thread + i*threads` | `_thread`, `_threads`, `_layout` |
+| `Sliced` | Rebuild the parent coordinate and subtract the address of the slice origin | `_selected_a`, `_layout` |
+| `SwizzledLayout` | Add mask, shift, and XOR to the underlying address tree | Reuses the underlying parameters |
 
-表中 `a` 是轴编号占位。`GroupedLayout` 直接转发扁平叶子表达式，模式大小按分组求积。`IdentityLayout` 直接返回线性编号表达式，shape 参数只用于大小和有效域。
+In the table, `a` is a placeholder for the axis number. `GroupedLayout` forwards the flat leaf expressions directly, and mode sizes are products over the groups. `IdentityLayout` returns the linear index expression directly; the shape parameters are used only for the size and the valid domain.
 
-`TiledCopy::predicate_expr` 还会检查线程范围、值槽范围、循环尾槽，以及叠加原点后的二维全局范围。仅检查解码出的二维坐标不能代替完整谓词。
+`TiledCopy::predicate_expr` also checks the thread range, the value-slot range, cyclic tail slots, and the two-dimensional global range after adding the origin. Checking only the decoded two-dimensional coordinate cannot replace the full predicate.
 
-参数可重绑定不意味着任意数字都合法。调用方必须维持构造时的约束，例如线程数为正、划分仍整除、swizzle 输入非负。规范化组合的叶子结构可能依赖当前动态值，改变 outer/inner 后要重建组合与表达式。由具体值计算出的 complement、inverse、分组元数据也应随其输入重建，不能把已经派生的数组当成仍会自动追踪原输入的符号关系。
+Rebindable parameters do not mean that any number is valid. The caller must maintain the constraints from construction time, for example a positive thread count, partitions that still divide evenly, and non-negative swizzle input. The leaf structure of a normalized composition may depend on the current dynamic values; after changing outer/inner, rebuild the composition and the expressions. Complement, inverse, and grouping metadata computed from concrete values should also be rebuilt along with their inputs; an already derived array must not be treated as a symbolic relation that still tracks the original inputs automatically.
 
-公开 AST 可供后端逐节点生成代码，但本 crate 没有目标语言代码生成器、GPU 内存空间模型或自动向量化指令选择。
+The public AST lets backends generate code node by node, but this crate has no target-language code generator, GPU memory-space model, or automatic vectorized instruction selection.
 
-## 11. CPU 参考算法如何使用布局
+## 11. How the CPU reference algorithms use layouts
 
-`copy` 复用 `copy_if`，谓词恒为真；两端只要求逻辑大小相同。循环中的同一个 linear 分别经过源、目标布局求地址，因此能完成前面示例中的行列主序转换。`fill` 只写布局可达元素，`clear` 则用元素类型的 `Default` 值调用 `fill`。
+`copy` reuses `copy_if` with an always-true predicate; it only requires both sides to have the same logical size. In the loop, the same linear index goes through the source and destination layouts to compute addresses, which is how the earlier example performs the row-/column-major conversion. `fill` writes only elements reachable by the layout, and `clear` calls `fill` with the element type's `Default` value.
 
-`gemm` 与 `matmul` 都先验证三个 Tensor 是 rank 2，并检查 M/N/K 的一致性。循环顺序为外层 N、中层 M、内层 K，每次通过坐标入口取 A/B，所以 padding、转置布局和 offset 都可自然参与计算。
+`gemm` and `matmul` both first validate that the three Tensors have rank 2 and check that M/N/K are consistent. The loop order is N outer, M middle, K inner; A/B are read through the coordinate entry point each time, so padding, transposed layouts, and offsets participate naturally in the computation.
 
 ```rust
 use noodle_cute::{gemm, matmul, DynLayout, Tensor};
@@ -543,51 +543,51 @@ fn main() -> noodle_cute::Result<()> {
 }
 ```
 
-区别在于 `gemm` 读取原 C 作为累加初值并按 `(N,K)` 访问 B；`matmul` 从 `T::default()` 开始并按 `(K,N)` 访问 B。K 为零时，前者仍读写原 C，但不改变其值；后者写入默认零值。数值类型的加乘不经过布局层的受检 `add/mul`。
+The difference is that `gemm` reads the original C as the initial accumulator value and accesses B as `(N,K)`; `matmul` starts from `T::default()` and accesses B as `(K,N)`. When K is zero, the former still reads and writes the original C without changing its value; the latter writes default zero values. Addition and multiplication of the numeric type do not go through the layout layer's checked `add/mul`.
 
-这些函数不调用 `TiledMma` 或 `TiledCopy` 自动生成并行执行。它们提供可直接检查的标量结果，线程分工描述符则供其他执行层使用。
+These functions do not call `TiledMma` or `TiledCopy` to generate parallel execution automatically. They provide scalar results that can be checked directly; the thread assignment descriptors are for other execution layers.
 
-## 12. 错误、测试与复现方式
+## 12. Errors, tests, and reproduction
 
-### 12.1 错误发生在哪一层
+### 12.1 Which layer an error comes from
 
-| 错误 | 典型触发点 |
+| Error | Typical trigger |
 |---|---|
-| `InvalidShape` | 动态负长度；要求正数的 tile、线程数为零；不合法向量参数 |
-| `StructureMismatch` | 坐标 rank、选择器数量或模式结构不相容 |
-| `CoordinateOutOfBounds` / `AxisOutOfBounds` | 访问非法坐标，或查询不存在的轴/叶子 |
-| `Overflow` | 地址、大小或转换超出整数范围 |
-| `NonInjective` | 写入布局存在别名，或补布局不满足间隙要求 |
-| `NotSurjective` | 枚举逆所需的从零开始连续覆盖不成立 |
-| `NotDivisible` | 划分、组合或 atom/网格不满足整除条件 |
-| `Unsupported` | 当前操作无法处理该布局，例如枚举逆的表达式导出 |
-| `AddressOutOfBounds` | Tensor 最终地址越出引擎，或 swizzle 输入为负 |
-| `SizeMismatch` | copy 大小不同、矩阵维度不一致或原子 TV 大小不符 |
-| `CapacityExceeded` | 派生元数据超出固定数组容量 |
+| `InvalidShape` | Negative dynamic extent; zero tile or thread count where a positive value is required; invalid vector parameters |
+| `StructureMismatch` | Incompatible coordinate rank, selector count, or mode structure |
+| `CoordinateOutOfBounds` / `AxisOutOfBounds` | Accessing an invalid coordinate, or querying a nonexistent axis/leaf |
+| `Overflow` | Address, size, or conversion out of integer range |
+| `NonInjective` | Aliasing in a layout being written, or a complement that violates the gap requirement |
+| `NotSurjective` | The contiguous coverage starting from zero that an enumerated inverse requires does not hold |
+| `NotDivisible` | A partition, composition, or atom/grid violates the divisibility condition |
+| `Unsupported` | The current operation cannot handle the layout, e.g. expression export of an enumerated inverse |
+| `AddressOutOfBounds` | A Tensor's final address falls outside the engine, or a swizzle input is negative |
+| `SizeMismatch` | Different copy sizes, inconsistent matrix dimensions, or mismatched atom TV size |
+| `CapacityExceeded` | Derived metadata exceeds the fixed array capacity |
 
-表达式求值另用 `ExprError` 区分缺少参数、缺少坐标、溢出、除零和非法位移。参数有效性与内存可访问性是不同层面的约束，布局构造成功不意味着任意引擎都能容纳它。
+Expression evaluation separately uses `ExprError` to distinguish missing parameters, missing coordinates, overflow, division by zero, and invalid shifts. Parameter validity and memory accessibility are constraints at different levels; a successfully constructed layout does not mean that every engine can hold it.
 
-### 12.2 现有测试验证哪些数学事实
+### 12.2 Which mathematical facts the existing tests verify
 
-| 测试文件 | 主要证据 |
+| Test file | Main evidence |
 |---|---|
-| [core_contract.rs](../tests/core_contract.rs) | 静态类型与零大小性质；独立枚举地址；化简、求逆、划分、尾块 |
-| [cute_alignment_contract.rs](../tests/cute_alignment_contract.rs) | P1–P5 的结构与地址结果：cosize、扩展域、规范化、补布局、TV、分区及 TiledMMA |
-| [upstream_contract.rs](../tests/upstream_contract.rs) | 嵌套坐标、带符号步长、组合与补布局的字面地址表 |
-| [tensor_contract.rs](../tests/tensor_contract.rs) | 跨存储顺序复制、反向视图、广播写拒绝、子视图、矩阵结果与空域 |
-| [partition_contract.rs](../tests/partition_contract.rs) | 所有线程合起来恰好覆盖 tile；不活动槽位；显式网格与循环计划 |
-| [expression_contract.rs](../tests/expression_contract.rs) | `alloc` 下 CPU 地址与表达式一致；边界、短路、参数和错误 |
-| [sm89_swizzle.rs](../tests/sm89_swizzle.rs) | const 与受检 swizzle 一致；给定 bank 模型与 stage 布局 |
+| [core_contract.rs](../tests/core_contract.rs) | Static types and zero-size properties; independently enumerated addresses; simplification, inverse, partitioning, tail tiles |
+| [cute_alignment_contract.rs](../tests/cute_alignment_contract.rs) | Structural and address results for P1–P5: cosize, extended domain, normalization, complement, TV, partitioning, and TiledMMA |
+| [upstream_contract.rs](../tests/upstream_contract.rs) | Literal address tables for nested coordinates, signed strides, composition, and complement |
+| [tensor_contract.rs](../tests/tensor_contract.rs) | Copy across storage orders, reversed views, rejection of broadcast writes, subviews, matrix results, and empty domains |
+| [partition_contract.rs](../tests/partition_contract.rs) | All threads together cover the tile exactly; inactive slots; explicit grids and cyclic plans |
+| [expression_contract.rs](../tests/expression_contract.rs) | CPU addresses agree with expressions under `alloc`; bounds, short-circuiting, parameters, and errors |
+| [sm89_swizzle.rs](../tests/sm89_swizzle.rs) | const and checked swizzle agree; the given bank model and stage layout |
 
-源码文档还有编译失败测试，验证非法静态 shape、shape/stride 结构不匹配、非法 swizzle 和冲突的可写借用不能通过编译。这些测试证明类型边界，不是运行时 `Result` 分支。
+The source documentation also contains compile-fail tests verifying that invalid static shapes, shape/stride structure mismatches, invalid swizzles, and conflicting writable borrows do not compile. These tests prove type boundaries; they are not runtime `Result` branches.
 
-对齐测试中的期望值以仓库内的 C++ oracle 为依据；[cute_oracle/run.sh](../tests/cute_oracle/run.sh) 可以在提供 CUTLASS 头文件、CUDA 头文件及 C++ 编译器后重新生成输出。普通 Rust 测试读取的是已嵌入的期望值，不会运行这个脚本，也不证明 GPU 指令执行或性能。
+The expected values in the alignment tests are based on the C++ oracle in the repository; [cute_oracle/run.sh](../tests/cute_oracle/run.sh) can regenerate the output given the CUTLASS headers, the CUDA headers, and a C++ compiler. Ordinary Rust tests read the embedded expected values and do not run this script; they do not prove GPU instruction execution or performance.
 
-### 12.3 当前代码快照如何运行
+### 12.3 How to run the current code snapshot
 
-当前 [Cargo.toml](../Cargo.toml) 从工作区继承 `version` 和 `edition`，但本目录快照的仓库根没有工作区 `Cargo.toml`，也没有 README 所描述的 `rust-toolchain.toml`。直接运行 crate 的 Cargo manifest 会报“找不到工作区根”。这是现有构建上下文的缺失；本文没有修改它。
+The current [Cargo.toml](../Cargo.toml) inherits `version` and `edition` from the workspace, but the repository root of this directory snapshot has no workspace `Cargo.toml`, nor the `rust-toolchain.toml` described in the README. Running the crate's Cargo manifest directly reports "workspace root not found". This is a gap in the existing build context; this document does not change it.
 
-源码使用 `gca_min_const_items`、`gca_const_items`、`generic_const_items`，需要对应 nightly。本文在本机已有的 `nightly-2026-10-11` 下，通过临时独立 manifest 直接引用原源码和测试，离线完成验证。以下命令从包含 `noodle-cute` 的仓库根执行，可复现这种方式；临时版本号只用于验证构建：
+The source uses `gca_min_const_items`, `gca_const_items`, and `generic_const_items` and needs the corresponding nightly. This document was verified offline with the locally installed `nightly-2026-10-11`, through a temporary standalone manifest that references the original sources and tests directly. The following commands, run from the repository root that contains `noodle-cute`, reproduce this approach; the temporary version number is only for the verification build:
 
 ```sh
 cute_doc_check="$(mktemp -d)"
@@ -612,12 +612,12 @@ cargo +nightly-2026-10-11 test --manifest-path "$cute_doc_check/Cargo.toml" --of
 cargo +nightly-2026-10-11 test --manifest-path "$cute_doc_check/Cargo.toml" --offline --features alloc
 ```
 
-默认配置运行 58 个集成测试和 6 个源码文档测试；`alloc` 配置运行 70 个集成测试和相同的 6 个源码文档测试。本文另将上面的完整 Rust 示例提取到临时测试中验证；Cargo 默认不会自动测试独立 Markdown 文件里的代码块。
+The default configuration runs 58 integration tests and 6 source doctests; the `alloc` configuration runs 70 integration tests and the same 6 source doctests. This document additionally extracted the complete Rust examples above into temporary tests for verification; Cargo does not automatically test code blocks in standalone Markdown files.
 
-上面的 `Swizzle::new` 示例显式启用了调用其类型约束所需的两项 GCA feature；其余示例使用具体常量参数，无需额外 feature。调用方若直接在泛型约束或类型中使用 `gca!`，也需启用相应 GCA feature；自行声明泛型 const item 还需 `generic_const_items`。
+The `Swizzle::new` example above explicitly enables the two GCA features needed to call its type bounds; the other examples use concrete constant arguments and need no extra features. Callers that use `gca!` directly in generic bounds or types must also enable the corresponding GCA features; declaring their own generic const items additionally requires `generic_const_items`.
 
-## 13. 阅读和修改时应保持的对应关系
+## 13. Correspondences to keep when reading and modifying
 
-先从一个 `Layout::index` 的输入追到引擎读写，可以看清数学 §3 与 §15 如何连接；再读 `divide_modes → inner_partition → Tensor::subview`，可以看清分块始终是在重组索引。需要理解线程所有权时，先看直接的 `TiledCopy::linear_index`，再看由 product 和 inverse 推导的 `make_layout_tv`，最后进入 `TiledMmaLayout::thrfrg`。
+Tracing the input of one `Layout::index` through to the engine read/write shows how math §3 and §15 connect; then reading `divide_modes → inner_partition → Tensor::subview` shows that tiling is always a regrouping of indices. To understand thread ownership, first look at the direct `TiledCopy::linear_index`, then at `make_layout_tv`, which is derived from product and inverse, and finally at `TiledMmaLayout::thrfrg`.
 
-修改实现时，应把三个量分别核对：坐标结构、有限有效域、最终地址。相同的地址集合不保证逻辑编号顺序相同，有限域等价也不保证扩展域等价。涉及表达式导出时，再核对有效域谓词与 CPU 路径，并同时更新参数绑定规则。配套[数学模型](mathematical-model.md)中的反例和本文链接的契约测试给出了这些边界的具体判据。
+When modifying the implementation, check three quantities separately: the coordinate structure, the finite valid domain, and the final address. The same set of addresses does not guarantee the same logical index order, and equivalence on the finite domain does not guarantee equivalence on the extended domain. When expression export is involved, also check the valid-domain predicates against the CPU path and update the parameter binding rules at the same time. The counterexamples in the companion [mathematical model](mathematical-model.md) and the contract tests linked in this document give concrete criteria for these boundaries.
