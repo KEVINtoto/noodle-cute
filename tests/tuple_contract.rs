@@ -4,7 +4,7 @@
 //! that tuple operations preserve leaf order, types, and static values.
 
 use noodle_cute::int::{DynInt, Int};
-use noodle_cute::tuple::{Append, Flatten, Item, Product};
+use noodle_cute::tuple::{Append, Flatten, Group, Item, Product, Select, Take};
 use noodle_cute::{Error, IntTuple, Nil, int_tuple};
 
 #[test]
@@ -167,6 +167,47 @@ fn product_typed_degrades_to_dynint_once_any_leaf_is_dynamic() {
     let mixed = int_tuple![Int::<2>, DynInt(3), Int::<4>];
     let total: DynInt = mixed.product_typed();
     assert_eq!(total, DynInt(24));
+}
+
+#[test]
+fn product_typed_follows_static_zero_and_width_rules() {
+    // integral_constant.hpp: `_0 * x` is a static `_0` even for a runtime `x`.
+    let zero: Int<0> = int_tuple![DynInt(5), (Int::<0>, 7i32)].product_typed();
+    assert_eq!(zero.value(), 0);
+    // Runtime `i32` leaves stay 32-bit; any 64-bit runtime leaf widens the result.
+    let narrow: i32 = int_tuple![Int::<2>, (3i32, 4i32)].product_typed();
+    assert_eq!(narrow, 24);
+    let wide: DynInt = int_tuple![2i32, 3isize].product_typed();
+    assert_eq!(wide, DynInt(6));
+}
+
+// tuple_algorithms.hpp: take<B,E>, select<I...>, and group<B,E> on tuples of any elements.
+#[test]
+fn take_select_and_group_rearrange_top_level_modes() {
+    let t = int_tuple![Int::<1>, (Int::<2>, Int::<3>), 4i32, DynInt(5)];
+    assert_eq!(
+        Take::<1, 3>::take(&t),
+        int_tuple![(Int::<2>, Int::<3>), 4i32]
+    );
+    assert_eq!(Take::<2, 2>::take(&t), Nil);
+    assert_eq!(Take::<0, 4>::take(&t), t);
+
+    assert_eq!(
+        t.select(int_tuple![Int::<3>, Int::<0>, Int::<0>]),
+        int_tuple![DynInt(5), Int::<1>, Int::<1>]
+    );
+    assert_eq!(Int::<7>.select(int_tuple![Int::<0>]), int_tuple![Int::<7>]);
+
+    assert_eq!(
+        Group::<1, 3>::group(&t),
+        int_tuple![Int::<1>, ((Int::<2>, Int::<3>), 4i32), DynInt(5)]
+    );
+    assert_eq!(
+        Group::<0, 4>::group(&t),
+        int_tuple![(Int::<1>, (Int::<2>, Int::<3>), 4i32, DynInt(5))]
+    );
+    // An empty range inserts no mode.
+    assert_eq!(Group::<2, 2>::group(&t), t);
 }
 
 #[test]

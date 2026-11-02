@@ -1,4 +1,6 @@
 //! CuTe divide 的全静态、混合与运行时契约。
+#![feature(min_adt_const_params, macro_metavar_expr)]
+
 use noodle_cute::Error;
 use noodle_cute::algebra::*;
 use noodle_cute::layout::{AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutMap, MAX_RANK};
@@ -14,13 +16,14 @@ type ModePairs<const A: isize, const B: isize, const C: isize, const D: isize> =
 
 #[test]
 fn static_single_layout_division_is_a_const_layout() {
-    const R: Layout<Pair<Int<3>, Int<4>>, Pair<Int<2>, Int<6>>> = divided::<LOGICAL, _, _>(
-        Layout {
-            shape: Int::<12>,
-            stride: Int::<2>,
-        },
-        Int::<3>,
-    );
+    const R: Layout<Pair<Int<3>, Int<4>>, Pair<Int<2>, Int<6>>> =
+        divided::<{ Grouping::Logical }, _, _>(
+            Layout {
+                shape: Int::<12>,
+                stride: Int::<2>,
+            },
+            Int::<3>,
+        );
     assert_eq!(R.size(), Ok(12));
     for rest in 0..4 {
         for tile in 0..3 {
@@ -359,9 +362,12 @@ fn static_grouping_entries_are_const() {
         stride: stride![Int::<1>, Int::<8>],
     };
     const TILER: T = shape![Int::<2>, Int::<3>];
-    const Z: TypedDivided<A, T, ZIPPED> = <TypedDivided<A, T, ZIPPED> as StaticValue>::VALUE;
-    const F: TypedDivided<A, T, FLAT> = divided::<FLAT, _, _>(INPUT, TILER);
-    const TL: TypedDivided<A, T, TILED> = divided::<TILED, _, _>(INPUT, TILER);
+    const Z: TypedDivided<A, T, { Grouping::Zipped }> =
+        <TypedDivided<A, T, { Grouping::Zipped }> as StaticValue>::VALUE;
+    const F: TypedDivided<A, T, { Grouping::Flat }> =
+        divided::<{ Grouping::Flat }, _, _>(INPUT, TILER);
+    const TL: TypedDivided<A, T, { Grouping::Tiled }> =
+        divided::<{ Grouping::Tiled }, _, _>(INPUT, TILER);
     assert_eq!(Z.shape, shape![(Int::<2>, Int::<3>), (Int::<4>, Int::<2>)]);
     assert_eq!(F.shape, shape![Int::<2>, Int::<3>, Int::<4>, Int::<2>]);
     assert_eq!(TL.shape, shape![(Int::<2>, Int::<3>), Int::<4>, Int::<2>]);
@@ -381,8 +387,8 @@ fn mixed_division_checks_shapes_strict_divisibility_and_composition() {
 fn typed_division_can_return_more_than_max_rank_leaves() {
     macro_rules! broadcast {
         ($($slot:literal),*) => { Layout {
-            shape: shape![$(Int::<{2 + 0 * $slot}>),*],
-            stride: stride![$(Int::<{0 * $slot}>),*],
+            shape: shape![$( ${ignore($slot)} Int::<2> ),*],
+            stride: stride![$( ${ignore($slot)} Int::<0> ),*],
         } };
     }
     let tile = broadcast!(
@@ -390,7 +396,7 @@ fn typed_division_can_return_more_than_max_rank_leaves() {
         25, 26, 27, 28, 29, 30, 31, 32
     );
     let input = Layout::new(Int::<7>, Int::<1>).unwrap();
-    let result = divided::<FLAT, _, _>(input, tile);
+    let result = divided::<{ Grouping::Flat }, _, _>(input, tile);
     assert_eq!(result.rank(), MAX_RANK + 2);
     assert_eq!(result.as_flat_layout(), Err(Error::CapacityExceeded));
     assert_eq!(result.index(1isize << 33), Ok(1));

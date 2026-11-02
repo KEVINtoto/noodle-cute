@@ -32,16 +32,19 @@
 //! const C: TypedDivided<Layout<DynInt, Int<1>>, Int<2>> = StaticValue::VALUE;
 //! ```
 
+use crate::basis::StrideKind;
 use crate::layout::{
-    AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutBuilder, LayoutMap, LayoutParts, Shape,
+    AffineLayoutMap, ComposedLayout, DynLayout, GroupedLayout, Layout, LayoutBuilder, LayoutMap,
+    LayoutParts, Shape, StrideOf,
 };
+use crate::tuple::Product;
 use crate::tuple::{Flatten, Item};
-use crate::{Error, Result};
+use crate::{Bool, Error, Result};
 
 use super::coalesce::{CoalesceFold, FinishCoalesce};
 use super::complement::{complement, complement_shape};
 use super::composition::{Composition, composition, composition_layout};
-use super::typed::{Binary, Joined, join};
+use super::typed::{Arrange, Arranged, Binary, Joined, Kind, Transform, Transformed, join};
 use super::{
     CoalescedLayout, Complement, Grouping, TileRest, TypedComplement, TypedCompose,
     TypedComposition,
@@ -336,7 +339,7 @@ pub trait CoalesceTarget {
 impl<S, D> CoalesceTarget for Layout<S, D>
 where
     S: Shape + Flatten,
-    D: Item<Profile = S::Profile> + Flatten,
+    D: StrideOf<S> + Flatten,
     Layout<S::Output, D::Output>: CoalesceFold,
     <Layout<S::Output, D::Output> as CoalesceFold>::Output: FinishCoalesce,
     CoalescedLayout<S, D>: LayoutParts,
@@ -364,9 +367,150 @@ where
     }
 }
 
-super::typed::operation_api!(TypedDivide, TypedDivided, DivideOp, divide_typed;
-    (LOGICAL, logical_divide),
-    (ZIPPED, zipped_divide),
-    (TILED, tiled_divide),
-    (FLAT, flat_divide),
+super::typed::operation_api!(
+    #[diagnostic::on_unimplemented(
+        message = "layout `{Self}` cannot be divided by `{T}` with grouping {GROUPING}",
+        label = "unsupported typed division",
+        note = "use a tiler compatible with the layout's modes and choose a Grouping variant"
+    )]
+    TypedDivide, TypedDivided, Output, const GROUPING: Grouping = Grouping::Logical,
+    DivideOp, Kind<GROUPING>, divide_typed;
+    (Grouping::Logical, logical_divide),
+    (Grouping::Zipped, zipped_divide),
+    (Grouping::Tiled, tiled_divide),
+    (Grouping::Flat, flat_divide),
 );
+
+//-----------------------------------------------------------------------------
+// Identity layouts: single-leaf modes with basis strides.
+
+/// Divides basis-strided modes through typed composition and an integer complement.
+pub struct BasisDivideOp;
+
+type BasisInner<T, S> = Joined<T, TypedComplement<T, S>>;
+
+impl<S, D, T> Binary<Layout<S, D>, T> for BasisDivideOp
+where
+    S: Product + Clone,
+    T: LayoutMap + Clone + LayoutParts + Complement<<S as Product>::Output>,
+    TypedComplement<T, <S as Product>::Output>: LayoutParts,
+    Layout<S, D>: TypedCompose<BasisInner<T, <S as Product>::Output>>,
+    TypedComposition<Layout<S, D>, BasisInner<T, <S as Product>::Output>>: LayoutParts,
+{
+    type Output = TypedComposition<Layout<S, D>, BasisInner<T, <S as Product>::Output>>;
+    fn run(layout: Layout<S, D>, tiler: T) -> Result<Self::Output> {
+        if tiler.size()? == 0 {
+            return Err(Error::InvalidShape);
+        }
+        let rest = tiler
+            .clone()
+            .complement_typed(layout.shape.clone().product_typed())?;
+        layout.compose(join(tiler, rest))
+    }
+}
+
+const BASIS<D: StrideKind>: bool = D::BASIS;
+
+/// CuTe `zipped_divide(layout, tiler)` for every layout a tensor can hold.
+///
+/// Integer-strided layouts use [`TypedDivide`] with [`Grouping::Zipped`] and
+/// validate the result. Basis layouts use the same tiler/complement construction
+/// with coordinate-valued composition; they have no integer address range.
+///
+/// ```
+/// use noodle_cute::algebra::ZippedDivide;
+/// use noodle_cute::basis::make_identity_layout;
+/// use noodle_cute::{DynInt, Int, shape};
+///
+/// let identity = make_identity_layout(shape![DynInt(10), DynInt(8)]);
+/// let tiled = ZippedDivide::zipped_divide(&identity, shape![Int::<4>, Int::<4>])?;
+/// // ((4, 4), (3, 2)): the tail tile of the first mode reaches row 11, not column 1.
+/// assert_eq!(tiled.crd2idx(shape![(3i32, 0i32), (2i32, 0i32)]).0, 11);
+/// # Ok::<(), noodle_cute::Error>(())
+/// ```
+pub trait ZippedDivide<T> {
+    /// The divided layout `((tile...), (rest...))`, of the same kind as `Self`.
+    type Output;
+    /// Divides by `tiler` and zips the tile and rest modes.
+    fn zipped_divide(&self, tiler: T) -> Result<Self::Output>;
+}
+
+pub trait ZipKind<S, D, T, const G: Grouping = { Grouping::Zipped }> {
+    type Output: LayoutParts;
+    fn run(layout: Layout<S, D>, tiler: T) -> Result<Self::Output>;
+}
+
+impl<S, D, T, const G: Grouping> ZipKind<S, D, T, G> for Bool<false>
+where
+    Layout<S, D>: TypedDivide<T, G>,
+    TypedDivided<Layout<S, D>, T, G>: LayoutParts,
+{
+    type Output = TypedDivided<Layout<S, D>, T, G>;
+    fn run(layout: Layout<S, D>, tiler: T) -> Result<Self::Output> {
+        layout.divide_typed(tiler)
+    }
+}
+
+impl<S, D, T, const G: Grouping> ZipKind<S, D, T, G> for Bool<true>
+where
+    S: Item,
+    Layout<S, D>: Transform<T, BasisDivideOp>,
+    Kind<G>: Arrange<Transformed<Layout<S, D>, T, BasisDivideOp>, T>,
+{
+    type Output = Arranged<Layout<S, D>, T, BasisDivideOp, Kind<G>>;
+    fn run(layout: Layout<S, D>, tiler: T) -> Result<Self::Output> {
+        layout.shape.product()?;
+        Ok(<Kind<G> as Arrange<_, T>>::arrange(
+            layout.transform(tiler)?,
+        ))
+    }
+}
+
+type Zipped<S, D, T> = <Bool<{ BASIS::<D> }> as ZipKind<S, D, T>>::Output;
+
+impl<S: Clone, D: Clone + StrideKind, T> ZippedDivide<T> for Layout<S, D>
+where
+    Bool<{ BASIS::<D> }>: ZipKind<S, D, T>,
+{
+    type Output =
+        Layout<<Zipped<S, D, T> as LayoutParts>::Shape, <Zipped<S, D, T> as LayoutParts>::Stride>;
+    fn zipped_divide(&self, tiler: T) -> Result<Self::Output> {
+        Ok(<Bool<{ BASIS::<D> }> as ZipKind<S, D, T>>::run(self.clone(), tiler)?.into_layout())
+    }
+}
+
+// layout_composed.hpp: zipped_divide(ComposedLayout) divides `layout_b`.
+impl<A: Clone, O: Clone, B: ZippedDivide<T>, T> ZippedDivide<T> for ComposedLayout<A, O, B> {
+    type Output = ComposedLayout<A, O, B::Output>;
+    fn zipped_divide(&self, tiler: T) -> Result<Self::Output> {
+        self.map_b(|b| b.zipped_divide(tiler))
+    }
+}
+
+/// CuTe `logical_divide(layout, tiler)` for plain and composed layouts.
+///
+/// A plain layout uses [`TypedDivide`] with [`Grouping::Logical`]; a composed
+/// layout divides `layout_b`, as `layout_composed.hpp` does.
+pub trait LogicalDivide<T> {
+    /// The divided layout.
+    type Output;
+    /// Divides by `tiler`, keeping `(tile, rest)` within each mode.
+    fn logical_divide_by(&self, tiler: T) -> Result<Self::Output>;
+}
+
+impl<S: Clone, D: Clone + StrideKind, T> LogicalDivide<T> for Layout<S, D>
+where
+    Bool<{ BASIS::<D> }>: ZipKind<S, D, T, { Grouping::Logical }>,
+{
+    type Output = <Bool<{ BASIS::<D> }> as ZipKind<S, D, T, { Grouping::Logical }>>::Output;
+    fn logical_divide_by(&self, tiler: T) -> Result<Self::Output> {
+        <Bool<{ BASIS::<D> }> as ZipKind<S, D, T, { Grouping::Logical }>>::run(self.clone(), tiler)
+    }
+}
+
+impl<A: Clone, O: Clone, B: LogicalDivide<T>, T> LogicalDivide<T> for ComposedLayout<A, O, B> {
+    type Output = ComposedLayout<A, O, B::Output>;
+    fn logical_divide_by(&self, tiler: T) -> Result<Self::Output> {
+        self.map_b(|b| b.logical_divide_by(tiler))
+    }
+}

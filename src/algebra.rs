@@ -10,51 +10,58 @@
 use crate::int::{add, mul};
 use crate::layout::{GroupedLayout, LayoutBuilder, LayoutMap, is_injective_by_enumeration};
 use crate::{Error, Result};
+use core::marker::ConstParamTy;
 
 mod coalesce;
+mod common;
 mod complement;
+mod composed;
 mod composition;
 mod divide;
 mod inverse;
+mod modes;
 mod product;
 mod typed;
 
-pub use coalesce::CoalescedLayout;
+pub use coalesce::{CoalesceMode, CoalescedLayout, coalesce_desc};
+pub(crate) use common::PadTo;
+pub use common::{
+    MaxCommonLayout, MaxCommonVector, NonSwizzlePortion, TileToShape, max_common_vector,
+};
 pub use complement::{
-    Complement, TypedComplement, complement, complement_extended, complement_shape,
+    Complement, ComplementMode, TypedComplement, complement, complement_desc, complement_extended,
+    complement_shape, filter_desc,
 };
 pub use composition::{
-    Composition, TypedCompose, TypedComposition, composition, composition_layout,
+    Composition, TypedCompose, TypedComposition, compose_desc, compose_leaf_desc, composition,
+    composition_layout,
 };
 pub use divide::{
-    Divided, TypedDivide, TypedDivided, flat_divide, flat_divide_modes, logical_divide,
-    logical_divide_modes, tiled_divide, tiled_divide_modes, zipped_divide, zipped_divide_modes,
+    Divided, LogicalDivide, TypedDivide, TypedDivided, ZippedDivide, flat_divide,
+    flat_divide_modes, logical_divide, logical_divide_modes, tiled_divide, tiled_divide_modes,
+    zipped_divide, zipped_divide_modes,
 };
 pub use inverse::{
-    Inverse, TypedInverse, TypedInvert, dense_left_inverse, dense_right_inverse, left_inverse,
-    right_inverse,
+    Inverse, InverseSide, TypedInverse, TypedInvert, dense_left_inverse, dense_right_inverse,
+    left_inverse, right_inverse,
 };
+pub use modes::{CoalesceProfile, ComposeTile, Zip2};
 pub use product::{
     Produced, TypedProduct, TypedProductLayout, blocked_product, flat_product, flat_product_modes,
     logical_product, logical_product_modes, raked_product, tiled_product, tiled_product_modes,
     zipped_product, zipped_product_modes,
 };
 
-/// `KIND` of [`TypedDivided`] and [`TypedProductLayout`]: two groups `(tile, rest)` (CuTe `logical_*`).
-pub const LOGICAL: u8 = 0;
-/// `KIND` for CuTe `zipped_*`: `((tiles...), (rests...))`.
-pub const ZIPPED: u8 = 1;
-/// `KIND` for CuTe `tiled_*`: `((tiles...), rest0, rest1, ...)`.
-pub const TILED: u8 = 2;
-/// `KIND` for CuTe `flat_*`: `(tile0, tile1, ..., rest0, rest1, ...)`.
-pub const FLAT: u8 = 3;
-/// `KIND` for CuTe `blocked_product`: mode `m` is `(block_m, rest_m)`.
-pub const BLOCKED: u8 = 4;
-/// `KIND` for CuTe `raked_product`: mode `m` is `(rest_m, block_m)`.
-pub const RAKED: u8 = 5;
-
 /// Coordinate hierarchy selected by the divide/product variants.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Also selects the const parameter of [`TypedDivide`] and [`TypedDivided`].
+///
+/// ```
+/// use noodle_cute::{Int, StaticValue, algebra::{Grouping, TypedDivided}, layout::{Layout, LayoutMap}};
+/// const Z: TypedDivided<Layout<Int<8>, Int<1>>, Int<2>, { Grouping::Zipped }> = StaticValue::VALUE;
+/// assert_eq!(Z.index(7), Ok(7));
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy)]
 pub enum Grouping {
     /// Retains two top-level groups: `(tile, rest)`. For per-axis division, retains the nested
     /// `(tile, rest)` hierarchy within each original axis.
@@ -65,6 +72,34 @@ pub enum Grouping {
     Tiled,
     /// Flattens all axes with tiles first followed by rests: `(tile0, tile1, ..., rest0, rest1, ...)`.
     Flat,
+}
+
+/// Type-level product selection, including the two mode-wise product orders.
+///
+/// Used by [`TypedProduct`] and [`TypedProductLayout`]. Runtime grouped products
+/// continue to use [`Grouping`]; blocked/raked products have separate functions.
+///
+/// ```
+/// use noodle_cute::{Int, StaticValue, algebra::{ProductKind, TypedProductLayout}, layout::{Layout, LayoutMap}};
+/// type Block = Layout<Int<8>, Int<1>>;
+/// type Tiler = Layout<Int<2>, Int<1>>;
+/// const P: TypedProductLayout<Block, Tiler, { ProductKind::Blocked }> = StaticValue::VALUE;
+/// assert_eq!(P.index(15), Ok(15));
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy)]
+pub enum ProductKind {
+    /// Retains the logical `(block, rest)` hierarchy.
+    Logical,
+    /// Groups block modes together and rest modes together.
+    Zipped,
+    /// Groups block modes and exposes rest modes individually.
+    Tiled,
+    /// Exposes block modes followed by rest modes.
+    Flat,
+    /// Pairs each block mode with its rest mode: `(block_m, rest_m)`.
+    Blocked,
+    /// Pairs each rest mode with its block mode: `(rest_m, block_m)`.
+    Raked,
 }
 
 /// Composite layout combining a tile layout and a rest layout according to a [`Grouping`].

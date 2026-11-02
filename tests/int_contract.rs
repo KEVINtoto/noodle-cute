@@ -84,6 +84,8 @@ fn integer_trait_distinguishes_compile_time_constants_from_runtime_values() {
     assert_eq!(DynInt(7).value(), 7);
     assert_eq!(<isize as Integer>::STATIC, None);
     assert_eq!(Integer::value(7isize), 7);
+    assert_eq!(<i32 as Integer>::STATIC, None);
+    assert_eq!(Integer::value(-7i32), -7);
 }
 
 #[test]
@@ -100,6 +102,8 @@ fn static_leaves_are_zero_sized_while_dynamic_leaves_carry_a_machine_word() {
     assert_eq!(size_of::<Int<42>>(), 0);
     assert_eq!(size_of::<DynInt>(), size_of::<isize>());
     assert_eq!(size_of_val(&Int::<42>), 0);
+    // A 32-bit leaf halves the storage of a 64-bit runtime value.
+    assert_eq!(size_of::<i32>(), 4);
 }
 
 #[test]

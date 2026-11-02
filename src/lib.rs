@@ -19,6 +19,12 @@
 
 #![no_std]
 #![feature(
+    const_trait_impl,
+    const_try,
+    decl_macro,
+    trait_alias,
+    adt_const_params,
+    min_adt_const_params,
     gca_min_const_items,
     gca_const_items,
     gca_macroless_args,
@@ -27,13 +33,21 @@
 #![allow(incomplete_features)]
 
 pub mod algebra;
+pub mod algorithm;
+pub mod atom;
+pub mod basis;
+pub mod coord;
 pub mod int;
 pub mod layout;
+pub mod numeric;
+pub mod pointer;
 mod slice;
+pub mod swizzle;
+pub mod tensor;
 pub mod tuple;
 
 pub use int::{DynInt, Int, Integer};
-pub use layout::Layout;
+pub use layout::{Layout, LayoutDesc, StaticDesc};
 pub use slice::Slice;
 pub use tuple::{IntTuple, Nil};
 
@@ -113,6 +127,11 @@ pub(crate) use marker::{Bool, True};
 ///
 /// Unlike the checked methods, a constant read this way skips the final runtime size and
 /// address-range validation; any static arithmetic error is rejected at compile time instead.
+#[diagnostic::on_unimplemented(
+    message = "type `{Self}` does not determine a constant value",
+    label = "runtime values cannot be read through StaticValue",
+    note = "use Int<N> leaves for type-determined constants; DynInt and isize store runtime values"
+)]
 pub trait StaticValue: Copy {
     /// The value encoded by the type.
     const VALUE: Self;

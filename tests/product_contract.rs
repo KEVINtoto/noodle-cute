@@ -1,4 +1,6 @@
 //! CuTe product 的全静态、混合与运行时契约。
+#![feature(min_adt_const_params, macro_metavar_expr)]
+
 use noodle_cute::Error;
 use noodle_cute::algebra::*;
 use noodle_cute::layout::{AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutMap, MAX_RANK};
@@ -14,13 +16,14 @@ type ModePairs<const A: isize, const B: isize, const C: isize, const D: isize> =
 
 #[test]
 fn static_products_are_const_layouts_with_the_terminal_repetition_stride() {
-    const R: Layout<Pair<Int<2>, Int<3>>, Pair<Int<1>, Int<2>>> = producted::<LOGICAL, _, _>(
-        Layout {
-            shape: Int::<2>,
-            stride: Int::<1>,
-        },
-        Int::<3>,
-    );
+    const R: Layout<Pair<Int<2>, Int<3>>, Pair<Int<1>, Int<2>>> =
+        producted::<{ ProductKind::Logical }, _, _>(
+            Layout {
+                shape: Int::<2>,
+                stride: Int::<1>,
+            },
+            Int::<3>,
+        );
     assert_eq!(R.index(5), Ok(5));
     let mixed = Layout::new(DynInt(2), Int::<1>)
         .unwrap()
@@ -54,9 +57,9 @@ fn rank_sensitive_static_products_pad_unit_modes_and_zip_in_order() {
         stride: Int::<1>,
     };
     const BLOCK: Layout<ModePairs<2, 4, 3, 1>, ModePairs<1, 6, 2, 0>> =
-        producted::<BLOCKED, _, _>(B, T);
+        producted::<{ ProductKind::Blocked }, _, _>(B, T);
     const RAKE: Layout<ModePairs<4, 2, 1, 3>, ModePairs<6, 1, 0, 2>> =
-        producted::<RAKED, _, _>(B, T);
+        producted::<{ ProductKind::Raked }, _, _>(B, T);
     assert_eq!(BLOCK.size(), Ok(24));
     assert_eq!(RAKE.size(), Ok(24));
     assert_eq!(BLOCK, B.blocked_product(T).unwrap());
@@ -417,10 +420,12 @@ fn static_product_grouping_entries_are_const() {
         shape: Int::<3>,
         stride: Int::<2>,
     };
-    const Z: TypedProductLayout<A, T, ZIPPED> =
-        <TypedProductLayout<A, T, ZIPPED> as StaticValue>::VALUE;
-    const F: TypedProductLayout<A, T, FLAT> = producted::<FLAT, _, _>(A, T);
-    const TL: TypedProductLayout<A, T, TILED> = producted::<TILED, _, _>(A, T);
+    const Z: TypedProductLayout<A, T, { ProductKind::Zipped }> =
+        <TypedProductLayout<A, T, { ProductKind::Zipped }> as StaticValue>::VALUE;
+    const F: TypedProductLayout<A, T, { ProductKind::Flat }> =
+        producted::<{ ProductKind::Flat }, _, _>(A, T);
+    const TL: TypedProductLayout<A, T, { ProductKind::Tiled }> =
+        producted::<{ ProductKind::Tiled }, _, _>(A, T);
     assert_eq!(Z.shape, shape![Int::<4>, Int::<3>]);
     assert_eq!(Z.stride, stride![Int::<2>, Int::<8>]);
     assert_eq!(F.shape, shape![Int::<4>, Int::<3>]);
@@ -505,15 +510,15 @@ fn mixed_product_errors_and_zero_tilers_are_checked() {
 fn static_product_can_return_more_than_max_rank_leaves() {
     macro_rules! broadcast {
         ($($slot:literal),*) => { Layout {
-            shape: shape![$(Int::<{2 + 0 * $slot}>),*],
-            stride: stride![$(Int::<{0 * $slot}>),*],
+            shape: shape![$( ${ignore($slot)} Int::<2> ),*],
+            stride: stride![$( ${ignore($slot)} Int::<0> ),*],
         } };
     }
     let tiler = broadcast!(
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
         25, 26, 27, 28, 29, 30, 31, 32
     );
-    let result = producted::<FLAT, _, _>(
+    let result = producted::<{ ProductKind::Flat }, _, _>(
         Layout {
             shape: Int::<2>,
             stride: Int::<1>,
@@ -534,7 +539,7 @@ fn product_scalar_layout_and_empty_tuple_tilers_keep_distinct_profiles() {
     assert_eq!(scalar.shape, shape![Int::<2>, ()]);
     assert_eq!(block.logical_product(Nil).unwrap(), block);
     let empty = Layout::new(Nil, Nil).unwrap();
-    let rank_product: Layout<Nil, Nil> = producted::<BLOCKED, _, _>(empty, empty);
+    let rank_product: Layout<Nil, Nil> = producted::<{ ProductKind::Blocked }, _, _>(empty, empty);
     assert_eq!(rank_product.size(), Ok(1));
     assert_eq!(rank_product.rank(), 0);
 }

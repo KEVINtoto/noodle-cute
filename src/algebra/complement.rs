@@ -4,19 +4,43 @@
 //! points change structure only from static facts; runtime entry points sort and simplify by
 //! the current values.
 
+use core::marker::ConstParamTy;
 use core::ops::{Div, Mul};
 
-use crate::int::{Integer, ceil_div, checked_product, mul};
+use crate::int::{Integer, ceil_div, mul};
 use crate::layout::{
-    AffineLayoutMap, DynLayout, Layout, LayoutBuilder, LayoutMap, LayoutParts, MAX_RANK, Shape,
+    AffineLayoutMap, DynLayout, Layout, LayoutDesc, LayoutMap, LayoutParts, MAX_RANK, Shape,
+    StrideOf,
 };
 use crate::tuple::{Append, Flatten, Item, Product, Unwrap};
 use crate::{Bool, Error, Int, IntTuple, Nil, Result, True};
 
-use super::coalesce::{CoalesceFold, FinishCoalesce, Prepend};
+use super::coalesce::{CoalesceFold, CoalesceMode, FinishCoalesce, Prepend, coalesce_desc};
 use super::composition::{ComposeProduct, StepNumber, ZERO_STRIDE};
 
-fn complement_step(s: isize, d: isize, current: isize) -> Result<(isize, isize)> {
+/// Selects a cotarget complement or the complement's extended repetition mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy)]
+pub enum ComplementMode {
+    /// Complements the supplied cotarget and coalesces the result.
+    Standard,
+    /// Keeps the terminal `1:repetition-stride` mode without a cotarget.
+    Extended,
+}
+
+/// CuTe `filter(layout)` on a [`LayoutDesc`]: treats stride-0 leaves as size 1, then coalesces.
+pub const fn filter_desc(desc: &LayoutDesc) -> Result<LayoutDesc> {
+    let mut zeros = *desc;
+    let mut a = 0;
+    while a < zeros.rank {
+        if zeros.strides[a] == 0 {
+            zeros.shapes[a] = 1;
+        }
+        a += 1;
+    }
+    coalesce_desc(&zeros, CoalesceMode::Standard)
+}
+
+const fn complement_step(s: isize, d: isize, current: isize) -> Result<(isize, isize)> {
     if d < 0 {
         return Err(Error::Unsupported);
     }
@@ -24,46 +48,171 @@ fn complement_step(s: isize, d: isize, current: isize) -> Result<(isize, isize)>
     if gap == 0 {
         return Err(Error::NonInjective);
     }
-    Ok((gap, mul(s, d)?))
+    let next = match mul(s, d) {
+        Ok(v) => v,
+        Err(e) => return Err(e),
+    };
+    Ok((gap, next))
+}
+
+struct PrefixResult {
+    prefix: LayoutDesc,
+    current: isize,
 }
 
 // Common prefix logic of CuTe `detail::complement`: filters unit modes, sorts stably by stride,
 // and fills in address gaps one by one.
-// Returns the prefix leaves of the complement layout along with the next stride; returns `None`
-// when only `1:0` remains after filtering (CuTe special case).
-fn complement_prefix<L: AffineLayoutMap>(layout: &L) -> Result<Option<(LayoutBuilder, isize)>> {
-    let flat = layout.as_flat_layout()?;
-    // A zero extent makes CuTe's next stride zero, and its cotarget ceil_div then divides by it.
-    if flat.size()? == 0 {
+const fn complement_prefix_desc(desc: &LayoutDesc) -> Result<Option<PrefixResult>> {
+    let size = match desc.size() {
+        Ok(s) => s,
+        Err(e) => return Err(e),
+    };
+    if size == 0 {
         return Err(Error::Unsupported);
     }
-    let flat = flat.filter()?;
-    if flat.rank() == 1 && flat.leaf_stride(0)? == 0 {
+    let flat = match filter_desc(desc) {
+        Ok(f) => f,
+        Err(e) => return Err(e),
+    };
+    if flat.rank == 1 && flat.strides[0] == 0 {
         return Ok(None);
     }
     let mut order = [0usize; MAX_RANK];
-    for (a, slot) in order.iter_mut().enumerate().take(flat.rank()) {
-        if flat.leaf_stride(a)? < 0 {
+    let mut a = 0;
+    while a < flat.rank {
+        if flat.strides[a] < 0 {
             return Err(Error::Unsupported);
         }
-        *slot = a;
+        order[a] = a;
+        a += 1;
     }
-    // Unstable sort by key (stride, index) is equivalent to CuTe's stable sort without allocations.
-    order[..flat.rank()].sort_unstable_by_key(|&a| (flat.strides()[a], a));
-    let mut prefix = LayoutBuilder::new();
-    let mut current = 1;
-    for &a in &order[..flat.rank()] {
-        let (s, d) = (flat.leaf_shape(a)?, flat.leaf_stride(a)?);
-        // Floor: non-divisible gaps round down as in CuTe; the complement may overlap with the original layout at holes.
-        let (gap, next) = complement_step(s, d, current)?;
-        // Gaps of length 1 are eliminated by final coalesce and do not consume leaf capacity here.
-        if gap > 1 {
-            prefix.push(gap, current)?;
+    // Stable insertion sort by (stride, original_index)
+    let mut i = 1;
+    while i < flat.rank {
+        let key_idx = order[i];
+        let key_stride = flat.strides[key_idx];
+        let mut j = i;
+        while j > 0 {
+            let prev_idx = order[j - 1];
+            let prev_stride = flat.strides[prev_idx];
+            if prev_stride > key_stride || (prev_stride == key_stride && prev_idx > key_idx) {
+                order[j] = order[j - 1];
+                j -= 1;
+            } else {
+                break;
+            }
         }
-        current = next;
+        order[j] = key_idx;
+        i += 1;
     }
 
-    Ok(Some((prefix, current)))
+    let mut prefix = LayoutDesc::empty();
+    let mut current = 1;
+    let mut k = 0;
+    while k < flat.rank {
+        let idx = order[k];
+        let s = flat.shapes[idx];
+        let d = flat.strides[idx];
+        let (gap, next) = match complement_step(s, d, current) {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        };
+        if gap > 1 {
+            prefix = match prefix.push(gap, current) {
+                Ok(p) => p,
+                Err(e) => return Err(e),
+            };
+        }
+        current = next;
+        k += 1;
+    }
+
+    Ok(Some(PrefixResult { prefix, current }))
+}
+
+/// CuTe complement on a [`LayoutDesc`].
+pub const fn complement_desc(
+    layout: &LayoutDesc,
+    cotarget: &[isize],
+    mode: ComplementMode,
+) -> Result<LayoutDesc> {
+    let mut idx = 0;
+    while idx < cotarget.len() {
+        if cotarget[idx] < 0 {
+            return Err(Error::InvalidShape);
+        }
+        idx += 1;
+    }
+
+    let prefix_opt = match complement_prefix_desc(layout) {
+        Ok(opt) => opt,
+        Err(e) => return Err(e),
+    };
+
+    match prefix_opt {
+        None => {
+            if matches!(mode, ComplementMode::Extended) {
+                let out = LayoutDesc::empty();
+                out.push(1, 1)
+            } else {
+                let mut size = 1;
+                let mut i = 0;
+                while i < cotarget.len() {
+                    size = match mul(size, cotarget[i]) {
+                        Ok(s) => s,
+                        Err(e) => return Err(e),
+                    };
+                    i += 1;
+                }
+                let out = LayoutDesc::empty();
+                out.push(size, 1)
+            }
+        }
+        Some(PrefixResult {
+            mut prefix,
+            current,
+        }) => {
+            if matches!(mode, ComplementMode::Extended) {
+                let coalesced_prefix = match coalesce_desc(&prefix, CoalesceMode::Standard) {
+                    Ok(p) => p,
+                    Err(e) => return Err(e),
+                };
+                let prefix_size = match coalesced_prefix.size() {
+                    Ok(s) => s,
+                    Err(e) => return Err(e),
+                };
+                if prefix_size == 1 {
+                    let out = LayoutDesc::empty();
+                    return out.push(1, current);
+                }
+                let out = coalesced_prefix;
+                out.push(1, current)
+            } else {
+                let mut rest = current;
+                let mut stride = current;
+                let mut prev_extent = 1;
+                let mut i = 0;
+                while i < cotarget.len() {
+                    let a = cotarget[i];
+                    let extent = ceil_div(a, rest);
+                    rest = if a == 0 { rest } else { ceil_div(rest, a) };
+                    if extent != 1 {
+                        stride = match mul(stride, prev_extent) {
+                            Ok(s) => s,
+                            Err(e) => return Err(e),
+                        };
+                        prefix = match prefix.push(extent, stride) {
+                            Ok(p) => p,
+                            Err(e) => return Err(e),
+                        };
+                        prev_extent = extent;
+                    }
+                    i += 1;
+                }
+                coalesce_desc(&prefix, CoalesceMode::Standard)
+            }
+        }
+    }
 }
 
 /// CuTe `complement(layout, cotarget)` with a tuple cotarget (a shape slice such as
@@ -92,29 +241,10 @@ fn complement_prefix<L: AffineLayoutMap>(layout: &L) -> Result<Option<(LayoutBui
 /// - Returns [`Error::NonInjective`] if `layout` strides overlap.
 /// - Returns [`Error::CapacityExceeded`] or [`Error::Overflow`] on capacity or arithmetic limits.
 pub fn complement_shape<L: AffineLayoutMap>(layout: L, cotarget: &[isize]) -> Result<DynLayout> {
-    if cotarget.iter().any(|&c| c < 0) {
-        return Err(Error::InvalidShape);
-    }
-    let Some((mut leaves, current)) = complement_prefix(&layout)? else {
-        // CuTe: complement(1:0, cotarget) = make_layout(coalesce(cotarget))
-        let size = checked_product(cotarget.iter().map(|&c| Ok(c)))?;
-        return DynLayout::new(&[size], &[1]);
-    };
-    // CuTe tuple ceil_div: result_i = ceil(a_i / rest), rest = ceil(rest / a_i)
-    let mut rest = current;
-    let mut stride = current;
-    let mut prev_extent = 1;
-    for &a in cotarget {
-        let extent = ceil_div(a, rest);
-        rest = if a == 0 { rest } else { ceil_div(rest, a) };
-        if extent != 1 {
-            stride = mul(stride, prev_extent)?;
-            leaves.push(extent, stride)?;
-            prev_extent = extent;
-        }
-    }
-    // Coalesces to 1:0 when all extents are 1, matching CuTe.
-    leaves.finish_flat()?.coalesce()
+    let flat = layout.as_flat_layout()?;
+    let desc = LayoutDesc::from_dyn_layout(&flat);
+    let comp = complement_desc(&desc, cotarget, ComplementMode::Standard)?;
+    Ok(comp.to_dyn_layout())
 }
 
 /// CuTe `complement(layout, cotarget)` with an integral cotarget.
@@ -172,20 +302,13 @@ pub fn complement<L: AffineLayoutMap>(layout: L, cotarget: isize) -> Result<DynL
 /// - Returns [`Error::NonInjective`] if strides overlap.
 /// - Returns [`Error::CapacityExceeded`] or [`Error::Overflow`] on capacity or arithmetic limits.
 pub fn complement_extended<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
-    let Some((leaves, current)) = complement_prefix(&layout)? else {
-        return DynLayout::new(&[1], &[1]);
-    };
-    let prefix = leaves.finish_flat()?.coalesce()?;
-    if prefix.size()? == 1 {
-        return DynLayout::new(&[1], &[current]);
-    }
-    let mut out = LayoutBuilder::new();
-    out.push_leaves(&prefix)?;
-    out.push(1, current)?;
-    out.finish_flat()
+    let flat = layout.as_flat_layout()?;
+    let desc = LayoutDesc::from_dyn_layout(&flat);
+    let comp = complement_desc(&desc, &[], ComplementMode::Extended)?;
+    Ok(comp.to_dyn_layout())
 }
 
-/// Result type of the typed complement; `EXTENDED` keeps the terminal repetition stride
+/// Result type of typed complement; [`ComplementMode::Extended`] keeps the terminal repetition stride
 /// (CuTe `complement(layout)` without a cotarget).
 ///
 /// For fully static inputs, `<TypedComplement<L, C> as StaticValue>::VALUE` is the result as
@@ -194,12 +317,12 @@ pub fn complement_extended<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
 /// scalar convention.
 ///
 /// ```
-/// use noodle_cute::{Int, IntTuple, Nil, StaticValue, algebra::TypedComplement, layout::Layout};
+/// use noodle_cute::{Int, IntTuple, Nil, StaticValue, algebra::{ComplementMode, TypedComplement}, layout::Layout};
 /// type Pair<const A: isize, const B: isize> = IntTuple<Int<A>, IntTuple<Int<B>, Nil>>;
 /// const C: Layout<Pair<3, 2>, Pair<2, 12>> =
 ///     <TypedComplement<Layout<Pair<2, 2>, Pair<1, 6>>, Int<24>> as StaticValue>::VALUE;
 /// const E: Layout<Pair<2, 1>, Pair<1, 8>> =
-///     <TypedComplement<Layout<Int<4>, Int<2>>, Nil, true> as StaticValue>::VALUE;
+///     <TypedComplement<Layout<Int<4>, Int<2>>, Nil, { ComplementMode::Extended }> as StaticValue>::VALUE;
 /// ```
 ///
 /// ```compile_fail
@@ -224,19 +347,25 @@ pub fn complement_extended<L: AffineLayoutMap>(layout: L) -> Result<DynLayout> {
 /// const C: TypedComplement<Layout<Int<2>, Int<1>>, Int<-1>> = StaticValue::VALUE;
 /// ```
 /// ```compile_fail
-/// use noodle_cute::{Int, Nil, StaticValue, algebra::TypedComplement, layout::Layout};
-/// const C: TypedComplement<Layout<Int<2>, Int<{ isize::MAX }>>, Nil, true> = StaticValue::VALUE;
+/// use noodle_cute::{Int, Nil, StaticValue, algebra::{ComplementMode, TypedComplement}, layout::Layout};
+/// const C: TypedComplement<Layout<Int<2>, Int<{ isize::MAX }>>, Nil, { ComplementMode::Extended }> = StaticValue::VALUE;
 /// ```
-pub type TypedComplement<L, C = Nil, const EXTENDED: bool = false> =
-    <L as Complement<C, EXTENDED>>::Output;
+pub type TypedComplement<L, C = Nil, const MODE: ComplementMode = { ComplementMode::Standard }> =
+    <L as Complement<C, MODE>>::Output;
 
 /// Checked complement shared by static and mixed layouts.
-pub trait Complement<C, const EXTENDED: bool = false> {
+#[diagnostic::on_unimplemented(
+    message = "layout `{Self}` has no typed complement for cotarget `{C}`",
+    label = "unsupported typed complement",
+    note = "typed complement requires a nonempty domain, supported strides, and a valid cotarget",
+    note = "ComplementMode::Extended requires Nil instead of a cotarget"
+)]
+pub trait Complement<C, const MODE: ComplementMode = { ComplementMode::Standard }> {
     type Output: LayoutMap;
     fn complement_typed(self, cotarget: C) -> Result<Self::Output>;
 }
 
-impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
+impl<S: Shape, D: StrideOf<S>> Layout<S, D> {
     /// Complement keeping static leaves; the cotarget may be an integer or a nested shape.
     ///
     /// As in CuTe, a filtered multi-mode layout needs static strides; dynamic strides are
@@ -271,9 +400,11 @@ impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
     /// Typed complement without a cotarget, keeping the terminal `1:repetition-stride` mode.
     ///
     /// Errors match [`Self::complement`]; an empty tuple returns `1:1` by the scalar convention.
-    pub fn complement_extended(&self) -> Result<TypedComplement<Self, Nil, true>>
+    pub fn complement_extended(
+        &self,
+    ) -> Result<TypedComplement<Self, Nil, { ComplementMode::Extended }>>
     where
-        Self: Complement<Nil, true>,
+        Self: Complement<Nil, { ComplementMode::Extended }>,
     {
         self.clone().complement_typed(Nil)
     }
@@ -281,28 +412,28 @@ impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
 
 type Filtered<S, D> = <Layout<<S as Flatten>::Output, <D as Flatten>::Output> as Filter>::Output;
 type Ordered<S, D> = <Filtered<S, D> as Sort>::Output;
-type Built<S, D, C, const EXTENDED: bool> = <Ordered<S, D> as Build<C, EXTENDED>>::Output;
+type Built<S, D, C, const MODE: ComplementMode> = <Ordered<S, D> as Build<C, MODE>>::Output;
 
 pub const NONEMPTY<S: Product>: bool = !matches!(S::Output::STATIC, Some(0))
 where
     S::Output: Integer;
 
-impl<S, D, C, const EXTENDED: bool> Complement<C, EXTENDED> for Layout<S, D>
+impl<S, D, C, const MODE: ComplementMode> Complement<C, MODE> for Layout<S, D>
 where
     S: Shape + Flatten + Product,
     <S as Product>::Output: Integer,
     Bool<{ NONEMPTY::<S> }>: True,
-    D: Item<Profile = S::Profile> + Flatten,
+    D: StrideOf<S> + Flatten,
     Layout<<S as Flatten>::Output, D::Output>: Filter,
     Filtered<S, D>: Sort,
-    Ordered<S, D>: Build<C, EXTENDED>,
-    <Built<S, D, C, EXTENDED> as LayoutParts>::Shape: Shape,
-    <Built<S, D, C, EXTENDED> as LayoutParts>::Stride:
-        Item<Profile = <<Built<S, D, C, EXTENDED> as LayoutParts>::Shape as Item>::Profile>,
+    Ordered<S, D>: Build<C, MODE>,
+    <Built<S, D, C, MODE> as LayoutParts>::Shape: Shape,
+    <Built<S, D, C, MODE> as LayoutParts>::Stride:
+        Item<Profile = <<Built<S, D, C, MODE> as LayoutParts>::Shape as Item>::Profile>,
 {
     type Output = Layout<
-        <Built<S, D, C, EXTENDED> as LayoutParts>::Shape,
-        <Built<S, D, C, EXTENDED> as LayoutParts>::Stride,
+        <Built<S, D, C, MODE> as LayoutParts>::Shape,
+        <Built<S, D, C, MODE> as LayoutParts>::Stride,
     >;
     fn complement_typed(self, cotarget: C) -> Result<Self::Output> {
         if self.size()? == 0 {
@@ -661,7 +792,13 @@ where
     }
 }
 
-pub trait Target<C, const DIVIDE: bool = true> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy)]
+pub enum TargetMode {
+    Divide,
+    Preserve,
+}
+
+pub trait Target<C, const MODE: TargetMode = { TargetMode::Divide }> {
     type Output: LayoutParts;
     fn target(self, current: C) -> Result<Self::Output>;
 }
@@ -685,7 +822,7 @@ where
             .target_strides(current)
     }
 }
-impl<T: Shape + Flatten, C: Integer> Target<C, false> for T
+impl<T: Shape + Flatten, C: Integer> Target<C, { TargetMode::Preserve }> for T
 where
     T::Output: GroupShape,
     <T::Output as GroupShape>::Output: TargetStrides<C>,
@@ -701,7 +838,7 @@ where
     }
 }
 
-pub trait Complete<C, End, const EXTENDED: bool> {
+pub trait Complete<C, End, const MODE: ComplementMode> {
     type Output: LayoutParts;
     fn complete(self, cotarget: C, end: End) -> Result<Self::Output>;
 }
@@ -731,7 +868,7 @@ where
     }
 }
 
-impl<S, D, C: Target<End>, End> Complete<C, End, false> for Layout<S, D>
+impl<S, D, C: Target<End>, End> Complete<C, End, { ComplementMode::Standard }> for Layout<S, D>
 where
     S: Append<<C::Output as LayoutParts>::Shape>,
     D: Append<<C::Output as LayoutParts>::Stride>,
@@ -752,7 +889,7 @@ where
         .map(UnwrapLayout::unwrap_layout)
     }
 }
-impl<End> Complete<Nil, End, true> for Layout<Nil, Nil> {
+impl<End> Complete<Nil, End, { ComplementMode::Extended }> for Layout<Nil, Nil> {
     type Output = Layout<Int<1>, End>;
     fn complete(self, _: Nil, end: End) -> Result<Self::Output> {
         Ok(Layout {
@@ -761,7 +898,8 @@ impl<End> Complete<Nil, End, true> for Layout<Nil, Nil> {
         })
     }
 }
-impl<S, ST, D, DT, End> Complete<Nil, End, true> for Layout<IntTuple<S, ST>, IntTuple<D, DT>>
+impl<S, ST, D, DT, End> Complete<Nil, End, { ComplementMode::Extended }>
+    for Layout<IntTuple<S, ST>, IntTuple<D, DT>>
 where
     IntTuple<S, ST>: Append<IntTuple<Int<1>, Nil>>,
     IntTuple<D, DT>: Append<IntTuple<End, Nil>>,
@@ -778,11 +916,12 @@ where
     }
 }
 
-pub trait Build<C, const EXTENDED: bool> {
+pub trait Build<C, const MODE: ComplementMode> {
     type Output: LayoutParts;
     fn build(self, cotarget: C) -> Result<Self::Output>;
 }
-impl<C: Target<Int<1>, false>> Build<C, false> for Layout<Nil, Nil>
+impl<C: Target<Int<1>, { TargetMode::Preserve }>> Build<C, { ComplementMode::Standard }>
+    for Layout<Nil, Nil>
 where
     C::Output: UnwrapLayout,
 {
@@ -791,7 +930,7 @@ where
         cotarget.target(Int).map(UnwrapLayout::unwrap_layout)
     }
 }
-impl Build<Nil, true> for Layout<Nil, Nil> {
+impl Build<Nil, { ComplementMode::Extended }> for Layout<Nil, Nil> {
     type Output = Layout<Int<1>, Int<1>>;
     fn build(self, _: Nil) -> Result<Self::Output> {
         Ok(Layout {
@@ -800,32 +939,35 @@ impl Build<Nil, true> for Layout<Nil, Nil> {
         })
     }
 }
-impl<S, ST, D, DT, C> Build<C, false> for Layout<IntTuple<S, ST>, IntTuple<D, DT>>
+impl<S, ST, D, DT, C> Build<C, { ComplementMode::Standard }>
+    for Layout<IntTuple<S, ST>, IntTuple<D, DT>>
 where
     Self: Prefix<Int<1>>,
-    <Self as Prefix<Int<1>>>::Output: Complete<C, <Self as Prefix<Int<1>>>::End, false>,
+    <Self as Prefix<Int<1>>>::Output:
+        Complete<C, <Self as Prefix<Int<1>>>::End, { ComplementMode::Standard }>,
 {
     type Output = <<Self as Prefix<Int<1>>>::Output as Complete<
         C,
         <Self as Prefix<Int<1>>>::End,
-        false,
+        { ComplementMode::Standard },
     >>::Output;
     fn build(self, cotarget: C) -> Result<Self::Output> {
         let (prefix, end) = self.prefix(Int)?;
         prefix.complete(cotarget, end)
     }
 }
-impl<S, ST, D, DT> Build<Nil, true> for Layout<IntTuple<S, ST>, IntTuple<D, DT>>
+impl<S, ST, D, DT> Build<Nil, { ComplementMode::Extended }>
+    for Layout<IntTuple<S, ST>, IntTuple<D, DT>>
 where
     Self: Prefix<Int<1>>,
     <Self as Prefix<Int<1>>>::Output: CoalesceFold,
     <<Self as Prefix<Int<1>>>::Output as CoalesceFold>::Output:
-        Complete<Nil, <Self as Prefix<Int<1>>>::End, true>,
+        Complete<Nil, <Self as Prefix<Int<1>>>::End, { ComplementMode::Extended }>,
 {
     type Output = <<<Self as Prefix<Int<1>>>::Output as CoalesceFold>::Output as Complete<
         Nil,
         <Self as Prefix<Int<1>>>::End,
-        true,
+        { ComplementMode::Extended },
     >>::Output;
     fn build(self, _: Nil) -> Result<Self::Output> {
         let (prefix, end) = self.prefix(Int)?;

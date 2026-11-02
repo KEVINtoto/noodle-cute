@@ -138,38 +138,38 @@ fn typed_layouts_beyond_max_rank_keep_leaf_level_capabilities() {
         ],
         stride![
             1isize,
-            1 << 1,
-            1 << 2,
-            1 << 3,
-            1 << 4,
-            1 << 5,
-            1 << 6,
-            1 << 7,
-            1 << 8,
-            1 << 9,
-            1 << 10,
-            1 << 11,
-            1 << 12,
-            1 << 13,
-            1 << 14,
-            1 << 15,
-            1 << 16,
-            1 << 17,
-            1 << 18,
-            1 << 19,
-            1 << 20,
-            1 << 21,
-            1 << 22,
-            1 << 23,
-            1 << 24,
-            1 << 25,
-            1 << 26,
-            1 << 27,
-            1 << 28,
-            1 << 29,
-            1 << 30,
-            1 << 31,
-            1 << 32
+            1isize << 1,
+            1isize << 2,
+            1isize << 3,
+            1isize << 4,
+            1isize << 5,
+            1isize << 6,
+            1isize << 7,
+            1isize << 8,
+            1isize << 9,
+            1isize << 10,
+            1isize << 11,
+            1isize << 12,
+            1isize << 13,
+            1isize << 14,
+            1isize << 15,
+            1isize << 16,
+            1isize << 17,
+            1isize << 18,
+            1isize << 19,
+            1isize << 20,
+            1isize << 21,
+            1isize << 22,
+            1isize << 23,
+            1isize << 24,
+            1isize << 25,
+            1isize << 26,
+            1isize << 27,
+            1isize << 28,
+            1isize << 29,
+            1isize << 30,
+            1isize << 31,
+            1isize << 32
         ],
     )
     .unwrap();
@@ -237,6 +237,94 @@ fn compact_layouts_preserve_static_values_and_store_dynamic_dependencies() {
     let mixed = LayoutLeft::make(shape![Int::<2>, DynInt(3), Int::<4>]).unwrap();
     // The dynamic extent and the later stride that depends on it both occupy storage.
     assert_eq!(size_of_val(&mixed), 2 * size_of::<isize>());
+}
+
+#[test]
+fn compact_strides_follow_static_zero_and_i32_width() {
+    // stride.hpp `compact`: `current * shape` keeps `_0` static after a static zero extent.
+    let empty = LayoutLeft::make(shape![Int::<0>, DynInt(3), DynInt(4)]).unwrap();
+    let _: Int<0> = empty.stride.1.0;
+    let _: Int<0> = empty.stride.1.1.0;
+    assert_eq!(empty.size(), Ok(0));
+
+    let narrow = LayoutLeft::make(shape![4i32, Int::<8>, 2i32]).unwrap();
+    let _: Int<1> = narrow.stride.0;
+    let (b, c): (i32, i32) = (narrow.stride.1.0, narrow.stride.1.1.0);
+    assert_eq!((b, c), (4, 32));
+    // Strides and the final product are checked in i32, not only in isize.
+    assert_eq!(
+        LayoutLeft::make(shape![65536i32, 32768i32]),
+        Err(Error::Overflow)
+    );
+    assert!(LayoutLeft::make(shape![65536i32, 32767i32]).is_ok());
+    // A 64-bit leaf widens the remaining strides.
+    let wide = LayoutRight::make(shape![65536i32, DynInt(65536)]).unwrap();
+    assert_eq!(wide.stride.0, DynInt(65536));
+}
+
+#[test]
+fn layouts_have_a_fixed_field_order_for_kernel_parameters() {
+    // `repr(C)` on Layout and IntTuple: zero-sized static leaves, i32 and isize fields in order.
+    assert_eq!(size_of::<Layout<Int<4>, Int<1>>>(), 0);
+    type Narrow =
+        Layout<IntTuple<i32, IntTuple<Int<8>, Nil>>, IntTuple<Int<1>, IntTuple<i32, Nil>>>;
+    assert_eq!(size_of::<Narrow>(), 8);
+    let narrow: Narrow = Layout::new(shape![3i32, Int::<8>], stride![Int::<1>, 3i32]).unwrap();
+    let base = &raw const narrow as usize;
+    assert_eq!(&raw const narrow.stride.1.0 as usize - base, 4);
+    type Mixed =
+        Layout<IntTuple<i32, IntTuple<DynInt, Nil>>, IntTuple<Int<1>, IntTuple<DynInt, Nil>>>;
+    assert_eq!(size_of::<Mixed>(), 3 * size_of::<isize>());
+}
+
+// layout.hpp: get, take, select, group, append, prepend, and make_layout(l0, l1, ...).
+#[test]
+fn mode_operations_rearrange_shape_and_stride_together() {
+    let layout = Layout::new(
+        shape![Int::<2>, (Int::<3>, DynInt(4)), Int::<5>],
+        stride![Int::<60>, (Int::<1>, Int::<3>), DynInt(12)],
+    )
+    .unwrap();
+    let mode = layout.get::<1>();
+    assert_eq!(
+        mode,
+        Layout::new(shape![Int::<3>, DynInt(4)], stride![Int::<1>, Int::<3>]).unwrap()
+    );
+    assert_eq!(mode.get::<1>().size(), Ok(4));
+
+    let tail = layout.take::<1, 3>();
+    assert_eq!(tail.shape, shape![(Int::<3>, DynInt(4)), Int::<5>]);
+    assert_eq!(tail.stride, stride![(Int::<1>, Int::<3>), DynInt(12)]);
+
+    let picked = layout.select(shape![Int::<2>, Int::<0>]);
+    assert_eq!(picked.shape, shape![Int::<5>, Int::<2>]);
+    assert_eq!(picked.stride, stride![DynInt(12), Int::<60>]);
+
+    let grouped = layout.group::<0, 2>();
+    assert_eq!(
+        grouped.shape,
+        shape![(Int::<2>, (Int::<3>, DynInt(4))), Int::<5>]
+    );
+    for i in 0..layout.size().unwrap() {
+        assert_eq!(grouped.index(i), layout.index(i));
+    }
+
+    // An integral layout acts as a rank-1 tuple.
+    let column = Layout::new(Int::<4>, Int::<1>).unwrap();
+    assert_eq!(column.take::<0, 1>().shape, shape![Int::<4>]);
+    assert_eq!(column.group::<0, 1>().shape, shape![(Int::<4>)]);
+    let tile = column.append(Layout::new(DynInt(8), DynInt(4)).unwrap());
+    assert_eq!(tile.shape, shape![Int::<4>, DynInt(8)]);
+    assert_eq!(tile.stride, stride![Int::<1>, DynInt(4)]);
+    let batched = tile.prepend(Layout::new(Int::<2>, DynInt(32)).unwrap());
+    assert_eq!(batched.shape, shape![Int::<2>, Int::<4>, DynInt(8)]);
+    assert_eq!(batched.stride, stride![DynInt(32), Int::<1>, DynInt(4)]);
+
+    let joined = noodle_cute::make_layout!(column, layout.get::<1>());
+    assert_eq!(joined.shape, shape![Int::<4>, (Int::<3>, DynInt(4))]);
+    assert_eq!(joined.stride, stride![Int::<1>, (Int::<1>, Int::<3>)]);
+    let single = noodle_cute::make_layout!(column);
+    assert_eq!(single.shape, shape![Int::<4>]);
 }
 
 #[test]

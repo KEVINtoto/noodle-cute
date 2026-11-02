@@ -1,12 +1,13 @@
 //! Typed tiler traversal, `tile_unzip`, and grouping shared by divide and product.
 
+use crate::coord::Underscore;
 use crate::int::Integer;
-use crate::layout::{Layout, LayoutMap, LayoutParts, Shape};
-use crate::tuple::{Append, Item};
+use crate::layout::{Layout, LayoutMap, LayoutParts, Shape, StrideOf};
+use crate::tuple::Append;
 use crate::{Int, IntTuple, Nil, Result};
 use core::fmt::Debug;
 
-use super::{FLAT, LOGICAL, TILED, ZIPPED};
+use super::Grouping;
 
 pub type Pair<A, B> = IntTuple<A, IntTuple<B, Nil>>;
 pub type Joined<A, B> = Layout<
@@ -25,7 +26,7 @@ pub trait Checked: LayoutParts {
     type Output: LayoutMap;
     fn checked(self) -> Result<Self::Output>;
 }
-impl<S: Shape, D: Item<Profile = S::Profile>> Checked for Layout<S, D> {
+impl<S: Shape, D: StrideOf<S>> Checked for Layout<S, D> {
     type Output = Self;
     fn checked(self) -> Result<Self> {
         Layout::new(self.shape, self.stride)
@@ -122,6 +123,13 @@ where
         )
     }
 }
+// layout.hpp: an `_` tiler mode leaves the mode unchanged.
+impl<S, D, Op> Transform<Underscore, Op> for Layout<S, D> {
+    type Output = Self;
+    fn transform(self, _: Underscore) -> Result<Self> {
+        Ok(self)
+    }
+}
 impl<S, D, Op> Transform<Nil, Op> for Layout<S, D> {
     type Output = Self;
     fn transform(self, _: Nil) -> Result<Self> {
@@ -199,6 +207,13 @@ impl<L: Split, I: Integer> Unzip<I> for L {
         self
     }
 }
+// tuple_algorithms.hpp zip2_by: a mode kept by `_` is already a (tile, rest) pair.
+impl<L: Split> Unzip<Underscore> for L {
+    type Output = Self;
+    fn unzip(self) -> Self {
+        self
+    }
+}
 impl<S, D> Unzip<Nil> for Layout<S, D> {
     type Output = Joined<Layout<Nil, Nil>, Self>;
     fn unzip(self) -> Self::Output {
@@ -259,17 +274,19 @@ where
     }
 }
 
-pub trait Regroup<const KIND: u8> {
+pub trait Regroup<const GROUPING: Grouping> {
     type Output: LayoutParts;
     fn regroup(self) -> Self::Output;
 }
-impl<L: Split> Regroup<{ ZIPPED }> for L {
+impl<L: Split> Regroup<{ Grouping::Zipped }> for L {
     type Output = Self;
     fn regroup(self) -> Self {
         self
     }
 }
-impl<TS, RS: Wrap, TD, RD: Wrap> Regroup<{ TILED }> for Layout<Pair<TS, RS>, Pair<TD, RD>> {
+impl<TS, RS: Wrap, TD, RD: Wrap> Regroup<{ Grouping::Tiled }>
+    for Layout<Pair<TS, RS>, Pair<TD, RD>>
+{
     type Output = Layout<IntTuple<TS, RS::Output>, IntTuple<TD, RD::Output>>;
     fn regroup(self) -> Self::Output {
         Layout {
@@ -278,7 +295,7 @@ impl<TS, RS: Wrap, TD, RD: Wrap> Regroup<{ TILED }> for Layout<Pair<TS, RS>, Pai
         }
     }
 }
-impl<TS: Wrap, RS: Wrap, TD: Wrap, RD: Wrap> Regroup<{ FLAT }>
+impl<TS: Wrap, RS: Wrap, TD: Wrap, RD: Wrap> Regroup<{ Grouping::Flat }>
     for Layout<Pair<TS, RS>, Pair<TD, RD>>
 where
     TS::Output: Append<RS::Output>,
@@ -297,12 +314,12 @@ where
 }
 
 /// Selects how a typed divide or product arranges its `(tile, rest)` result.
-pub struct Kind<const KIND: u8>;
+pub struct Kind<const GROUPING: Grouping>;
 pub trait Arrange<L, T> {
     type Output: LayoutParts;
     fn arrange(layout: L) -> Self::Output;
 }
-impl<L: LayoutParts, T> Arrange<L, T> for Kind<{ LOGICAL }> {
+impl<L: LayoutParts, T> Arrange<L, T> for Kind<{ Grouping::Logical }> {
     type Output = L;
     fn arrange(layout: L) -> L {
         layout
@@ -310,58 +327,57 @@ impl<L: LayoutParts, T> Arrange<L, T> for Kind<{ LOGICAL }> {
 }
 macro_rules! arrange {
     ($($kind:ident),*) => {$ (
-        impl<L: Unzip<T>, T> Arrange<L, T> for Kind<{ $kind }>
-        where L::Output: Regroup<{ $kind }>,
+        impl<L: Unzip<T>, T> Arrange<L, T> for Kind<{ Grouping::$kind }>
+        where L::Output: Regroup<{ Grouping::$kind }>,
         {
-            type Output = <L::Output as Regroup<{ $kind }>>::Output;
+            type Output = <L::Output as Regroup<{ Grouping::$kind }>>::Output;
             fn arrange(layout: L) -> Self::Output { layout.unzip().regroup() }
         }
     )*};
 }
-arrange!(ZIPPED, TILED, FLAT);
+arrange!(Zipped, Tiled, Flat);
 
 pub type Transformed<L, T, Op> = <L as Transform<T, Op>>::Output;
-pub type Arranged<L, T, Op, const KIND: u8> =
-    <Kind<KIND> as Arrange<Transformed<L, T, Op>, T>>::Output;
+pub type Arranged<L, T, Op, A> = <A as Arrange<Transformed<L, T, Op>, T>>::Output;
 
-macro_rules! operation_api {
-    ($trait:ident, $alias:ident, $op:ty, $apply:ident; $(($kind:ident, $method:ident)),+ $(,)?) => {
-        /// Typed layout transform; `KIND` is one of the grouping constants such as [`LOGICAL`](super::LOGICAL).
-        pub trait $trait<T, const KIND: u8 = { super::LOGICAL }> {
-            type Output: crate::layout::LayoutMap;
-            fn $apply(self, tiler: T) -> crate::Result<Self::Output>;
+pub(super) macro operation_api($(#[$attr:meta])* $trait:ident, $alias:ident, $output:ident,
+     const $selector:ident: $selector_ty:ty = $default:expr,
+     $op:ty, $arranger:ty, $apply:ident; $(($choice:expr, $method:ident)),+ $(,)?) {
+        /// Typed layout transform selected by an enum-valued mode.
+        $(#[$attr])*
+        pub trait $trait<T, const $selector: $selector_ty = { $default }> {
+            type $output: crate::layout::LayoutMap;
+            fn $apply(self, tiler: T) -> crate::Result<Self::$output>;
         }
         /// Result type of the typed transform, keeping static integers and the full hierarchy.
         ///
         /// For fully static inputs, `<Alias as StaticValue>::VALUE` is the result as a constant.
-        pub type $alias<L, T, const KIND: u8 = { super::LOGICAL }> = <L as $trait<T, KIND>>::Output;
-        impl<S: crate::layout::Shape, D: crate::tuple::Item<Profile = S::Profile>, T, const KIND: u8>
-            $trait<T, KIND> for crate::layout::Layout<S, D>
+        pub type $alias<L, T, const $selector: $selector_ty = { $default }> = <L as $trait<T, $selector>>::$output;
+        impl<S: crate::layout::Shape, D: crate::layout::StrideOf<S>, T, const $selector: $selector_ty>
+            $trait<T, $selector> for crate::layout::Layout<S, D>
         where
             Self: super::typed::Transform<T, $op>,
-            super::typed::Kind<KIND>: super::typed::Arrange<super::typed::Transformed<Self, T, $op>, T>,
-            super::typed::Arranged<Self, T, $op, KIND>: super::typed::Checked,
+            $arranger: super::typed::Arrange<super::typed::Transformed<Self, T, $op>, T>,
+            super::typed::Arranged<Self, T, $op, $arranger>: super::typed::Checked,
         {
-            type Output = <super::typed::Arranged<Self, T, $op, KIND> as super::typed::Checked>::Output;
-            fn $apply(self, tiler: T) -> crate::Result<Self::Output> {
+            type $output = <super::typed::Arranged<Self, T, $op, $arranger> as super::typed::Checked>::Output;
+            fn $apply(self, tiler: T) -> crate::Result<Self::$output> {
                 use super::typed::{Arrange, Checked, Transform};
                 self.size()?;
                 let logical = self.transform(tiler)?;
-                <super::typed::Kind<KIND> as Arrange<_, T>>::arrange(logical).checked()
+                <$arranger as Arrange<_, T>>::arrange(logical).checked()
             }
         }
-        impl<S: crate::layout::Shape, D: crate::tuple::Item<Profile = S::Profile>> crate::layout::Layout<S, D> {
+        impl<S: crate::layout::Shape, D: crate::layout::StrideOf<S>> crate::layout::Layout<S, D> {
             $(
                 /// Checked typed transform with the tiler and grouping rules of this module,
                 /// keeping static integers and nested profiles.
                 ///
                 /// Runtime errors are returned through `Result`; only static facts change the
                 /// structure, and typed results are not limited by `MAX_RANK`.
-                pub fn $method<T>(&self, tiler: T) -> crate::Result<$alias<Self, T, { super::$kind }>>
-                where Self: $trait<T, { super::$kind }>,
+                pub fn $method<T>(&self, tiler: T) -> crate::Result<$alias<Self, T, { $choice }>>
+                where Self: $trait<T, { $choice }>,
                 { self.clone().$apply(tiler) }
             )+
         }
-    };
-}
-pub(super) use operation_api;
+    }

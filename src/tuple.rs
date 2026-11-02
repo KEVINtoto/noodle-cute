@@ -20,17 +20,22 @@
 
 use core::fmt::Debug;
 use core::marker::PhantomData;
-use core::ops::Mul;
 
-use crate::int::{Int, Integer, checked_product};
+use crate::int::{Arith, Int, Integer, Op, Prod, mul, prod};
 use crate::{Bool, Error, Result};
 
 /// An empty tuple and the terminator of an [`IntTuple`] chain.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct Nil;
 
 /// A head item followed by a tail tuple; nested heads add tuple levels.
+///
+/// `repr(C)` keeps the field order identical on host and device targets, so
+/// tuples and layouts can be passed by value as kernel parameters; static
+/// leaves remain zero-sized.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct IntTuple<H, T>(pub H, pub T);
 
 /// Structural marker for an empty tuple.
@@ -41,7 +46,23 @@ pub struct LeafProfile;
 pub struct TupleProfile<H, T>(PhantomData<(H, T)>);
 
 /// An integer leaf or a tuple that supports structural queries and leaf access.
-pub trait Item: Clone + Debug {
+///
+/// Built-in leaves and tuples support constant evaluation with the caller's
+/// `const_trait_impl` feature. Downstream crates can still provide ordinary
+/// `impl Item` blocks for runtime use without enabling a feature.
+///
+/// ```
+/// #![feature(const_trait_impl)]
+/// use noodle_cute::tuple::Item;
+/// use noodle_cute::{DynInt, Int, Result, int_tuple};
+/// const PRODUCT: Result<isize> = int_tuple![Int::<2>, DynInt(3)].product();
+/// assert_eq!(PRODUCT, Ok(6));
+/// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not an integer leaf or a nested integer tuple",
+    note = "use Int<N>, DynInt, isize, i32, Nil, or an IntTuple with an integer or tuple head and a tuple tail"
+)]
+pub const trait Item: Clone + Debug {
     /// The nested structure, independent of leaf values and integer types.
     type Profile;
     /// Number of top-level modes: one for an integer and zero for [`Nil`].
@@ -72,7 +93,20 @@ pub trait Item: Clone + Debug {
     /// Any zero leaf makes the result zero. Otherwise, an overflowing
     /// multiplication returns [`Error::Overflow`].
     fn product(&self) -> Result<isize> {
-        checked_product((0..Self::LEAVES).map(|i| self.leaf(i)))
+        let mut i = 0;
+        while i < Self::LEAVES {
+            if self.leaf(i)? == 0 {
+                return Ok(0);
+            }
+            i += 1;
+        }
+        let mut product = 1;
+        i = 0;
+        while i < Self::LEAVES {
+            product = mul(product, self.leaf(i)?)?;
+            i += 1;
+        }
+        Ok(product)
     }
 
     /// Returns [`Item::RANK`].
@@ -86,7 +120,7 @@ pub trait Item: Clone + Debug {
     }
 }
 
-impl Item for Nil {
+const impl Item for Nil {
     type Profile = NilProfile;
     const RANK: usize = 0;
     const DEPTH: usize = 1;
@@ -105,7 +139,8 @@ impl Item for Nil {
     }
 }
 
-impl<I: Integer + Debug> Item for I {
+#[diagnostic::do_not_recommend]
+const impl<I: [const] Integer + Debug> Item for I {
     type Profile = LeafProfile;
     const RANK: usize = 1;
     const DEPTH: usize = 0;
@@ -141,7 +176,7 @@ pub trait Tuple: Item {}
 
 impl Tuple for Nil {}
 
-impl<H: Item, T: Tuple> Item for IntTuple<H, T> {
+const impl<H: [const] Item, T: Tuple + [const] Item> Item for IntTuple<H, T> {
     type Profile = TupleProfile<H::Profile, T::Profile>;
     const RANK: usize = 1 + T::RANK;
     // A tail's depth counts its own tuple level, which this tuple already adds.
@@ -203,11 +238,19 @@ impl<I: Integer + Debug> Get<0> for I {
 const IS_ZERO<const N: usize>: bool = N == 0;
 // Keep this expression valid at zero, even though only the head branch is used.
 const SUB_1<const N: usize>: usize = N.saturating_sub(1);
+// Underflows, and so fails to compile, when `B > E`.
+const SPAN<const B: usize, const E: usize>: usize = E - B;
+const BEFORE<const B: usize, const E: usize>: bool = B < E;
+const INDEX<const N: isize>: usize = {
+    assert!(N >= 0, "mode indices must be nonnegative");
+    N as usize
+};
 
 // Implementation traits that appear in public bounds but are not part of the API.
 mod detail {
     use super::{Get, IntTuple, Nil, SUB_1};
     use crate::Bool;
+    use crate::int::Integer;
 
     /// One head-or-tail step of compile-time tuple access.
     pub trait Step<H, T, const INDEX: usize> {
@@ -226,6 +269,103 @@ mod detail {
         type Output = T::Output;
         fn step(tuple: &IntTuple<H, T>) -> &Self::Output {
             T::get(&tuple.1)
+        }
+    }
+
+    /// Borrows the chain after its first `N` modes.
+    pub trait Skip<const N: usize> {
+        type Output;
+        fn skip(&self) -> &Self::Output;
+    }
+
+    pub trait SkipStep<H, T, const N: usize> {
+        type Output;
+        fn skip(tuple: &IntTuple<H, T>) -> &Self::Output;
+    }
+
+    impl<H, T, const N: usize> SkipStep<H, T, N> for Bool<true> {
+        type Output = IntTuple<H, T>;
+        fn skip(tuple: &IntTuple<H, T>) -> &Self::Output {
+            tuple
+        }
+    }
+
+    impl<H, T: Skip<{ SUB_1::<N> }>, const N: usize> SkipStep<H, T, N> for Bool<false> {
+        type Output = T::Output;
+        fn skip(tuple: &IntTuple<H, T>) -> &Self::Output {
+            tuple.1.skip()
+        }
+    }
+
+    /// Copies the first `N` modes into a new chain.
+    pub trait First<const N: usize> {
+        type Output;
+        fn first(&self) -> Self::Output;
+    }
+
+    pub trait FirstStep<H, T, const N: usize> {
+        type Output;
+        fn first(tuple: &IntTuple<H, T>) -> Self::Output;
+    }
+
+    impl<H, T, const N: usize> FirstStep<H, T, N> for Bool<true> {
+        type Output = Nil;
+        fn first(_: &IntTuple<H, T>) -> Nil {
+            Nil
+        }
+    }
+
+    impl<H: Clone, T: First<{ SUB_1::<N> }>, const N: usize> FirstStep<H, T, N> for Bool<false> {
+        type Output = IntTuple<H, T::Output>;
+        fn first(tuple: &IntTuple<H, T>) -> Self::Output {
+            IntTuple(tuple.0.clone(), tuple.1.first())
+        }
+    }
+
+    /// The single mode inserted by `group`, absent when the range is empty.
+    pub trait Single<X> {
+        type Output;
+        fn single(mode: X) -> Self::Output;
+    }
+
+    impl<X> Single<X> for Bool<true> {
+        type Output = IntTuple<X, Nil>;
+        fn single(mode: X) -> Self::Output {
+            IntTuple(mode, Nil)
+        }
+    }
+
+    impl<X> Single<X> for Bool<false> {
+        type Output = Nil;
+        fn single(_: X) -> Nil {
+            Nil
+        }
+    }
+
+    /// CuTe `wrap`: an integer becomes a rank-1 tuple and a tuple is unchanged.
+    pub trait Wrap {
+        type Output;
+        fn wrap(self) -> Self::Output;
+    }
+
+    impl<I: Integer> Wrap for I {
+        type Output = IntTuple<I, Nil>;
+        fn wrap(self) -> Self::Output {
+            IntTuple(self, Nil)
+        }
+    }
+
+    impl Wrap for Nil {
+        type Output = Nil;
+        fn wrap(self) -> Nil {
+            self
+        }
+    }
+
+    impl<H, T> Wrap for IntTuple<H, T> {
+        type Output = Self;
+        fn wrap(self) -> Self {
+            self
         }
     }
 
@@ -250,8 +390,8 @@ mod detail {
         }
     }
 }
-use detail::Step;
-pub(crate) use detail::Unwrap;
+use detail::{First, FirstStep, Single, Skip, SkipStep, Step};
+pub(crate) use detail::{Unwrap, Wrap};
 
 impl<H, T, const INDEX: usize> Get<INDEX> for IntTuple<H, T>
 where
@@ -260,6 +400,40 @@ where
     type Output = <Bool<{ IS_ZERO::<INDEX> }> as Step<H, T, INDEX>>::Output;
     fn get(&self) -> &Self::Output {
         Bool::<{ IS_ZERO::<INDEX> }>::step(self)
+    }
+}
+
+impl Skip<0> for Nil {
+    type Output = Nil;
+    fn skip(&self) -> &Nil {
+        self
+    }
+}
+
+impl<H, T, const N: usize> Skip<N> for IntTuple<H, T>
+where
+    Bool<{ IS_ZERO::<N> }>: SkipStep<H, T, N>,
+{
+    type Output = <Bool<{ IS_ZERO::<N> }> as SkipStep<H, T, N>>::Output;
+    fn skip(&self) -> &Self::Output {
+        <Bool<{ IS_ZERO::<N> }> as SkipStep<H, T, N>>::skip(self)
+    }
+}
+
+impl First<0> for Nil {
+    type Output = Nil;
+    fn first(&self) -> Nil {
+        Nil
+    }
+}
+
+impl<H, T, const N: usize> First<N> for IntTuple<H, T>
+where
+    Bool<{ IS_ZERO::<N> }>: FirstStep<H, T, N>,
+{
+    type Output = <Bool<{ IS_ZERO::<N> }> as FirstStep<H, T, N>>::Output;
+    fn first(&self) -> Self::Output {
+        <Bool<{ IS_ZERO::<N> }> as FirstStep<H, T, N>>::first(self)
     }
 }
 
@@ -338,16 +512,129 @@ where
     }
 }
 
-/// Multiplies leaves while retaining a static result whenever all leaves are static.
+/// Copies the top-level modes in `[B, E)` into a new tuple: CuTe `take<B, E>`.
+///
+/// `B > E` and ranges beyond the tuple fail to compile; `B == E` gives [`Nil`].
+/// Modes may be any cloneable values, including layouts.
+///
+/// ```
+/// use noodle_cute::tuple::Take;
+/// use noodle_cute::{Int, int_tuple};
+///
+/// let t = int_tuple![Int::<2>, (Int::<3>, Int::<4>), 5i32];
+/// assert_eq!(Take::<1, 3>::take(&t), int_tuple![(Int::<3>, Int::<4>), 5i32]);
+/// ```
+pub trait Take<const B: usize, const E: usize> {
+    /// The selected modes.
+    type Output;
+    /// Returns the selected modes.
+    fn take(&self) -> Self::Output;
+}
+
+impl<T, const B: usize, const E: usize> Take<B, E> for T
+where
+    T: Skip<B>,
+    <T as Skip<B>>::Output: First<{ SPAN::<B, E> }>,
+{
+    type Output = <<T as Skip<B>>::Output as First<{ SPAN::<B, E> }>>::Output;
+    fn take(&self) -> Self::Output {
+        self.skip().first()
+    }
+}
+
+/// Copies top-level modes by static index: CuTe `select<I...>`.
+///
+/// The indices are a tuple of `Int<N>` values, such as
+/// `int_tuple![Int::<2>, Int::<0>]`; they may repeat or reorder modes. A bare
+/// integer supports index zero, like [`Get`]. Out-of-range or negative indices
+/// fail to compile.
+///
+/// ```
+/// use noodle_cute::tuple::Select;
+/// use noodle_cute::{Int, int_tuple};
+///
+/// let t = int_tuple![Int::<2>, 3i32, Int::<4>];
+/// let picked = t.select(int_tuple![Int::<2>, Int::<0>]);
+/// assert_eq!(picked, int_tuple![Int::<4>, Int::<2>]);
+/// ```
+pub trait Select<I> {
+    /// The selected modes, in index order.
+    type Output;
+    /// Returns the modes named by `indices`.
+    fn select(&self, indices: I) -> Self::Output;
+}
+
+impl<T> Select<Nil> for T {
+    type Output = Nil;
+    fn select(&self, _: Nil) -> Nil {
+        Nil
+    }
+}
+
+impl<T, R, const N: isize> Select<IntTuple<Int<N>, R>> for T
+where
+    T: Get<{ INDEX::<N> }> + Select<R>,
+    <T as Get<{ INDEX::<N> }>>::Output: Clone,
+{
+    type Output = IntTuple<<T as Get<{ INDEX::<N> }>>::Output, <T as Select<R>>::Output>;
+    fn select(&self, indices: IntTuple<Int<N>, R>) -> Self::Output {
+        IntTuple(
+            <T as Get<{ INDEX::<N> }>>::get(self).clone(),
+            <T as Select<R>>::select(self, indices.1),
+        )
+    }
+}
+
+/// Groups the top-level modes in `[B, E)` into one mode: CuTe `group<B, E>`.
+///
+/// `B == E` leaves the tuple unchanged; `B > E` and ranges beyond the tuple
+/// fail to compile.
+///
+/// ```
+/// use noodle_cute::tuple::Group;
+/// use noodle_cute::{Int, int_tuple};
+///
+/// let t = int_tuple![Int::<1>, Int::<2>, Int::<3>, Int::<4>];
+/// assert_eq!(Group::<1, 3>::group(&t), int_tuple![Int::<1>, (Int::<2>, Int::<3>), Int::<4>]);
+/// ```
+pub trait Group<const B: usize, const E: usize> {
+    /// The regrouped tuple.
+    type Output;
+    /// Returns the regrouped tuple.
+    fn group(&self) -> Self::Output;
+}
+
+type Middle<T, const B: usize, const E: usize> =
+    <Bool<{ BEFORE::<B, E> }> as Single<<T as Take<B, E>>::Output>>::Output;
+type Rest<T, const B: usize, const E: usize> =
+    <Middle<T, B, E> as Append<<T as Skip<E>>::Output>>::Output;
+
+impl<T, const B: usize, const E: usize> Group<B, E> for T
+where
+    T: First<B> + Skip<E> + Take<B, E>,
+    <T as Skip<E>>::Output: Clone,
+    Bool<{ BEFORE::<B, E> }>: Single<<T as Take<B, E>>::Output>,
+    Middle<T, B, E>: Append<<T as Skip<E>>::Output>,
+    <T as First<B>>::Output: Append<Rest<T, B, E>>,
+{
+    type Output = <<T as First<B>>::Output as Append<Rest<T, B, E>>>::Output;
+    fn group(&self) -> Self::Output {
+        let middle = <Bool<{ BEFORE::<B, E> }> as Single<_>>::single(Take::<B, E>::take(self));
+        First::<B>::first(self).append(middle.append(Skip::<E>::skip(self).clone()))
+    }
+}
+
+/// Multiplies leaves while retaining a static result whenever CuTe's rules allow it.
 ///
 /// A tuple of [`Int`] leaves produces an `Int` whose type encodes the product;
-/// [`Nil`] produces `Int<1>`. A runtime leaf makes a tuple's result dynamic.
-/// Unlike [`Item::product`], this uses multiplication operators without a zero
-/// pre-scan or checked errors; runtime overflow follows Rust's overflow settings.
+/// [`Nil`] produces `Int<1>`, and a static zero leaf makes the product `Int<0>`.
+/// Otherwise a runtime leaf makes the result runtime, combined as described in
+/// [`Integer`]. Unlike [`Item::product`], there is no zero pre-scan or checked
+/// error; runtime overflow follows Rust's overflow settings.
 pub trait Product {
     /// The static or runtime integer representation of the result.
     type Output;
-    /// Consumes the structure and multiplies its leaves using integer operators.
+    /// Consumes the structure and multiplies its leaves.
     fn product_typed(self) -> Self::Output;
 }
 
@@ -367,12 +654,50 @@ impl Product for Nil {
 
 impl<H: Product, T: Product> Product for IntTuple<H, T>
 where
-    H::Output: Mul<T::Output>,
-    <H::Output as Mul<T::Output>>::Output: Integer,
+    H::Output: Arith<T::Output, { Op::Mul }>,
 {
-    type Output = <H::Output as Mul<T::Output>>::Output;
+    type Output = Prod<H::Output, T::Output>;
     fn product_typed(self) -> Self::Output {
-        self.0.product_typed() * self.1.product_typed()
+        prod(self.0.product_typed(), self.1.product_typed())
+    }
+}
+
+/// The product of each top-level mode: CuTe `product_each`.
+///
+/// A bare integer is returned unchanged; a tuple yields one [`Product`] per mode.
+///
+/// ```
+/// use noodle_cute::tuple::ProductEach;
+/// use noodle_cute::{Int, int_tuple};
+///
+/// let sizes = int_tuple![(Int::<2>, Int::<4>), 3i32].product_each();
+/// assert_eq!(sizes, int_tuple![Int::<8>, 3i32]);
+/// ```
+pub trait ProductEach {
+    /// The per-mode products.
+    type Output;
+    /// Returns the per-mode products.
+    fn product_each(self) -> Self::Output;
+}
+
+impl<I: Integer> ProductEach for I {
+    type Output = Self;
+    fn product_each(self) -> Self {
+        self
+    }
+}
+
+impl ProductEach for Nil {
+    type Output = Nil;
+    fn product_each(self) -> Nil {
+        Nil
+    }
+}
+
+impl<H: Product, T: ProductEach> ProductEach for IntTuple<H, T> {
+    type Output = IntTuple<H::Output, T::Output>;
+    fn product_each(self) -> Self::Output {
+        IntTuple(self.0.product_typed(), self.1.product_each())
     }
 }
 

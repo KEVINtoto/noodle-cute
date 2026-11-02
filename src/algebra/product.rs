@@ -35,17 +35,20 @@
 //! let _ = block.blocked_product(int_tuple![Int::<3>]);
 //! ```
 
+use core::marker::ConstParamTy;
+
 use crate::layout::{
-    AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutBuilder, LayoutMap, LayoutParts, Shape,
+    AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutBuilder, LayoutMap, LayoutParts,
+    Shape, StrideOf,
 };
-use crate::tuple::Item;
 use crate::{Error, Int, IntTuple, Nil, Result};
 
 use super::complement::complement_extended;
 use super::composition::{Composition, composition, composition_layout};
 use super::typed::{Arrange, Binary, IntoModes, Joined, Kind, Pair, Split, join};
 use super::{
-    BLOCKED, Complement, Grouping, RAKED, TileRest, TypedComplement, TypedCompose, TypedComposition,
+    Complement, ComplementMode, Grouping, ProductKind, TileRest, TypedComplement, TypedCompose,
+    TypedComposition,
 };
 
 /// Product layout formed by adding a tile address to a rest address mapped through the complement of the tile.
@@ -273,16 +276,26 @@ pub fn raked_product<A: AffineLayoutMap, B: AffineLayoutMap>(
     rank_product(&block, &tiler, true)
 }
 
-pub struct ProductOp<const RANKED: bool>;
-pub const RANKED<const KIND: u8>: bool = KIND >= BLOCKED;
-impl<S, D, TS, TD> Binary<Layout<S, D>, Layout<TS, TD>> for ProductOp<false>
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy)]
+pub enum ProductPreparation {
+    Logical,
+    Ranked,
+}
+
+pub struct ProductOp<const MODE: ProductPreparation>;
+pub const PREPARATION<const KIND: ProductKind>: ProductPreparation = match KIND {
+    ProductKind::Blocked | ProductKind::Raked => ProductPreparation::Ranked,
+    _ => ProductPreparation::Logical,
+};
+impl<S, D, TS, TD> Binary<Layout<S, D>, Layout<TS, TD>>
+    for ProductOp<{ ProductPreparation::Logical }>
 where
     S: Shape,
-    D: Item<Profile = S::Profile>,
+    D: StrideOf<S>,
     TS: Shape,
-    TD: Item<Profile = TS::Profile>,
-    Layout<S, D>: Complement<Nil, true>,
-    TypedComplement<Layout<S, D>, Nil, true>: TypedCompose<Layout<TS, TD>>,
+    TD: StrideOf<TS>,
+    Layout<S, D>: Complement<Nil, { ComplementMode::Extended }>,
+    TypedComplement<Layout<S, D>, Nil, { ComplementMode::Extended }>: TypedCompose<Layout<TS, TD>>,
     ProductRest<S, D, TS, TD>: LayoutParts,
 {
     type Output = Joined<Layout<S, D>, ProductRest<S, D, TS, TD>>;
@@ -295,16 +308,17 @@ where
 type PaddedTiler<B, T> = <<T as IntoModes>::Output as PadModes<<B as IntoModes>::Output>>::Output;
 // CuTe blocked/raked_product pad both sides to the larger rank before logical_product, so each
 // tiler mode composes into exactly one rest mode, even when it yields a multi-mode layout.
-impl<B, T> Binary<B, T> for ProductOp<true>
+impl<B, T> Binary<B, T> for ProductOp<{ ProductPreparation::Ranked }>
 where
     B: IntoModes,
     T: IntoModes,
     T::Output: PadModes<B::Output>,
-    ProductOp<false>: Binary<B, PaddedTiler<B, T>>,
+    ProductOp<{ ProductPreparation::Logical }>: Binary<B, PaddedTiler<B, T>>,
 {
-    type Output = <ProductOp<false> as Binary<B, PaddedTiler<B, T>>>::Output;
+    type Output =
+        <ProductOp<{ ProductPreparation::Logical }> as Binary<B, PaddedTiler<B, T>>>::Output;
     fn run(block: B, tiler: T) -> Result<Self::Output> {
-        <ProductOp<false> as Binary<B, PaddedTiler<B, T>>>::run(
+        <ProductOp<{ ProductPreparation::Logical }> as Binary<B, PaddedTiler<B, T>>>::run(
             block,
             tiler.into_modes().pad_modes(),
         )
@@ -374,16 +388,41 @@ where
     }
 }
 
-type ProductRest<S, D, TS, TD> =
-    TypedComposition<TypedComplement<Layout<S, D>, Nil, true>, Layout<TS, TD>>;
+type ProductRest<S, D, TS, TD> = TypedComposition<
+    TypedComplement<Layout<S, D>, Nil, { ComplementMode::Extended }>,
+    Layout<TS, TD>,
+>;
 
-super::typed::operation_api!(TypedProduct, TypedProductLayout, ProductOp<{ RANKED::<KIND> }>, product_typed;
-    (LOGICAL, logical_product),
-    (ZIPPED, zipped_product),
-    (TILED, tiled_product),
-    (FLAT, flat_product),
-    (BLOCKED, blocked_product),
-    (RAKED, raked_product),
+pub struct ProductArrangement<const KIND: ProductKind>;
+
+macro_rules! grouped_arrangement {
+    ($($kind:ident),*) => { $(
+        impl<L, T> Arrange<L, T> for ProductArrangement<{ ProductKind::$kind }>
+        where Kind<{ Grouping::$kind }>: Arrange<L, T>,
+        {
+            type Output = <Kind<{ Grouping::$kind }> as Arrange<L, T>>::Output;
+            fn arrange(layout: L) -> Self::Output {
+                <Kind<{ Grouping::$kind }> as Arrange<L, T>>::arrange(layout)
+            }
+        }
+    )* };
+}
+grouped_arrangement!(Logical, Zipped, Tiled, Flat);
+
+super::typed::operation_api!(
+    #[diagnostic::on_unimplemented(
+        message = "layout `{Self}` cannot form a typed product with `{T}` and product kind {KIND}",
+        label = "unsupported typed product",
+        note = "choose a ProductKind compatible with the tiler; blocked and raked products require layout tilers"
+    )]
+    TypedProduct, TypedProductLayout, Output, const KIND: ProductKind = ProductKind::Logical,
+    ProductOp<{ PREPARATION::<KIND> }>, ProductArrangement<KIND>, product_typed;
+    (ProductKind::Logical, logical_product),
+    (ProductKind::Zipped, zipped_product),
+    (ProductKind::Tiled, tiled_product),
+    (ProductKind::Flat, flat_product),
+    (ProductKind::Blocked, blocked_product),
+    (ProductKind::Raked, raked_product),
 );
 
 pub trait ZipModes<R> {
@@ -464,7 +503,7 @@ where
 }
 type BlockModes<L> = <<L as Split>::Tile as IntoModes>::Output;
 type RestModes<L> = <<L as Split>::Rest as IntoModes>::Output;
-impl<L: Split, S, D> Arrange<L, Layout<S, D>> for Kind<{ BLOCKED }>
+impl<L: Split, S, D> Arrange<L, Layout<S, D>> for ProductArrangement<{ ProductKind::Blocked }>
 where
     L::Tile: IntoModes,
     L::Rest: IntoModes,
@@ -476,7 +515,7 @@ where
         block.into_modes().zip_modes(rest.into_modes())
     }
 }
-impl<L: Split, S, D> Arrange<L, Layout<S, D>> for Kind<{ RAKED }>
+impl<L: Split, S, D> Arrange<L, Layout<S, D>> for ProductArrangement<{ ProductKind::Raked }>
 where
     L::Tile: IntoModes,
     L::Rest: IntoModes,

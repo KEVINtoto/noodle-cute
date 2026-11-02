@@ -4,6 +4,8 @@
 //! from independent coordinate formulas and upstream CUTLASS/CuTe oracle cases,
 //! rather than computing expectations through another transformation under test.
 
+#![feature(min_adt_const_params)]
+
 use noodle_cute::Error;
 use noodle_cute::algebra::logical_divide;
 use noodle_cute::algebra::logical_product;

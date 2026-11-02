@@ -380,11 +380,6 @@ impl LayoutBuilder {
         }
     }
 
-    /// Number of leaves pushed so far.
-    pub(crate) fn leaf_count(&self) -> usize {
-        self.leaves
-    }
-
     pub(crate) fn push(&mut self, s: isize, d: isize) -> Result<()> {
         if self.leaves == MAX_RANK {
             return Err(Error::CapacityExceeded);

@@ -1,6 +1,9 @@
 //! 布局代数契约共用的布局构造、断言与非仿射测试映射。
 
-use noodle_cute::algebra::{Complement, TypedCompose, TypedDivide, TypedInvert, TypedProduct};
+use noodle_cute::algebra::{
+    Complement, ComplementMode, Grouping, InverseSide, ProductKind, TypedCompose, TypedDivide,
+    TypedInvert, TypedProduct,
+};
 use noodle_cute::layout::{DynLayout, GroupedLayout, LayoutMap};
 use noodle_cute::{Error, Nil, Result, StaticValue};
 
@@ -20,14 +23,16 @@ where
     <L::Output as StaticValue>::VALUE
 }
 
-pub const fn complemented_extended<L: Complement<Nil, true> + Copy>(_: L) -> L::Output
+pub const fn complemented_extended<L: Complement<Nil, { ComplementMode::Extended }> + Copy>(
+    _: L,
+) -> L::Output
 where
     L::Output: StaticValue,
 {
     <L::Output as StaticValue>::VALUE
 }
 
-pub const fn divided<const KIND: u8, L: TypedDivide<T, KIND> + Copy, T: Copy>(
+pub const fn divided<const GROUPING: Grouping, L: TypedDivide<T, GROUPING> + Copy, T: Copy>(
     _: L,
     _: T,
 ) -> L::Output
@@ -37,7 +42,7 @@ where
     <L::Output as StaticValue>::VALUE
 }
 
-pub const fn producted<const KIND: u8, L: TypedProduct<T, KIND> + Copy, T: Copy>(
+pub const fn producted<const KIND: ProductKind, L: TypedProduct<T, KIND> + Copy, T: Copy>(
     _: L,
     _: T,
 ) -> L::Output
@@ -47,7 +52,7 @@ where
     <L::Output as StaticValue>::VALUE
 }
 
-pub const fn inverted<const LEFT: bool, L: TypedInvert<LEFT> + Copy>(_: L) -> L::Output
+pub const fn inverted<const SIDE: InverseSide, L: TypedInvert<SIDE> + Copy>(_: L) -> L::Output
 where
     L::Output: StaticValue,
 {

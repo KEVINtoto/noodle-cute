@@ -5,44 +5,110 @@
 //! use [`Layout::composition`], [`composition_layout`] returns runtime metadata, and the generic
 //! [`composition`] keeps the lazy fallback.
 
+use crate::basis::{ScaledBasis, StrideKind, StrideProfile};
+use core::marker::ConstParamTy;
+
 use crate::int::{Integer, ceil_div, mul};
 use crate::layout::{
-    AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutBuilder, LayoutMap, LayoutParts,
-    Shape, address_range_by_scan, affine_injective, is_injective_by_enumeration,
+    AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutBuilder, LayoutDesc, LayoutMap,
+    LayoutParts, Shape, StrideOf, address_range_by_scan, affine_injective,
+    is_injective_by_enumeration,
 };
 use crate::tuple::Unwrap;
 use crate::tuple::{Append, Flatten, Item};
 use crate::{Bool, DynInt, Error, Int, IntTuple, Nil, Result};
 
-use super::coalesce::CoalesceFold;
+use super::coalesce::{CoalesceFold, CoalesceMode, coalesce_desc};
+
+/// CuTe `composition_impl` for one integral rhs mode `s:d` against a coalesced lhs descriptor.
+pub const fn compose_leaf_desc(lhs: &LayoutDesc, s: isize, d: isize) -> Result<LayoutDesc> {
+    let mut out = LayoutDesc::empty();
+    let r = lhs.rank;
+    if r == 0 || d == 0 || s == 0 {
+        return out.push(s, 0);
+    }
+    if r == 1 {
+        let stride = match mul(d, lhs.strides[0]) {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        };
+        return out.push(s, stride);
+    }
+    let mut rest_shape = s;
+    let mut rest_stride = d;
+    let mut i = 0;
+    while i + 1 < r {
+        let cs = lhs.shapes[i];
+        let cd = lhs.strides[i];
+        let step = match checked_step(rest_shape, rest_stride, cs) {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        };
+        if !step.skip {
+            let next_s = match mul(rest_stride, cd) {
+                Ok(v) => v,
+                Err(e) => return Err(e),
+            };
+            out = match out.push(step.extent, next_s) {
+                Ok(o) => o,
+                Err(e) => return Err(e),
+            };
+        }
+        rest_shape = step.rest;
+        rest_stride = step.stride;
+        i += 1;
+    }
+    if out.rank == 0 || rest_shape != 1 {
+        let next_s = match mul(rest_stride, lhs.strides[r - 1]) {
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        };
+        out = match out.push(rest_shape, next_s) {
+            Ok(o) => o,
+            Err(e) => return Err(e),
+        };
+    }
+    Ok(out)
+}
+
+/// Eager CuTe composition of two layout descriptors `outer ∘ inner`.
+pub const fn compose_desc(outer: &LayoutDesc, inner: &LayoutDesc) -> Result<LayoutDesc> {
+    let lhs = match coalesce_desc(outer, CoalesceMode::Extended) {
+        Ok(l) => l,
+        Err(e) => return Err(e),
+    };
+    if inner.rank == 0 {
+        return Ok(LayoutDesc::empty());
+    }
+    let mut out = LayoutDesc::empty();
+    let mut leaf = 0;
+    while leaf < inner.rank {
+        let leaf_desc = match compose_leaf_desc(&lhs, inner.shapes[leaf], inner.strides[leaf]) {
+            Ok(d) => d,
+            Err(e) => return Err(e),
+        };
+        let mut j = 0;
+        while j < leaf_desc.rank {
+            out = match out.push(leaf_desc.shapes[j], leaf_desc.strides[j]) {
+                Ok(o) => o,
+                Err(e) => return Err(e),
+            };
+            j += 1;
+        }
+        leaf += 1;
+    }
+    Ok(out)
+}
 
 // CuTe `composition_impl` for one integral rhs mode `s:d` against a coalesced lhs.
 // When the rhs crosses an lhs mode boundary with a stride that does not divide the lhs mode extent
 // (CuTe's weak divisibility condition), CuTe restarts at the new mode rather than wrapping around,
 // so the result may differ from pointwise evaluation `lhs_ext(s:d (i))`.
 fn compose_leaf(lhs: &DynLayout, s: isize, d: isize, out: &mut LayoutBuilder) -> Result<()> {
-    let r = lhs.rank();
-    let (shape, stride) = (lhs.shapes(), lhs.strides());
-    // A stride-0 rhs does not read lhs; an integral lhs directly scales the stride (the extended domain extends naturally here).
-    if d == 0 || s == 0 {
-        return out.push(s, 0);
-    }
-    if r == 1 {
-        return out.push(s, mul(d, stride[0])?);
-    }
-    let start = out.leaf_count();
-    let (mut rest_shape, mut rest_stride) = (s, d);
-    for i in 0..r - 1 {
-        let (cs, cd) = (shape[i], stride[i]);
-        let step = checked_step(rest_shape, rest_stride, cs)?;
-        if !step.skip {
-            out.push(step.extent, mul(rest_stride, cd)?)?;
-        }
-        rest_shape = step.rest;
-        rest_stride = step.stride;
-    }
-    if out.leaf_count() == start || rest_shape != 1 {
-        out.push(rest_shape, mul(rest_stride, stride[r - 1])?)?;
+    let desc = LayoutDesc::from_dyn_layout(lhs);
+    let leaf_desc = compose_leaf_desc(&desc, s, d)?;
+    for i in 0..leaf_desc.rank {
+        out.push(leaf_desc.shapes[i], leaf_desc.strides[i])?;
     }
     Ok(())
 }
@@ -292,7 +358,9 @@ impl<A: LayoutMap, B: LayoutMap> LayoutMap for Composition<A, B> {
 }
 
 type CoalescedLhs<S, D> =
-    <Layout<<S as Flatten>::Output, <D as Flatten>::Output> as CoalesceFold<true>>::Output;
+    <Layout<<S as Flatten>::Output, <D as Flatten>::Output> as CoalesceFold<
+        { CoalesceMode::Extended },
+    >>::Output;
 
 /// Result type of the typed composition, keeping the RHS nesting and every statically
 /// derivable leaf.
@@ -344,12 +412,17 @@ type CoalescedLhs<S, D> =
 pub type TypedComposition<A, B> = <A as TypedCompose<B>>::Output;
 
 /// Checked composition of typed layouts; fully static results use this trait's output type.
+#[diagnostic::on_unimplemented(
+    message = "layout `{Self}` cannot be composed with `{Rhs}`",
+    label = "incompatible typed layout composition",
+    note = "check shape/stride profiles and the static divisibility and overflow requirements"
+)]
 pub trait TypedCompose<Rhs> {
-    type Output: LayoutMap;
+    type Output;
     fn compose(self, rhs: Rhs) -> Result<Self::Output>;
 }
 
-impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
+impl<S, D> Layout<S, D> {
     /// Composes static or mixed layouts with CuTe `composition_impl`, keeping the result type.
     ///
     /// Only statically known zero strides and unit shapes change the output structure; modes
@@ -381,7 +454,7 @@ impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
         rhs: Layout<RS, RD>,
     ) -> Result<TypedComposition<Self, Layout<RS, RD>>>
     where
-        Self: TypedCompose<Layout<RS, RD>>,
+        Self: TypedCompose<Layout<RS, RD>> + Clone,
     {
         self.clone().compose(rhs)
     }
@@ -389,28 +462,54 @@ impl<S: Shape, D: Item<Profile = S::Profile>> Layout<S, D> {
 
 type CompositionTree<S, D, RS, RD> = <Layout<RS, RD> as ComposeTree<CoalescedLhs<S, D>>>::Output;
 
+pub trait ComposeResult<L> {
+    type Output;
+    fn validate(layout: L) -> Result<Self::Output>;
+}
+impl<S: Shape, D: StrideOf<S>> ComposeResult<Layout<S, D>> for Bool<false> {
+    type Output = Layout<S, D>;
+    fn validate(layout: Self::Output) -> Result<Self::Output> {
+        Layout::new(layout.shape, layout.stride)
+    }
+}
+impl<S: Shape, D> ComposeResult<Layout<S, D>> for Bool<true> {
+    type Output = Layout<S, D>;
+    fn validate(layout: Self::Output) -> Result<Self::Output> {
+        for i in 0..S::LEAVES {
+            if layout.shape.leaf(i)? < 0 {
+                return Err(Error::InvalidShape);
+            }
+        }
+        layout.shape.product()?;
+        Ok(layout)
+    }
+}
 impl<S, D, RS, RD> TypedCompose<Layout<RS, RD>> for Layout<S, D>
 where
     S: Shape + Flatten,
-    D: Item<Profile = S::Profile> + Flatten,
+    D: Flatten + StrideKind + StrideProfile<S>,
     RS: Shape,
     RD: Item<Profile = RS::Profile>,
-    Layout<S::Output, D::Output>: CoalesceFold<true>,
+    Layout<S::Output, D::Output>: CoalesceFold<{ CoalesceMode::Extended }>,
     Layout<RS, RD>: ComposeTree<CoalescedLhs<S, D>>,
-    <CompositionTree<S, D, RS, RD> as LayoutParts>::Shape: Shape,
-    <CompositionTree<S, D, RS, RD> as LayoutParts>::Stride:
-        Item<Profile = <<CompositionTree<S, D, RS, RD> as LayoutParts>::Shape as Item>::Profile>,
+    D::Kind: ComposeResult<CompositionTree<S, D, RS, RD>>,
 {
-    type Output = Layout<
-        <CompositionTree<S, D, RS, RD> as LayoutParts>::Shape,
-        <CompositionTree<S, D, RS, RD> as LayoutParts>::Stride,
-    >;
+    type Output = <D::Kind as ComposeResult<CompositionTree<S, D, RS, RD>>>::Output;
     fn compose(self, rhs: Layout<RS, RD>) -> Result<Self::Output> {
-        self.size()?;
+        for i in 0..S::LEAVES {
+            if self.shape.leaf(i)? < 0 {
+                return Err(Error::InvalidShape);
+            }
+        }
+        self.shape.product()?;
         rhs.size()?;
-        let lhs = self.flatten().fold();
-        let result = rhs.compose_tree(&lhs)?.into_layout();
-        Layout::new(result.shape, result.stride)
+        let lhs = Layout {
+            shape: self.shape.flatten(),
+            stride: self.stride.flatten(),
+        }
+        .fold();
+        let result = rhs.compose_tree(&lhs)?;
+        <D::Kind as ComposeResult<_>>::validate(result)
     }
 }
 
@@ -558,11 +657,28 @@ pub const REST_STATIC<S: Integer, D: Integer, CS: Integer>: bool =
     matches!(S::STATIC, Some(0)) || STEP_STATIC::<S, D, CS>;
 pub const STRIDE_STATIC<D: Integer, CS: Integer>: bool =
     D::STATIC.is_some() && CS::STATIC.is_some();
-pub const SKIP<S: Integer, D: Integer, CS: Integer>: bool = matches!(S::STATIC, Some(1))
-    || match (D::STATIC, CS::STATIC) {
-        (Some(d), Some(cs)) => step(1, d, cs).next_shape == 1,
-        _ => false,
-    };
+/// Action taken during composition step traversal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy)]
+pub enum StepAction {
+    Skip,
+    Produce,
+}
+
+pub const fn step_action(s: Option<isize>, d: Option<isize>, cs: Option<isize>) -> StepAction {
+    if matches!(s, Some(1))
+        || match (d, cs) {
+            (Some(d_val), Some(cs_val)) => step(1, d_val, cs_val).next_shape == 1,
+            _ => false,
+        }
+    {
+        StepAction::Skip
+    } else {
+        StepAction::Produce
+    }
+}
+
+pub const STEP_ACTION<S: Integer, D: Integer, CS: Integer>: StepAction =
+    step_action(S::STATIC, D::STATIC, CS::STATIC);
 pub const EXTENT<S: Integer, D: Integer, CS: Integer>: isize =
     match (S::STATIC, D::STATIC, CS::STATIC) {
         (Some(s), Some(d), Some(cs)) => step(s, d, cs).extent,
@@ -617,7 +733,7 @@ where
             return Err(Error::InvalidShape);
         }
         let mut v = checked_step(1, d.value(), cs.value())?;
-        if SKIP::<S, D, CS> {
+        if step_action(S::STATIC, D::STATIC, CS::STATIC) == StepAction::Skip {
             v.rest = shape;
         } else {
             v.extent = v.next_shape.min(shape);
@@ -655,7 +771,7 @@ pub const PRODUCT<A: Integer, B: Integer>: isize = match (A::STATIC, B::STATIC) 
 
 // CuTe's `_0 * x` is a static `_0`, which this crate's mixed multiplication does not model.
 pub trait ComposeProduct<A, B> {
-    type Output: Integer;
+    type Output;
     fn product(a: A, b: B) -> Result<Self::Output>;
 }
 impl<A: Integer, B: Integer> ComposeProduct<A, B> for ()
@@ -671,16 +787,67 @@ where
     }
 }
 
+pub trait ScaleBasis<D, V, const M: usize> {
+    type Output;
+    fn scale(d: D, value: V) -> Result<Self::Output>;
+}
+impl<D, V, const M: usize> ScaleBasis<D, V, M> for Bool<true> {
+    type Output = Int<0>;
+    fn scale(_: D, _: V) -> Result<Self::Output> {
+        Ok(Int)
+    }
+}
+impl<D, V, const M: usize> ScaleBasis<D, V, M> for Bool<false>
+where
+    (): ComposeProduct<D, V>,
+{
+    type Output = ScaledBasis<<() as ComposeProduct<D, V>>::Output, M>;
+    fn scale(d: D, value: V) -> Result<Self::Output> {
+        Ok(ScaledBasis(<() as ComposeProduct<D, V>>::product(
+            d, value,
+        )?))
+    }
+}
+impl<D: Integer, V: Integer, const M: usize> ComposeProduct<D, ScaledBasis<V, M>> for ()
+where
+    Bool<{ ZERO_STRIDE::<D> }>: ScaleBasis<D, V, M>,
+{
+    type Output = <Bool<{ ZERO_STRIDE::<D> }> as ScaleBasis<D, V, M>>::Output;
+    fn product(d: D, basis: ScaledBasis<V, M>) -> Result<Self::Output> {
+        <Bool<{ ZERO_STRIDE::<D> }> as ScaleBasis<D, V, M>>::scale(d, basis.0)
+    }
+}
+
 pub trait Fold<S, D, OS, OD> {
     type Output: LayoutParts;
     fn fold(self, s: S, d: D, os: OS, od: OD) -> Result<Self::Output>;
 }
-impl<S, D, CS, CD, OS, OD> Fold<S, D, OS, OD> for Layout<IntTuple<CS, Nil>, IntTuple<CD, Nil>>
+impl<S: Integer, D, CS, CD> Fold<S, D, Nil, Nil> for Layout<IntTuple<CS, Nil>, IntTuple<CD, Nil>>
 where
-    Layout<OS, OD>: Finish<S, D, CD>,
+    Layout<Nil, Nil>: Finish<{ FINISH_EMPTY::<S> }, S, D, CD>,
 {
-    type Output = <Layout<OS, OD> as Finish<S, D, CD>>::Output;
-    fn fold(self, s: S, d: D, os: OS, od: OD) -> Result<Self::Output> {
+    type Output = <Layout<Nil, Nil> as Finish<{ FINISH_EMPTY::<S> }, S, D, CD>>::Output;
+    fn fold(self, s: S, d: D, os: Nil, od: Nil) -> Result<Self::Output> {
+        Layout {
+            shape: os,
+            stride: od,
+        }
+        .finish(s, d, self.stride.0)
+    }
+}
+
+impl<S: Integer, D, CS, CD, SH, ST, DH, DT> Fold<S, D, IntTuple<SH, ST>, IntTuple<DH, DT>>
+    for Layout<IntTuple<CS, Nil>, IntTuple<CD, Nil>>
+where
+    Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>: Finish<{ FINISH_NONEMPTY::<S> }, S, D, CD>,
+{
+    type Output = <Layout<IntTuple<SH, ST>, IntTuple<DH, DT>> as Finish<
+        { FINISH_NONEMPTY::<S> },
+        S,
+        D,
+        CD,
+    >>::Output;
+    fn fold(self, s: S, d: D, os: IntTuple<SH, ST>, od: IntTuple<DH, DT>) -> Result<Self::Output> {
         Layout {
             shape: os,
             stride: od,
@@ -691,10 +858,19 @@ where
 impl<S: Integer, D: Integer, CS: Integer, CD, SH, ST, DH, DT, OS, OD> Fold<S, D, OS, OD>
     for Layout<IntTuple<CS, IntTuple<SH, ST>>, IntTuple<CD, IntTuple<DH, DT>>>
 where
-    Bool<{ SKIP::<S, D, CS> }>:
-        FoldStep<Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>, S, D, CS, CD, OS, OD>,
+    (): FoldStep<
+            { STEP_ACTION::<S, D, CS> },
+            Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>,
+            S,
+            D,
+            CS,
+            CD,
+            OS,
+            OD,
+        >,
 {
-    type Output = <Bool<{ SKIP::<S, D, CS> }> as FoldStep<
+    type Output = <() as FoldStep<
+        { STEP_ACTION::<S, D, CS> },
         Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>,
         S,
         D,
@@ -704,7 +880,8 @@ where
         OD,
     >>::Output;
     fn fold(self, s: S, d: D, os: OS, od: OD) -> Result<Self::Output> {
-        <Bool<{ SKIP::<S, D, CS> }> as FoldStep<
+        <() as FoldStep<
+            { STEP_ACTION::<S, D, CS> },
             Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>,
             S,
             D,
@@ -727,12 +904,12 @@ where
     }
 }
 
-pub trait FoldStep<Tail, S, D, CS, CD, OS, OD> {
+pub trait FoldStep<const ACTION: StepAction, Tail, S, D, CS, CD, OS, OD> {
     type Output: LayoutParts;
     fn run(tail: Tail, s: S, d: D, cs: CS, cd: CD, os: OS, od: OD) -> Result<Self::Output>;
 }
-impl<Tail, S: Integer, D: Integer, CS: Integer, CD, OS, OD> FoldStep<Tail, S, D, CS, CD, OS, OD>
-    for Bool<true>
+impl<Tail, S: Integer, D: Integer, CS: Integer, CD, OS, OD>
+    FoldStep<{ StepAction::Skip }, Tail, S, D, CS, CD, OS, OD> for ()
 where
     (): TypedStep<S, D, CS>,
     Tail: Fold<S, <() as TypedStep<S, D, CS>>::Stride, OS, OD>,
@@ -743,8 +920,8 @@ where
         tail.fold(s, next_stride, os, od)
     }
 }
-impl<Tail, S: Integer, D: Integer, CS: Integer, CD: Integer, OS, OD>
-    FoldStep<Tail, S, D, CS, CD, OS, OD> for Bool<false>
+impl<Tail, S: Integer, D: Integer, CS: Integer, CD, OS, OD>
+    FoldStep<{ StepAction::Produce }, Tail, S, D, CS, CD, OS, OD> for ()
 where
     (): ComposeProduct<D, CD>,
     (): TypedStep<S, D, CS>,
@@ -775,11 +952,32 @@ where
     }
 }
 
-pub trait Finish<S, D, CD> {
+/// Final stage action taken when completing composition fold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy)]
+pub enum FinishAction {
+    Direct,
+    DropUnit,
+    Append,
+}
+
+pub const fn finish_action(is_empty: bool, s: Option<isize>) -> FinishAction {
+    if is_empty {
+        FinishAction::Direct
+    } else if matches!(s, Some(1)) {
+        FinishAction::DropUnit
+    } else {
+        FinishAction::Append
+    }
+}
+
+pub const FINISH_EMPTY<S: Integer>: FinishAction = finish_action(true, S::STATIC);
+pub const FINISH_NONEMPTY<S: Integer>: FinishAction = finish_action(false, S::STATIC);
+
+pub trait Finish<const ACTION: FinishAction, S, D, CD> {
     type Output: LayoutParts;
     fn finish(self, s: S, d: D, cd: CD) -> Result<Self::Output>;
 }
-impl<S, D: Integer, CD: Integer> Finish<S, D, CD> for Layout<Nil, Nil>
+impl<S, D: Integer, CD> Finish<{ FinishAction::Direct }, S, D, CD> for Layout<Nil, Nil>
 where
     (): ComposeProduct<D, CD>,
 {
@@ -796,53 +994,36 @@ where
         })
     }
 }
-pub const UNIT<S: Integer>: bool = matches!(S::STATIC, Some(1));
-impl<S: Integer, D, CD, SH, ST, DH, DT> Finish<S, D, CD>
+impl<S, D, CD, SH, ST, DH, DT> Finish<{ FinishAction::DropUnit }, S, D, CD>
     for Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>
 where
-    Bool<{ UNIT::<S> }>: FinishNonempty<IntTuple<SH, ST>, IntTuple<DH, DT>, S, D, CD>,
+    IntTuple<SH, ST>: Unwrap,
+    IntTuple<DH, DT>: Unwrap,
 {
-    type Output = <Bool<{ UNIT::<S> }> as FinishNonempty<
-        IntTuple<SH, ST>,
-        IntTuple<DH, DT>,
-        S,
-        D,
-        CD,
-    >>::Output;
-    fn finish(self, s: S, d: D, cd: CD) -> Result<Self::Output> {
-        <Bool<{ UNIT::<S> }> as FinishNonempty<IntTuple<SH, ST>, IntTuple<DH, DT>, S, D, CD>>::run(
-            self.shape,
-            self.stride,
-            s,
-            d,
-            cd,
-        )
-    }
-}
-pub trait FinishNonempty<OS, OD, S, D, CD> {
-    type Output: LayoutParts;
-    fn run(os: OS, od: OD, s: S, d: D, cd: CD) -> Result<Self::Output>;
-}
-impl<OS: Unwrap, OD: Unwrap, S, D, CD> FinishNonempty<OS, OD, S, D, CD> for Bool<true> {
-    type Output = Layout<OS::Output, OD::Output>;
-    fn run(os: OS, od: OD, _: S, _: D, _: CD) -> Result<Self::Output> {
+    type Output =
+        Layout<<IntTuple<SH, ST> as Unwrap>::Output, <IntTuple<DH, DT> as Unwrap>::Output>;
+    fn finish(self, _: S, _: D, _: CD) -> Result<Self::Output> {
         Ok(Layout {
-            shape: os.unwrap(),
-            stride: od.unwrap(),
+            shape: self.shape.unwrap(),
+            stride: self.stride.unwrap(),
         })
     }
 }
-impl<OS, OD, S, D: Integer, CD: Integer> FinishNonempty<OS, OD, S, D, CD> for Bool<false>
+impl<S, D: Integer, CD, SH, ST, DH, DT> Finish<{ FinishAction::Append }, S, D, CD>
+    for Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>
 where
     (): ComposeProduct<D, CD>,
-    OS: Append<IntTuple<S, Nil>>,
-    OD: Append<IntTuple<<() as ComposeProduct<D, CD>>::Output, Nil>>,
+    IntTuple<SH, ST>: Append<IntTuple<S, Nil>>,
+    IntTuple<DH, DT>: Append<IntTuple<<() as ComposeProduct<D, CD>>::Output, Nil>>,
 {
-    type Output = Layout<OS::Output, OD::Output>;
-    fn run(os: OS, od: OD, s: S, d: D, cd: CD) -> Result<Self::Output> {
+    type Output = Layout<
+        <IntTuple<SH, ST> as Append<IntTuple<S, Nil>>>::Output,
+        <IntTuple<DH, DT> as Append<IntTuple<<() as ComposeProduct<D, CD>>::Output, Nil>>>::Output,
+    >;
+    fn finish(self, s: S, d: D, cd: CD) -> Result<Self::Output> {
         Ok(Layout {
-            shape: os.append(IntTuple(s, Nil)),
-            stride: od.append(IntTuple(
+            shape: self.shape.append(IntTuple(s, Nil)),
+            stride: self.stride.append(IntTuple(
                 <() as ComposeProduct<D, CD>>::product(d, cd)?,
                 Nil,
             )),

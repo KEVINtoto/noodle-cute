@@ -2,7 +2,7 @@
 
 use core::mem::size_of_val;
 
-use noodle_cute::algebra::CoalescedLayout;
+use noodle_cute::algebra::{CoalesceMode, CoalescedLayout};
 use noodle_cute::layout::{AffineLayoutMap, DynLayout, Layout, LayoutMap};
 use noodle_cute::{DynInt, Error, Int, IntTuple, Nil, StaticValue, shape, stride};
 
@@ -29,13 +29,13 @@ fn static_entries_produce_const_zero_sized_results() {
 
     const NORMAL: Layout<Int<1>, Int<0>> = <CoalescedLayout<Int<1>, Int<8>> as StaticValue>::VALUE;
     const EXTENDED: Single<Int<2>, Int<8>> =
-        <CoalescedLayout<Int<1>, Int<8>, true> as StaticValue>::VALUE;
+        <CoalescedLayout<Int<1>, Int<8>, { CoalesceMode::Extended }> as StaticValue>::VALUE;
     assert_eq!(NORMAL.index(0), Ok(0));
     assert_eq!(EXTENDED.index_extended(3), Ok(24));
 
     const EMPTY: Layout<Int<1>, Int<0>> = <CoalescedLayout<Nil, Nil> as StaticValue>::VALUE;
     const EMPTY_EXTENDED: Single<Int<1>, Int<0>> =
-        <CoalescedLayout<Nil, Nil, true> as StaticValue>::VALUE;
+        <CoalescedLayout<Nil, Nil, { CoalesceMode::Extended }> as StaticValue>::VALUE;
     assert_eq!(EMPTY.size(), Ok(1));
     assert_eq!(EMPTY_EXTENDED.index_extended(5), Ok(0));
 }
@@ -49,15 +49,21 @@ fn static_extended_seed_preserves_the_terminal_stride() {
     type Shape = Pair<Int<2>, Int<1>>;
     const NORMAL: Single<Int<2>, Int<1>> =
         <CoalescedLayout<Shape, Pair<Int<1>, Int<8>>> as StaticValue>::VALUE;
-    const EXTENDED: Layout<Pair<Int<2>, Int<2>>, Pair<Int<1>, Int<8>>> =
-        <CoalescedLayout<Shape, Pair<Int<1>, Int<8>>, true> as StaticValue>::VALUE;
+    const EXTENDED: Layout<Pair<Int<2>, Int<2>>, Pair<Int<1>, Int<8>>> = <CoalescedLayout<
+        Shape,
+        Pair<Int<1>, Int<8>>,
+        { CoalesceMode::Extended },
+    > as StaticValue>::VALUE;
     assert_eq!(NORMAL.index_extended(2), Ok(2));
     for i in 0..16 {
         assert_eq!(EXTENDED.index_extended(i), INPUT.index_extended(i));
     }
 
-    const MERGED: Single<Int<4>, Int<1>> =
-        <CoalescedLayout<Shape, Pair<Int<1>, Int<2>>, true> as StaticValue>::VALUE;
+    const MERGED: Single<Int<4>, Int<1>> = <CoalescedLayout<
+        Shape,
+        Pair<Int<1>, Int<2>>,
+        { CoalesceMode::Extended },
+    > as StaticValue>::VALUE;
     assert_eq!(MERGED.size(), Ok(4));
     assert_eq!(MERGED.index_extended(9), Ok(9));
 }

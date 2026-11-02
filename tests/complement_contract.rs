@@ -1,5 +1,7 @@
 //! CuTe complement 的全静态、混合与运行时契约。
 
+#![feature(min_adt_const_params)]
+
 use noodle_cute::algebra::{TypedComplement, complement, complement_extended, complement_shape};
 use noodle_cute::layout::{AffineLayoutMap, DynLayout, Layout, LayoutMap, MAX_RANK};
 use noodle_cute::{DynInt, Error, Int, IntTuple, Nil, StaticValue, shape, stride};

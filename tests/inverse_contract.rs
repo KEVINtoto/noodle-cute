@@ -1,4 +1,6 @@
 //! CuTe inverse 的全静态、混合与运行时契约。
+#![feature(min_adt_const_params, macro_metavar_expr)]
+
 use noodle_cute::Error;
 use noodle_cute::algebra::*;
 use noodle_cute::layout::{AffineLayoutMap, DynLayout, Layout, LayoutMap, MAX_RANK};
@@ -11,27 +13,30 @@ type Pair<A, B> = IntTuple<A, IntTuple<B, Nil>>;
 
 #[test]
 fn static_inverses_are_const_and_preserve_the_colexicographic_preimage() {
-    const R: Layout<Pair<Int<3>, Int<2>>, Pair<Int<2>, Int<1>>> = inverted::<false, _>(Layout {
-        shape: shape![Int::<2>, Int::<3>],
-        stride: stride![Int::<3>, Int::<1>],
-    });
-    const L: Layout<Pair<Int<3>, Int<2>>, Pair<Int<2>, Int<1>>> = inverted::<true, _>(Layout {
-        shape: shape![Int::<2>, Int::<3>],
-        stride: stride![Int::<3>, Int::<1>],
-    });
+    const R: Layout<Pair<Int<3>, Int<2>>, Pair<Int<2>, Int<1>>> =
+        inverted::<{ InverseSide::Right }, _>(Layout {
+            shape: shape![Int::<2>, Int::<3>],
+            stride: stride![Int::<3>, Int::<1>],
+        });
+    const L: Layout<Pair<Int<3>, Int<2>>, Pair<Int<2>, Int<1>>> =
+        inverted::<{ InverseSide::Left }, _>(Layout {
+            shape: shape![Int::<2>, Int::<3>],
+            stride: stride![Int::<3>, Int::<1>],
+        });
     assert_eq!(R, L);
     assert_eq!(
         (0..6).map(|i| R.index(i).unwrap()).collect::<Vec<_>>(),
         [0, 2, 4, 1, 3, 5]
     );
-    const HOLES: Layout<Pair<Int<2>, Int<4>>, Pair<Int<0>, Int<1>>> = inverted::<true, _>(Layout {
-        shape: Int::<4>,
-        stride: Int::<2>,
-    });
+    const HOLES: Layout<Pair<Int<2>, Int<4>>, Pair<Int<0>, Int<1>>> =
+        inverted::<{ InverseSide::Left }, _>(Layout {
+            shape: Int::<4>,
+            stride: Int::<2>,
+        });
     for i in 0..4 {
         assert_eq!(HOLES.index(2 * i), Ok(i));
     }
-    const UNIT: Layout<Int<1>, Int<0>> = inverted::<false, _>(Layout {
+    const UNIT: Layout<Int<1>, Int<0>> = inverted::<{ InverseSide::Right }, _>(Layout {
         shape: Nil,
         stride: Nil,
     });
@@ -359,7 +364,7 @@ fn mixed_inverse_errors_broadcasts_and_dynamic_unit_extents_are_checked() {
 fn static_inversion_exceeds_the_runtime_leaf_capacity() {
     macro_rules! reverse_layout {
         ($($bit:literal),*) => { Layout {
-            shape: shape![$(Int::<{2 + 0 * $bit}>),*],
+            shape: shape![$( ${ignore($bit)} Int::<2> ),*],
             stride: stride![$(Int::<{1isize << $bit}>),*],
         } };
     }
@@ -367,8 +372,8 @@ fn static_inversion_exceeds_the_runtime_leaf_capacity() {
         32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10,
         9, 8, 7, 6, 5, 4, 3, 2, 1, 0
     );
-    let right = inverted::<false, _>(input);
-    let left = inverted::<true, _>(input);
+    let right = inverted::<{ InverseSide::Right }, _>(input);
+    let left = inverted::<{ InverseSide::Left }, _>(input);
     assert_eq!(right.rank(), MAX_RANK + 1);
     assert_eq!(right.as_flat_layout(), Err(Error::CapacityExceeded));
     assert_eq!(core::mem::size_of_val(&right), 0);

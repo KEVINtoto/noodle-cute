@@ -9,6 +9,10 @@
 //! operand kind rather than dispatching on `N`, which keeps their outputs concrete types;
 //! the layout algebra applies CuTe's static-zero rules itself where they change a result type.
 //!
+//! Native `i32` leaves store 32-bit runtime values, matching CuTe's common `int` extents. The
+//! operators above do not accept `i32` operands; tuple products, compact strides, and
+//! coordinate maps combine leaves with the rules described in [`Integer`].
+//!
 //! ```
 //! use noodle_cute::{DynInt, Int};
 //!
@@ -24,6 +28,7 @@ use crate::{Error, Result};
 
 /// A zero-sized integer whose value `N` is encoded in its type.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(C)]
 pub struct Int<const N: isize>;
 
 impl<const N: isize> Int<N> {
@@ -44,6 +49,7 @@ impl<const N: isize> From<Int<N>> for isize {
 
 /// An integer stored at runtime rather than encoded in its type.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
 pub struct DynInt(pub isize);
 
 impl DynInt {
@@ -66,12 +72,50 @@ mod sealedcontainer {
     impl<const N: isize> SealedInteger for Int<N> {}
     impl SealedInteger for DynInt {}
     impl SealedInteger for isize {}
+    impl SealedInteger for i32 {}
 }
 
-/// A shared interface for `Int<N>`, `DynInt`, and native `isize` leaves.
+/// A shared interface for `Int<N>`, `DynInt`, and native `isize` and `i32` leaves.
 ///
 /// This trait is sealed; downstream crates cannot implement it.
-pub trait Integer: sealedcontainer::SealedInteger + Copy {
+///
+/// Tuple products, compact strides, and coordinate maps combine leaves with
+/// CuTe's rules: two static operands give a static result, and a static zero
+/// absorbs multiplication (`_0 * x = _0`), division of zero (`_0 / x = _0`),
+/// and remainders (`_0 % x = x % _1 = x % _-1 = _0`). Other runtime results are
+/// `i32` when every runtime operand is `i32`, and [`DynInt`] when any operand is
+/// `DynInt` or `isize`. A static operand combined with an `i32` must fit in `i32`.
+///
+/// ```
+/// use noodle_cute::tuple::Product;
+/// use noodle_cute::{DynInt, Int, int_tuple};
+///
+/// let narrow: i32 = int_tuple![Int::<2>, 3i32].product_typed();
+/// let wide: DynInt = int_tuple![4i32, DynInt(5)].product_typed();
+/// let zero: Int<0> = int_tuple![Int::<0>, DynInt(5)].product_typed();
+/// assert_eq!((narrow, wide, zero.value()), (6, DynInt(20), 0));
+/// ```
+///
+/// A static value outside the `i32` range cannot combine with an `i32` leaf:
+///
+/// ```compile_fail
+/// use noodle_cute::tuple::Product;
+/// use noodle_cute::{Int, int_tuple};
+/// let _ = int_tuple![Int::<{ 1 << 40 }>, 3i32].product_typed();
+/// ```
+/// Its implementations support constant evaluation. A generic const caller
+/// uses `[const] Integer` and enables `const_trait_impl`:
+///
+/// ```
+/// #![feature(const_trait_impl)]
+/// use noodle_cute::{DynInt, Integer};
+/// const fn value<I: [const] Integer>(integer: I) -> isize {
+///     integer.value()
+/// }
+/// const N: isize = value(DynInt(7));
+/// assert_eq!(N, 7);
+/// ```
+pub const trait Integer: sealedcontainer::SealedInteger + Copy {
     /// The value known from the type, or `None` for a runtime representation.
     ///
     /// A `DynInt` or `isize` always reports `None`, even if its value is constant.
@@ -81,24 +125,31 @@ pub trait Integer: sealedcontainer::SealedInteger + Copy {
     fn value(self) -> isize;
 }
 
-impl<const N: isize> Integer for Int<N> {
+const impl<const N: isize> Integer for Int<N> {
     const STATIC: Option<isize> = Some(N);
     fn value(self) -> isize {
         N
     }
 }
 
-impl Integer for DynInt {
+const impl Integer for DynInt {
     const STATIC: Option<isize> = None;
     fn value(self) -> isize {
         self.0
     }
 }
 
-impl Integer for isize {
+const impl Integer for isize {
     const STATIC: Option<isize> = None;
     fn value(self) -> isize {
         self
+    }
+}
+
+const impl Integer for i32 {
+    const STATIC: Option<isize> = None;
+    fn value(self) -> isize {
+        self as isize
     }
 }
 
@@ -180,29 +231,222 @@ impl Neg for DynInt {
 
 pub(crate) const NON_NEGATIVE<const N: isize>: bool = N >= 0;
 
-/// Adds two runtime values, returning `Error::Overflow` if the sum cannot fit.
-pub(crate) fn add(a: isize, b: isize) -> Result<isize> {
-    a.checked_add(b).ok_or(Error::Overflow)
-}
+// CuTe's mixed static/dynamic integer rules for tuple products, compact strides, and
+// coordinate maps; the public operators above keep their simpler output types.
+mod typed {
+    use core::marker::ConstParamTy;
 
-/// Multiplies two runtime values, returning `Error::Overflow` if the product cannot fit.
-pub(crate) fn mul(a: isize, b: isize) -> Result<isize> {
-    a.checked_mul(b).ok_or(Error::Overflow)
-}
+    use super::{DynInt, Int, Integer, ceil_div};
 
-/// Multiplies values with checked arithmetic; the empty product is one.
-///
-/// Any zero value makes the result zero before a multiplication can overflow.
-pub(crate) fn checked_product<I>(mut values: I) -> Result<isize>
-where
-    I: Iterator<Item = Result<isize>> + Clone,
-{
-    for value in values.clone() {
-        if value? == 0 {
-            return Ok(0);
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy)]
+    pub enum Op {
+        Add,
+        Mul,
+        Div,
+        Rem,
+        /// Ceiling division of a nonnegative dividend by a positive divisor.
+        CeilDiv,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy)]
+    pub enum Repr {
+        Static,
+        Narrow,
+        Wide,
+    }
+
+    pub trait Leaf: Integer {
+        const REPR: Repr;
+    }
+    impl<const N: isize> Leaf for Int<N> {
+        const REPR: Repr = Repr::Static;
+    }
+    impl Leaf for i32 {
+        const REPR: Repr = Repr::Narrow;
+    }
+    impl Leaf for DynInt {
+        const REPR: Repr = Repr::Wide;
+    }
+    impl Leaf for isize {
+        const REPR: Repr = Repr::Wide;
+    }
+
+    const fn fold(op: Op, a: isize, b: isize) -> isize {
+        match op {
+            Op::Add => a + b,
+            Op::Mul => a * b,
+            Op::Div => a / b,
+            Op::Rem => a % b,
+            Op::CeilDiv => ceil_div(a, b),
         }
     }
-    values.try_fold(1, |acc, value| mul(acc, value?))
+
+    // integral_constant.hpp: `_0 * x`, `x * _0`, `_0 / x`, `_0 % x`, and `x % _1` stay static.
+    const fn static_result(op: Op, a: Option<isize>, b: Option<isize>) -> Option<isize> {
+        match (op, a, b) {
+            (_, Some(a), Some(b)) => Some(fold(op, a, b)),
+            (Op::Mul, Some(0), _)
+            | (Op::Mul, _, Some(0))
+            | (Op::Div, Some(0), _)
+            | (Op::Rem, Some(0), _)
+            | (Op::Rem, _, Some(1 | -1)) => Some(0),
+            _ => None,
+        }
+    }
+
+    const fn fits_narrow(value: Option<isize>) -> bool {
+        match value {
+            Some(v) => v >= i32::MIN as isize && v <= i32::MAX as isize,
+            None => true,
+        }
+    }
+
+    pub const RESULT_REPR<A: Leaf, B: Leaf, const OP: Op>: Repr =
+        if static_result(OP, A::STATIC, B::STATIC).is_some() {
+            Repr::Static
+        } else if matches!(A::REPR, Repr::Wide) || matches!(B::REPR, Repr::Wide) {
+            Repr::Wide
+        } else {
+            assert!(
+                fits_narrow(A::STATIC) && fits_narrow(B::STATIC),
+                "a static operand combined with i32 must fit in i32"
+            );
+            Repr::Narrow
+        };
+    pub const RESULT_VALUE<A: Leaf, B: Leaf, const OP: Op>: isize =
+        match static_result(OP, A::STATIC, B::STATIC) {
+            Some(v) => v,
+            None => 0,
+        };
+
+    pub struct Width<const R: Repr>;
+
+    pub trait Pick<const N: isize> {
+        type Output: Integer;
+        fn apply(op: Op, a: isize, b: isize) -> Self::Output;
+        fn checked(op: Op, a: isize, b: isize) -> Option<Self::Output>;
+    }
+    impl<const N: isize> Pick<N> for Width<{ Repr::Static }> {
+        type Output = Int<N>;
+        fn apply(_: Op, _: isize, _: isize) -> Int<N> {
+            Int
+        }
+        fn checked(_: Op, _: isize, _: isize) -> Option<Int<N>> {
+            Some(Int)
+        }
+    }
+    // Narrow operands are `i32` leaves or static values checked by `RESULT_REPR`.
+    impl<const N: isize> Pick<N> for Width<{ Repr::Narrow }> {
+        type Output = i32;
+        fn apply(op: Op, a: isize, b: isize) -> i32 {
+            let (a, b) = (a as i32, b as i32);
+            match op {
+                Op::Add => a + b,
+                Op::Mul => a * b,
+                Op::Div => a / b,
+                Op::Rem => a % b,
+                Op::CeilDiv => a / b + (a % b != 0) as i32,
+            }
+        }
+        fn checked(op: Op, a: isize, b: isize) -> Option<i32> {
+            let (a, b) = (a as i32, b as i32);
+            match op {
+                Op::Add => a.checked_add(b),
+                Op::Mul => a.checked_mul(b),
+                Op::Div => a.checked_div(b),
+                Op::Rem => a.checked_rem(b),
+                Op::CeilDiv => a
+                    .checked_div(b)?
+                    .checked_add((a.checked_rem(b)? != 0) as i32),
+            }
+        }
+    }
+    impl<const N: isize> Pick<N> for Width<{ Repr::Wide }> {
+        type Output = DynInt;
+        fn apply(op: Op, a: isize, b: isize) -> DynInt {
+            DynInt(fold(op, a, b))
+        }
+        fn checked(op: Op, a: isize, b: isize) -> Option<DynInt> {
+            match op {
+                Op::Add => a.checked_add(b),
+                Op::Mul => a.checked_mul(b),
+                Op::Div => a.checked_div(b),
+                Op::Rem => a.checked_rem(b),
+                Op::CeilDiv => a
+                    .checked_div(b)
+                    .zip(a.checked_rem(b))
+                    .map(|(q, r)| q + (r != 0) as isize),
+            }
+            .map(DynInt)
+        }
+    }
+
+    pub trait Arith<B, const OP: Op>: Integer {
+        type Output: Integer;
+        /// Uses Rust's integer operators: overflow panics in debug builds.
+        fn apply(self, rhs: B) -> Self::Output;
+        fn checked(self, rhs: B) -> Option<Self::Output>;
+    }
+    impl<A: Leaf, B: Leaf, const OP: Op> Arith<B, OP> for A
+    where
+        Width<{ RESULT_REPR::<A, B, OP> }>: Pick<{ RESULT_VALUE::<A, B, OP> }>,
+    {
+        type Output =
+            <Width<{ RESULT_REPR::<A, B, OP> }> as Pick<{ RESULT_VALUE::<A, B, OP> }>>::Output;
+        fn apply(self, rhs: B) -> Self::Output {
+            <Width<{ RESULT_REPR::<A, B, OP> }> as Pick<{ RESULT_VALUE::<A, B, OP> }>>::apply(
+                OP,
+                self.value(),
+                rhs.value(),
+            )
+        }
+        fn checked(self, rhs: B) -> Option<Self::Output> {
+            <Width<{ RESULT_REPR::<A, B, OP> }> as Pick<{ RESULT_VALUE::<A, B, OP> }>>::checked(
+                OP,
+                self.value(),
+                rhs.value(),
+            )
+        }
+    }
+}
+pub(crate) use typed::{Arith, Op};
+
+pub(crate) type Sum<A, B> = <A as Arith<B, { Op::Add }>>::Output;
+pub(crate) type Prod<A, B> = <A as Arith<B, { Op::Mul }>>::Output;
+pub(crate) type Quot<A, B> = <A as Arith<B, { Op::Div }>>::Output;
+pub(crate) type Modulo<A, B> = <A as Arith<B, { Op::Rem }>>::Output;
+pub(crate) type CeilQuot<A, B> = <A as Arith<B, { Op::CeilDiv }>>::Output;
+
+pub(crate) fn sum<A: Arith<B, { Op::Add }>, B>(a: A, b: B) -> Sum<A, B> {
+    a.apply(b)
+}
+pub(crate) fn prod<A: Arith<B, { Op::Mul }>, B>(a: A, b: B) -> Prod<A, B> {
+    a.apply(b)
+}
+pub(crate) fn quot<A: Arith<B, { Op::Div }>, B>(a: A, b: B) -> Quot<A, B> {
+    a.apply(b)
+}
+pub(crate) fn modulo<A: Arith<B, { Op::Rem }>, B>(a: A, b: B) -> Modulo<A, B> {
+    a.apply(b)
+}
+pub(crate) fn ceil_quot<A: Arith<B, { Op::CeilDiv }>, B>(a: A, b: B) -> CeilQuot<A, B> {
+    a.apply(b)
+}
+
+/// Adds two integers, returning `Error::Overflow` if the sum cannot fit.
+pub(crate) const fn add(a: isize, b: isize) -> Result<isize> {
+    match a.checked_add(b) {
+        Some(value) => Ok(value),
+        None => Err(Error::Overflow),
+    }
+}
+
+/// Multiplies two integers, returning `Error::Overflow` if the product cannot fit.
+pub(crate) const fn mul(a: isize, b: isize) -> Result<isize> {
+    match a.checked_mul(b) {
+        Some(value) => Ok(value),
+        None => Err(Error::Overflow),
+    }
 }
 
 /// Computes ceiling division without forming the potentially overflowing `a + b - 1`.

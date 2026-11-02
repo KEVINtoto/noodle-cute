@@ -1,5 +1,7 @@
 //! CuTe composition 的规范化、惰性回退与边界契约。
 
+#![feature(min_adt_const_params)]
+
 use noodle_cute::algebra::complement_extended;
 use noodle_cute::algebra::{Composition, composition, composition_layout};
 use noodle_cute::layout::{AffineLayoutMap, DynLayout, GroupedLayout, Layout, LayoutMap};

@@ -5,34 +5,40 @@
 //! Runtime layouts simplify by their current values; an empty input is normalized to `1:0` by
 //! this crate's scalar convention.
 
+use core::marker::ConstParamTy;
 use core::ops::Mul;
 
+use crate::basis::ScaledBasis;
 use crate::int::{Int, Integer, mul};
-use crate::layout::{DynLayout, Layout, LayoutMap, Shape};
+use crate::layout::{DynLayout, Layout, LayoutDesc, LayoutMap, MAX_RANK, Shape, StrideOf};
 use crate::tuple::{Flatten, Item, Nil};
-use crate::{IntTuple, Result};
+use crate::{Error, IntTuple, Result};
 
-/// Selects a coalescing action from facts known at compile time.
-///
-/// The fold changes types only using static facts: a runtime extent equal to one
-/// remains in the output tuple. Action codes are [`DISCARD`] for a static unit
-/// extent, [`RETAIN`] to keep a leaf, and [`MERGE`] to merge it with the folded
-/// tail's head.
-pub struct Decision<const N: u8>;
+/// Selects ordinary coalesce or CuTe's extended-domain `coalesce_x`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy)]
+pub enum CoalesceMode {
+    /// Preserves the logical-domain mapping and removes static unit modes.
+    Standard,
+    /// Keeps the trailing stride used by extended indexing.
+    Extended,
+}
 
-/// Drops a static unit extent.
-pub const DISCARD: u8 = 0;
-/// Keeps the leaf as a separate mode.
-pub const RETAIN: u8 = 1;
-/// Merges the leaf with the folded tail's head.
-pub const MERGE: u8 = 2;
+/// Coalescing action selected from static shape and stride facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy)]
+pub enum CoalesceAction {
+    Discard,
+    Retain,
+    Merge,
+}
+
+// Decision<CoalesceAction> was replaced by direct ApplyPrepend trait dispatch.
 
 /// Selects whether a leaf is discarded or retained when the folded tail is empty.
-pub const fn unit_decision(s: Option<isize>) -> u8 {
+pub const fn unit_decision(s: Option<isize>) -> CoalesceAction {
     if matches!(s, Some(1)) {
-        DISCARD
+        CoalesceAction::Discard
     } else {
-        RETAIN
+        CoalesceAction::Retain
     }
 }
 
@@ -42,9 +48,9 @@ pub const fn merge_decision(
     d: Option<isize>,
     tail_shape: Option<isize>,
     next: Option<isize>,
-) -> u8 {
+) -> CoalesceAction {
     if matches!(s, Some(1)) {
-        return DISCARD;
+        return CoalesceAction::Discard;
     }
     // None means unknown at the type level; the runtime path passes every value as known.
     // CuTe's `_0 * x` is a static `_0` even when `x` is dynamic.
@@ -54,36 +60,77 @@ pub const fn merge_decision(
         _ => None,
     };
     match (product, tail_shape, next) {
-        (Some(p), Some(_), Some(c)) if p == c => MERGE,
-        _ => RETAIN,
+        (Some(p), Some(_), Some(c)) if p == c => CoalesceAction::Merge,
+        _ => CoalesceAction::Retain,
     }
 }
 
 // Reuse these constants in bounds and associated-type projections so generic
 // const expressions refer to identical definitions.
-pub const UNIT_DECISION<S: Integer>: u8 = unit_decision(S::STATIC);
-pub const MERGE_DECISION<S: Integer, D: Integer, TS: Integer, TD: Integer>: u8 =
-    merge_decision(S::STATIC, D::STATIC, TS::STATIC, TD::STATIC);
+pub const UNIT_DECISION<S: Integer>: CoalesceAction = unit_decision(S::STATIC);
+pub trait CoalesceStride {
+    const STATIC: Option<isize>;
+    const BASIS: Option<usize>;
+}
+impl<I: Integer> CoalesceStride for I {
+    const STATIC: Option<isize> = I::STATIC;
+    const BASIS: Option<usize> = None;
+}
+impl<V: Integer, const M: usize> CoalesceStride for ScaledBasis<V, M> {
+    const STATIC: Option<isize> = V::STATIC;
+    const BASIS: Option<usize> = Some(M);
+}
+pub const MERGE_DECISION<S: Integer, D: CoalesceStride, TS: Integer, TD: CoalesceStride>:
+    CoalesceAction = if matches!(S::STATIC, Some(1)) {
+    CoalesceAction::Discard
+} else if match (D::BASIS, TD::BASIS) {
+    (None, None) => true,
+    (Some(a), Some(b)) => a == b,
+    _ => false,
+} {
+    merge_decision(S::STATIC, D::STATIC, TS::STATIC, TD::STATIC)
+} else {
+    CoalesceAction::Retain
+};
 
-/// Adds a leaf to an empty tail; with `EXTENDED`, a trailing static unit extent becomes 2 to keep its stride.
-pub trait PrependToEmpty<S, D, const EXTENDED: bool = false> {
+/// Applies the prepend action to an empty or non-empty tail layout.
+pub trait ApplyPrepend<
+    const ACTION: CoalesceAction,
+    S,
+    D,
+    const MODE: CoalesceMode = { CoalesceMode::Standard },
+>
+{
     type Output;
-    fn apply(s: S, d: D) -> Self::Output;
+    fn apply_prepend(self, s: S, d: D) -> Self::Output;
 }
 
-impl<S, D> PrependToEmpty<S, D, false> for Decision<DISCARD> {
+impl<S, D> ApplyPrepend<{ CoalesceAction::Discard }, S, D, { CoalesceMode::Standard }>
+    for Layout<Nil, Nil>
+{
     type Output = Layout<Nil, Nil>;
-    fn apply(_: S, _: D) -> Self::Output {
+    fn apply_prepend(self, _: S, _: D) -> Self::Output {
+        self
+    }
+}
+
+impl<S, D> ApplyPrepend<{ CoalesceAction::Discard }, S, D, { CoalesceMode::Extended }>
+    for Layout<Nil, Nil>
+{
+    type Output = Layout<IntTuple<Int<2>, Nil>, IntTuple<D, Nil>>;
+    fn apply_prepend(self, _: S, d: D) -> Self::Output {
         Layout {
-            shape: Nil,
-            stride: Nil,
+            shape: IntTuple(Int, Nil),
+            stride: IntTuple(d, Nil),
         }
     }
 }
 
-impl<S, D, const EXTENDED: bool> PrependToEmpty<S, D, EXTENDED> for Decision<RETAIN> {
+impl<S, D, const MODE: CoalesceMode> ApplyPrepend<{ CoalesceAction::Retain }, S, D, MODE>
+    for Layout<Nil, Nil>
+{
     type Output = Layout<IntTuple<S, Nil>, IntTuple<D, Nil>>;
-    fn apply(s: S, d: D) -> Self::Output {
+    fn apply_prepend(self, s: S, d: D) -> Self::Output {
         Layout {
             shape: IntTuple(s, Nil),
             stride: IntTuple(d, Nil),
@@ -91,49 +138,43 @@ impl<S, D, const EXTENDED: bool> PrependToEmpty<S, D, EXTENDED> for Decision<RET
     }
 }
 
-/// Prepends `(s, d)` to a folded tail. Type parameters:
-/// - `S`, `D`: types of the new shape and stride leaves being prepended.
-/// - `TS`, `TD`: types of the tail's first shape and stride leaves.
-/// - `TSR`, `TDR`: types of the remaining shape and stride tuples of the tail
-///   after its first leaf.
-pub trait PrependToNonempty<S, D, TS, TSR, TD, TDR> {
-    type Output;
-    fn apply(s: S, d: D, tail: Layout<IntTuple<TS, TSR>, IntTuple<TD, TDR>>) -> Self::Output;
-}
-
-impl<S, D, TS, TSR, TD, TDR> PrependToNonempty<S, D, TS, TSR, TD, TDR> for Decision<DISCARD> {
-    type Output = Layout<IntTuple<TS, TSR>, IntTuple<TD, TDR>>;
-    fn apply(_: S, _: D, tail: Self::Output) -> Self::Output {
-        tail
+impl<S, D, TS, TSR, TD, TDR, const MODE: CoalesceMode>
+    ApplyPrepend<{ CoalesceAction::Discard }, S, D, MODE>
+    for Layout<IntTuple<TS, TSR>, IntTuple<TD, TDR>>
+{
+    type Output = Self;
+    fn apply_prepend(self, _: S, _: D) -> Self::Output {
+        self
     }
 }
 
-impl<S, D, TS, TSR, TD, TDR> PrependToNonempty<S, D, TS, TSR, TD, TDR> for Decision<RETAIN> {
+impl<S, D, TS, TSR, TD, TDR, const MODE: CoalesceMode>
+    ApplyPrepend<{ CoalesceAction::Retain }, S, D, MODE>
+    for Layout<IntTuple<TS, TSR>, IntTuple<TD, TDR>>
+{
     type Output = Layout<IntTuple<S, IntTuple<TS, TSR>>, IntTuple<D, IntTuple<TD, TDR>>>;
-    fn apply(s: S, d: D, tail: Layout<IntTuple<TS, TSR>, IntTuple<TD, TDR>>) -> Self::Output {
+    fn apply_prepend(self, s: S, d: D) -> Self::Output {
         Layout {
-            shape: IntTuple(s, tail.shape),
-            stride: IntTuple(d, tail.stride),
+            shape: IntTuple(s, self.shape),
+            stride: IntTuple(d, self.stride),
         }
     }
 }
 
-impl<S: Mul<TS>, D, TS, TSR, TD, TDR> PrependToNonempty<S, D, TS, TSR, TD, TDR>
-    for Decision<MERGE>
+impl<S: Mul<TS>, D, TS, TSR, TD, TDR, const MODE: CoalesceMode>
+    ApplyPrepend<{ CoalesceAction::Merge }, S, D, MODE>
+    for Layout<IntTuple<TS, TSR>, IntTuple<TD, TDR>>
 {
     type Output = Layout<IntTuple<S::Output, TSR>, IntTuple<D, TDR>>;
-    fn apply(s: S, d: D, tail: Layout<IntTuple<TS, TSR>, IntTuple<TD, TDR>>) -> Self::Output {
+    fn apply_prepend(self, s: S, d: D) -> Self::Output {
         Layout {
-            shape: IntTuple(s * tail.shape.0, tail.shape.1),
-            stride: IntTuple(d, tail.stride.1),
+            shape: IntTuple(s * self.shape.0, self.shape.1),
+            stride: IntTuple(d, self.stride.1),
         }
     }
 }
 
 /// Dispatches the prepend action using the static extent and stride metadata.
-///
-/// `S`/`D` are the new shape/stride leaf types. For a nonempty tail, `TS`/`TD`
-/// are its first shape/stride leaf types and `TSR`/`TDR` the remaining tuples.
 pub trait Prepend<S, D> {
     type Output;
     fn prepend(self, s: S, d: D) -> Self::Output;
@@ -141,36 +182,22 @@ pub trait Prepend<S, D> {
 
 impl<S: Integer, D> Prepend<S, D> for Layout<Nil, Nil>
 where
-    Decision<{ UNIT_DECISION::<S> }>: PrependToEmpty<S, D>,
+    Self: ApplyPrepend<{ UNIT_DECISION::<S> }, S, D>,
 {
-    type Output = <Decision<{ UNIT_DECISION::<S> }> as PrependToEmpty<S, D>>::Output;
+    type Output = <Self as ApplyPrepend<{ UNIT_DECISION::<S> }, S, D>>::Output;
     fn prepend(self, s: S, d: D) -> Self::Output {
-        <Decision<{ UNIT_DECISION::<S> }> as PrependToEmpty<S, D>>::apply(s, d)
+        self.apply_prepend(s, d)
     }
 }
 
-impl<S: Integer, D: Integer, TS: Integer, TSR, TD: Integer, TDR> Prepend<S, D>
+impl<S: Integer, D: CoalesceStride, TS: Integer, TSR, TD: CoalesceStride, TDR> Prepend<S, D>
     for Layout<IntTuple<TS, TSR>, IntTuple<TD, TDR>>
 where
-    Decision<{ MERGE_DECISION::<S, D, TS, TD> }>: PrependToNonempty<S, D, TS, TSR, TD, TDR>,
+    Self: ApplyPrepend<{ MERGE_DECISION::<S, D, TS, TD> }, S, D>,
 {
-    type Output = <Decision<{ MERGE_DECISION::<S, D, TS, TD> }> as PrependToNonempty<
-        S,
-        D,
-        TS,
-        TSR,
-        TD,
-        TDR,
-    >>::Output;
+    type Output = <Self as ApplyPrepend<{ MERGE_DECISION::<S, D, TS, TD> }, S, D>>::Output;
     fn prepend(self, s: S, d: D) -> Self::Output {
-        <Decision<{ MERGE_DECISION::<S, D, TS, TD> }> as PrependToNonempty<
-            S,
-            D,
-            TS,
-            TSR,
-            TD,
-            TDR,
-        >>::apply(s, d, self)
+        self.apply_prepend(s, d)
     }
 }
 
@@ -178,8 +205,8 @@ where
 ///
 /// The result can still be empty when the input is empty or every extent is a
 /// static one; [`FinishCoalesce`] normalizes that case.
-/// `EXTENDED` selects the `coalesce_x` seed, which keeps the trailing stride.
-pub trait CoalesceFold<const EXTENDED: bool = false> {
+/// `CoalesceMode::Extended` selects the `coalesce_x` seed, which keeps the trailing stride.
+pub trait CoalesceFold<const MODE: CoalesceMode = { CoalesceMode::Standard }> {
     type Output;
     fn fold(self) -> Self::Output;
 }
@@ -205,7 +232,7 @@ where
     }
 }
 
-impl CoalesceFold<true> for Layout<Nil, Nil> {
+impl CoalesceFold<{ CoalesceMode::Extended }> for Layout<Nil, Nil> {
     // Upstream requires a nonempty input; an empty layout follows this crate's scalar convention.
     type Output = Layout<IntTuple<Int<1>, Nil>, IntTuple<Int<0>, Nil>>;
     fn fold(self) -> Self::Output {
@@ -216,35 +243,37 @@ impl CoalesceFold<true> for Layout<Nil, Nil> {
     }
 }
 
-impl<S, D> PrependToEmpty<S, D, true> for Decision<DISCARD> {
-    type Output = Layout<IntTuple<Int<2>, Nil>, IntTuple<D, Nil>>;
-    fn apply(_: S, d: D) -> Self::Output {
-        Layout {
-            shape: IntTuple(Int, Nil),
-            stride: IntTuple(d, Nil),
-        }
-    }
-}
-impl<S: Integer, D> CoalesceFold<true> for Layout<IntTuple<S, Nil>, IntTuple<D, Nil>>
+impl<S: Integer, D> CoalesceFold<{ CoalesceMode::Extended }>
+    for Layout<IntTuple<S, Nil>, IntTuple<D, Nil>>
 where
-    Decision<{ UNIT_DECISION::<S> }>: PrependToEmpty<S, D, true>,
+    Layout<Nil, Nil>: ApplyPrepend<{ UNIT_DECISION::<S> }, S, D, { CoalesceMode::Extended }>,
 {
-    type Output = <Decision<{ UNIT_DECISION::<S> }> as PrependToEmpty<S, D, true>>::Output;
+    type Output = <Layout<Nil, Nil> as ApplyPrepend<
+        { UNIT_DECISION::<S> },
+        S,
+        D,
+        { CoalesceMode::Extended },
+    >>::Output;
     fn fold(self) -> Self::Output {
-        <Decision<{ UNIT_DECISION::<S> }> as PrependToEmpty<S, D, true>>::apply(
-            self.shape.0,
-            self.stride.0,
-        )
+        Layout {
+            shape: Nil,
+            stride: Nil,
+        }
+        .apply_prepend(self.shape.0, self.stride.0)
     }
 }
 
-impl<S, D, SH, ST, DH, DT, const EXTENDED: bool> CoalesceFold<EXTENDED>
+impl<S, D, SH, ST, DH, DT, const MODE: CoalesceMode> CoalesceFold<MODE>
     for Layout<IntTuple<S, IntTuple<SH, ST>>, IntTuple<D, IntTuple<DH, DT>>>
 where
-    Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>: CoalesceFold<EXTENDED>,
-    <Layout<IntTuple<SH, ST>, IntTuple<DH, DT>> as CoalesceFold<EXTENDED>>::Output: Prepend<S, D>,
+    Layout<IntTuple<SH, ST>, IntTuple<DH, DT>>: CoalesceFold<MODE>,
+    <Layout<IntTuple<SH, ST>, IntTuple<DH, DT>> as CoalesceFold<MODE>>::Output: Prepend<S, D>,
 {
-    type Output = <<Layout<IntTuple<SH, ST>, IntTuple<DH, DT>> as CoalesceFold<EXTENDED>>::Output as Prepend<S, D>>::Output;
+    type Output =
+        <<Layout<IntTuple<SH, ST>, IntTuple<DH, DT>> as CoalesceFold<MODE>>::Output as Prepend<
+            S,
+            D,
+        >>::Output;
     fn fold(self) -> Self::Output {
         Layout {
             shape: self.shape.1,
@@ -282,8 +311,8 @@ where
     }
 }
 
-/// Result type of the typed coalesce; `EXTENDED` selects CuTe `coalesce_x`, which keeps the
-/// extended mapping.
+/// Result type of typed coalesce; [`CoalesceMode::Extended`] selects CuTe `coalesce_x`,
+/// which keeps the extended mapping. The default is [`CoalesceMode::Standard`].
 ///
 /// For fully static inputs, `<CoalescedLayout<S, D> as StaticValue>::VALUE` is the result as
 /// a constant: static unit modes are removed, contiguous modes merged, and an empty result is
@@ -291,11 +320,11 @@ where
 /// Static merge products must be representable as `isize`.
 ///
 /// ```
-/// use noodle_cute::{Int, IntTuple, Nil, StaticValue, algebra::CoalescedLayout, layout::Layout};
+/// use noodle_cute::{Int, IntTuple, Nil, StaticValue, algebra::{CoalesceMode, CoalescedLayout}, layout::Layout};
 /// type Pair<const A: isize, const B: isize> = IntTuple<Int<A>, IntTuple<Int<B>, Nil>>;
 /// type Single<const S: isize, const D: isize> = Layout<IntTuple<Int<S>, Nil>, IntTuple<Int<D>, Nil>>;
 /// const C: Single<6, 1> = <CoalescedLayout<Pair<2, 3>, Pair<1, 2>> as StaticValue>::VALUE;
-/// const X: Single<4, 1> = <CoalescedLayout<Pair<2, 1>, Pair<1, 2>, true> as StaticValue>::VALUE;
+/// const X: Single<4, 1> = <CoalescedLayout<Pair<2, 1>, Pair<1, 2>, { CoalesceMode::Extended }> as StaticValue>::VALUE;
 /// ```
 ///
 /// Runtime leaves have no constant value; use [`Layout::coalesce`] instead:
@@ -310,12 +339,12 @@ where
 /// type Stride = IntTuple<Int<0>, IntTuple<Int<0>, Nil>>;
 /// const C: CoalescedLayout<Shape, Stride> = StaticValue::VALUE;
 /// ```
-pub type CoalescedLayout<S, D, const EXTENDED: bool = false> = <<Layout<
+pub type CoalescedLayout<S, D, const MODE: CoalesceMode = { CoalesceMode::Standard }> = <<Layout<
     <S as Flatten>::Output,
     <D as Flatten>::Output,
-> as CoalesceFold<EXTENDED>>::Output as FinishCoalesce>::Output;
+> as CoalesceFold<MODE>>::Output as FinishCoalesce>::Output;
 
-impl<S: Shape + Flatten, D: Item<Profile = S::Profile> + Flatten> Layout<S, D>
+impl<S: Shape + Flatten, D: StrideOf<S> + Flatten> Layout<S, D>
 where
     Layout<S::Output, D::Output>: CoalesceFold,
     <Layout<S::Output, D::Output> as CoalesceFold>::Output: FinishCoalesce,
@@ -335,10 +364,11 @@ where
     }
 }
 
-impl<S: Shape + Flatten, D: Item<Profile = S::Profile> + Flatten> Layout<S, D>
+impl<S: Shape + Flatten, D: StrideOf<S> + Flatten> Layout<S, D>
 where
-    Layout<S::Output, D::Output>: CoalesceFold<true>,
-    <Layout<S::Output, D::Output> as CoalesceFold<true>>::Output: FinishCoalesce,
+    Layout<S::Output, D::Output>: CoalesceFold<{ CoalesceMode::Extended }>,
+    <Layout<S::Output, D::Output> as CoalesceFold<{ CoalesceMode::Extended }>>::Output:
+        FinishCoalesce,
 {
     /// Typed CuTe `coalesce_x`: simplifies while keeping the extended-domain mapping, for
     /// static and mixed leaves.
@@ -357,7 +387,7 @@ where
     /// for i in 0..12 { assert_eq!(a.index_extended(i)?, b.index_extended(i)?); }
     /// # Ok::<(), noodle_cute::Error>(())
     /// ```
-    pub fn coalesce_extended(&self) -> Result<CoalescedLayout<S, D, true>> {
+    pub fn coalesce_extended(&self) -> Result<CoalescedLayout<S, D, { CoalesceMode::Extended }>> {
         self.size()?;
         self.clone().flatten().fold().finish()
     }
@@ -384,7 +414,7 @@ impl DynLayout {
     /// # Ok::<(), noodle_cute::Error>(())
     /// ```
     pub fn coalesce(&self) -> Result<Self> {
-        self.coalesce_impl(false)
+        self.coalesce_impl(CoalesceMode::Standard)
     }
 
     /// CuTe `coalesce_x`: keeps the trailing stride that determines the extended direction.
@@ -396,39 +426,61 @@ impl DynLayout {
     /// errors of the original extended decoding. An empty input becomes `1:0`, which also accepts
     /// positive extended indices and maps them to address 0.
     pub fn coalesce_extended(&self) -> Result<Self> {
-        self.coalesce_impl(true)
+        self.coalesce_impl(CoalesceMode::Extended)
     }
 
-    // At runtime the actual trailing extent keeps the extended stride, avoiding the overflow a
-    // placeholder extent of 2 could add.
-    fn coalesce_impl(&self, extended: bool) -> Result<Self> {
-        let mut out = Self::scalar();
-        for a in (0..self.rank).rev() {
-            let (s, d) = (self.shape[a], self.stride[a]);
-            if s == 1 && !(extended && a + 1 == self.rank) {
+    fn coalesce_impl(&self, mode: CoalesceMode) -> Result<Self> {
+        let desc = LayoutDesc::from_dyn_layout(self);
+        let coalesced = coalesce_desc(&desc, mode)?;
+        Ok(coalesced.to_dyn_layout())
+    }
+}
+
+/// Coalesces a [`LayoutDesc`] according to CuTe coalescing rules.
+pub const fn coalesce_desc(desc: &LayoutDesc, mode: CoalesceMode) -> Result<LayoutDesc> {
+    let mut out = LayoutDesc::empty();
+    let mut a = desc.rank;
+    while a > 0 {
+        a -= 1;
+        let s = desc.shapes[a];
+        let d = desc.strides[a];
+        if s == 1 && !(matches!(mode, CoalesceMode::Extended) && a + 1 == desc.rank) {
+            continue;
+        }
+        if out.rank > 0 {
+            let j = out.rank - 1;
+            if matches!(
+                merge_decision(Some(s), Some(d), Some(out.shapes[j]), Some(out.strides[j])),
+                CoalesceAction::Merge
+            ) {
+                let merged_s = match mul(s, out.shapes[j]) {
+                    Ok(v) => v,
+                    Err(e) => return Err(e),
+                };
+                out.shapes[j] = merged_s;
+                out.strides[j] = d;
                 continue;
             }
-            if out.rank > 0 {
-                let j = out.rank - 1;
-                if merge_decision(Some(s), Some(d), Some(out.shape[j]), Some(out.stride[j]))
-                    == MERGE
-                {
-                    out.shape[j] = mul(s, out.shape[j])?;
-                    out.stride[j] = d;
-                    continue;
-                }
-            }
-            out.shape[out.rank] = s;
-            out.stride[out.rank] = d;
-            out.rank += 1;
         }
-        if out.rank == 0 {
-            out.rank = 1;
-            out.shape[0] = 1;
-            out.stride[0] = 0;
+        if out.rank >= MAX_RANK {
+            return Err(Error::CapacityExceeded);
         }
-        out.shape[..out.rank].reverse();
-        out.stride[..out.rank].reverse();
-        Ok(out)
+        out.shapes[out.rank] = s;
+        out.strides[out.rank] = d;
+        out.rank += 1;
     }
+    if out.rank == 0 {
+        out.shapes[0] = 1;
+        out.strides[0] = 0;
+        out.rank = 1;
+    }
+    let mut left = 0;
+    let mut right = out.rank - 1;
+    while left < right {
+        out.shapes.swap(left, right);
+        out.strides.swap(left, right);
+        left += 1;
+        right -= 1;
+    }
+    Ok(out)
 }

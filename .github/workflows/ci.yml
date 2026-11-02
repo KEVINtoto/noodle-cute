@@ -54,6 +54,10 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-targets ${{ matrix.args }}
 
+      - name: Check compilation measurement fixtures
+        if: matrix.features == 'default'
+        run: python3 tools/compile_cost.py --samples 1 --instances 1 --output "${RUNNER_TEMP}/compile-cost-smoke"
+
       # --all-targets excludes doctests, so run them separately.
       - name: Run doctests
         run: cargo test --workspace --doc ${{ matrix.args }}

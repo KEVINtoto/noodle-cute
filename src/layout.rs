@@ -12,15 +12,26 @@
 
 use core::ops::Range;
 
+mod composed;
+mod desc;
 mod dynamic_layout;
+mod like;
+mod recast;
 mod static_layout;
 
+pub use composed::{
+    ComposedLayout, DomainOffset, LayoutShape, MapCoord, OuterFn, SliceAt, make_composed_layout,
+};
+pub use desc::{LayoutDesc, StaticDesc};
 pub(crate) use dynamic_layout::LayoutBuilder;
 pub use dynamic_layout::{DynLayout, GroupedLayout, MAX_RANK};
+pub(crate) use like::StaticLeaves;
+pub use like::{ColMajorLayout, CompactLeft, FragmentLike, LayoutLike, OrderedLayout};
+pub use recast::{Downcast, RecastLayout, RecastView, SwizzleDowncast, SwizzleUpcast, Upcast};
 pub(crate) use static_layout::LayoutParts;
-pub use static_layout::{Compact, Layout, LayoutLeft, LayoutRight};
+pub use static_layout::{Compact, Concat, Layout, LayoutLeft, LayoutRight};
 
-use crate::int::{DynInt, Int, NON_NEGATIVE, add, checked_product, mul};
+use crate::int::{DynInt, Int, NON_NEGATIVE, add, mul};
 use crate::tuple::{Item, Nil, Tuple};
 use crate::{Bool, Error, IntTuple, Result, True};
 
@@ -39,17 +50,68 @@ macro_rules! shape { ($($xs:tt)*) => { $crate::int_tuple!($($xs)*) }; }
 #[macro_export]
 macro_rules! stride { ($($xs:tt)*) => { $crate::int_tuple!($($xs)*) }; }
 
+/// Concatenates layouts as top-level modes: CuTe `make_layout(layout0, layout1, ...)`.
+///
+/// Each argument becomes one mode of the result, keeping its own nesting, so a
+/// single layout yields a rank-1 tuple layout. The result is not validated.
+///
+/// ```
+/// use noodle_cute::{DynInt, Int, Layout, make_layout, shape, stride};
+///
+/// let rows = Layout::new(Int::<4>, Int::<1>)?;
+/// let cols = Layout::new(shape![Int::<2>, DynInt(3)], stride![Int::<4>, Int::<8>])?;
+/// let tile = make_layout!(rows, cols);
+/// assert_eq!(tile.shape, shape![Int::<4>, (Int::<2>, DynInt(3))]);
+/// assert_eq!(tile.stride, stride![Int::<1>, (Int::<4>, Int::<8>)]);
+/// # Ok::<(), noodle_cute::Error>(())
+/// ```
+#[macro_export]
+macro_rules! make_layout {
+    (@chain $head:expr) => { $crate::IntTuple($head, $crate::Nil) };
+    (@chain $head:expr, $($tail:expr),+) => {
+        $crate::IntTuple($head, $crate::make_layout!(@chain $($tail),+))
+    };
+    ($($layout:expr),+ $(,)?) => {
+        $crate::layout::Concat::concat($crate::make_layout!(@chain $($layout),+))
+    };
+}
+
 /// An integer leaf or nested tuple that can serve as a layout shape.
 ///
 /// Negative [`Int`] extents are rejected by trait bounds. Runtime extents are
 /// checked by layout constructors, since this marker alone cannot validate
 /// their values. [`Nil`] denotes a scalar with no axes and size one.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid layout shape",
+    label = "expected nonnegative integer extents or a nested shape tuple",
+    note = "Int<N> extents must be nonnegative; runtime extents are checked by Layout::new"
+)]
 pub trait Shape: Item {}
+#[diagnostic::do_not_recommend]
 impl<const N: isize> Shape for Int<N> where Bool<{ NON_NEGATIVE::<N> }>: True {}
 impl Shape for DynInt {}
 impl Shape for isize {}
+impl Shape for i32 {}
 impl Shape for Nil {}
 impl<H: Shape, T: Tuple + Shape> Shape for IntTuple<H, T> {}
+
+/// Strides with the same nested profile as the shape `S`.
+///
+/// This aliases `Item<Profile = S::Profile>`; ordinary callers need no feature
+/// attributes. Const generic code can use `[const] StrideOf<S>` with the
+/// `const_trait_impl` feature.
+///
+/// ```
+/// use noodle_cute::layout::{Layout, Shape, StrideOf};
+/// use noodle_cute::{DynInt, Int, Result};
+///
+/// fn layout<S: Shape, D: StrideOf<S>>(shape: S, stride: D) -> Result<Layout<S, D>> {
+///     Layout::new(shape, stride)
+/// }
+/// assert_eq!(layout(DynInt(4), Int::<2>)?.index(3)?, 6);
+/// # Ok::<(), noodle_cute::Error>(())
+/// ```
+pub const trait StrideOf<S: Item> = [const] Item<Profile = S::Profile>;
 
 /// A checked map from CuTe left-major logical coordinates to signed addresses.
 ///
@@ -159,10 +221,7 @@ pub trait LayoutMap: Clone {
     /// magnitude. For nonnegative layouts starting at zero, this also equals
     /// the usual CuTe `cosize` value.
     fn cosize(&self) -> Result<isize> {
-        match self.address_range()? {
-            Some((min, max)) => add(max.checked_sub(min).ok_or(Error::Overflow)?, 1),
-            None => Ok(0),
-        }
+        address_span(self.address_range()?)
     }
 
     /// Returns `max_address + 1`, the storage length required from address zero.
@@ -391,23 +450,74 @@ pub fn get_flat_coord<L: AffineLayoutMap>(
 }
 
 //-----------------------------------------------------------------------------
-// These affine algorithms access shape and stride by leaf index through
-// `AffineLayoutMap::leaf_shape` and `AffineLayoutMap::leaf_stride`, so both `Layout` and
-// `DynLayout` can use them. Typed layouts call them directly, without converting
-// to fixed-capacity runtime metadata.
+// Const leaf access is separate from runtime reflection and non-affine maps.
+pub(crate) const trait AffineLeaves {
+    fn query_shape(&self, leaf: usize) -> Result<isize>;
+    fn query_stride(&self, leaf: usize) -> Result<isize>;
+}
+
+impl<L: AffineLayoutMap> AffineLeaves for L {
+    fn query_shape(&self, leaf: usize) -> Result<isize> {
+        self.leaf_shape(leaf)
+    }
+
+    fn query_stride(&self, leaf: usize) -> Result<isize> {
+        self.leaf_stride(leaf)
+    }
+}
+
+struct TypedLeaves<'a, S, D>(&'a S, &'a D);
+
+const impl<S: [const] Item, D: [const] StrideOf<S>> AffineLeaves for TypedLeaves<'_, S, D> {
+    fn query_shape(&self, leaf: usize) -> Result<isize> {
+        self.0.leaf(leaf)
+    }
+
+    fn query_stride(&self, leaf: usize) -> Result<isize> {
+        self.1.leaf(leaf)
+    }
+}
+
+const fn address_span(range: Option<(isize, isize)>) -> Result<isize> {
+    match range {
+        Some((min, max)) => match max.checked_sub(min) {
+            Some(span) => add(span, 1),
+            None => Err(Error::Overflow),
+        },
+        None => Ok(0),
+    }
+}
 
 /// Validates all extents, then computes their product with checked arithmetic.
 ///
 /// A zero extent makes the size zero, but must not hide another negative extent.
 /// Check for zero before multiplying so an empty domain cannot overflow its
 /// logical size. The product of an empty range is one.
-pub(crate) fn checked_size<L: AffineLayoutMap>(layout: &L, leaves: Range<usize>) -> Result<isize> {
-    for i in leaves.clone() {
-        if layout.leaf_shape(i)? < 0 {
+pub(crate) const fn checked_size<L: [const] AffineLeaves>(
+    layout: &L,
+    leaves: Range<usize>,
+) -> Result<isize> {
+    let mut i = leaves.start;
+    while i < leaves.end {
+        if layout.query_shape(i)? < 0 {
             return Err(Error::InvalidShape);
         }
+        i += 1;
     }
-    checked_product(leaves.map(|i| layout.leaf_shape(i)))
+    i = leaves.start;
+    while i < leaves.end {
+        if layout.query_shape(i)? == 0 {
+            return Ok(0);
+        }
+        i += 1;
+    }
+    let mut product = 1;
+    i = leaves.start;
+    while i < leaves.end {
+        product = mul(product, layout.query_shape(i)?)?;
+        i += 1;
+    }
+    Ok(product)
 }
 
 /// Decodes a bounded linear index as left-major mixed-radix leaf coordinates.
@@ -415,19 +525,21 @@ pub(crate) fn checked_size<L: AffineLayoutMap>(layout: &L, leaves: Range<usize>)
 /// Validates `linear` against the checked size before dividing by extents, so
 /// empty domains are rejected without division by zero. Flattening nested modes
 /// in leaf order preserves the same logical traversal.
-pub(crate) fn affine_index<L: AffineLayoutMap>(
+pub(crate) const fn affine_index<L: [const] AffineLeaves>(
     layout: &L,
     leaves: Range<usize>,
     mut linear: isize,
 ) -> Result<isize> {
-    if linear < 0 || linear >= checked_size(layout, leaves.clone())? {
+    if linear < 0 || linear >= checked_size(layout, leaves.start..leaves.end)? {
         return Err(Error::CoordinateOutOfBounds);
     }
     let mut result = 0;
-    for i in leaves {
-        let s = layout.leaf_shape(i)?;
-        result = add(result, mul(linear % s, layout.leaf_stride(i)?)?)?;
+    let mut i = leaves.start;
+    while i < leaves.end {
+        let s = layout.query_shape(i)?;
+        result = add(result, mul(linear % s, layout.query_stride(i)?)?)?;
         linear /= s;
+        i += 1;
     }
     Ok(result)
 }
@@ -469,19 +581,24 @@ pub(crate) fn affine_index_extended<L: AffineLayoutMap>(
 /// Computes inclusive address bounds by summing each leaf's signed endpoint.
 /// Negative strides contribute to the minimum and positive strides to the
 /// maximum. An empty domain has no reachable addresses and returns `None`.
-pub(crate) fn affine_address_range<L: AffineLayoutMap>(
+pub(crate) const fn affine_address_range<L: [const] AffineLeaves>(
     layout: &L,
     leaves: core::ops::Range<usize>,
 ) -> Result<Option<(isize, isize)>> {
-    if checked_size(layout, leaves.clone())? == 0 {
+    if checked_size(layout, leaves.start..leaves.end)? == 0 {
         return Ok(None);
     }
     let mut min = 0;
     let mut max = 0;
-    for i in leaves {
-        let delta = mul(layout.leaf_shape(i)? - 1, layout.leaf_stride(i)?)?;
-        min = add(min, delta.min(0))?;
-        max = add(max, delta.max(0))?;
+    let mut i = leaves.start;
+    while i < leaves.end {
+        let delta = mul(layout.query_shape(i)? - 1, layout.query_stride(i)?)?;
+        if delta < 0 {
+            min = add(min, delta)?;
+        } else {
+            max = add(max, delta)?;
+        }
+        i += 1;
     }
     Ok(Some((min, max)))
 }
