@@ -15,7 +15,7 @@
 //! - **Submodules**:
 //!   - [`mod@ops`]: Binary arithmetic (`+`, `-`, `*`, `/`, `%`), `ceil_div`, unary negation
 //!     (`neg`, `-`), `abs`, `floor_divmod` / `floor_div` / `floor_rem`,
-//!     and Number-theoretic helpers (`gcd`, `lcm`).
+//!     and number-theoretic helpers (`gcd`, `lcm`).
 //!   - [`mod@cmp`]: `const` comparisons, three-valued static predicates, and `min` / `max`.
 //!
 //! # Arithmetic & Comparison Rules
@@ -83,7 +83,6 @@ pub use ops::*;
 #[allow(non_camel_case_types)]
 pub type int = i32;
 
-/// Unsigned runtime integer type used across CuTe.
 #[allow(non_camel_case_types)]
 pub(crate) type uint = u32;
 
@@ -119,6 +118,7 @@ impl<const N: int> Display for Int<N> {
 mod sealed {
     use super::{Int, int};
 
+    // Seals `Integer` and `StaticInteger` to `int` and `Int<N>`.
     pub trait SealedInteger {}
     impl SealedInteger for int {}
     impl<const N: int> SealedInteger for Int<N> {}
@@ -161,25 +161,19 @@ const impl<const N: int> StaticInteger for Int<N> {
     const VALUE: int = N;
 }
 
-// ---------------------------------------------------------------------------
-// Compile-time type predicates and assertions
-
-/// Returns `true` when both `A` and `B` are compile-time static integers.
+// Compile-time dispatch flag: true when both `A` and `B` are static `Int<N>`.
+#[doc(hidden)]
 pub const BOTH_STATIC<A: Integer, B: Integer>: bool = A::IS_STATIC && B::IS_STATIC;
 
 /// Returns `true` when compile-time signed integer `N >= 0`.
 pub const IS_NON_NEG<const N: int>: bool = N >= 0;
 
-/// Checks whether `I == 0`.
-#[allow(dead_code)]
 pub(crate) const IS_ZERO<const N: int>: bool = N == 0;
+pub(crate) const NOT_ZERO<const N: int>: bool = N != 0;
+pub(crate) const IS_ONE<const N: int>: bool = N == 1;
 
-/// Decrements `I` by 1 with saturation at `int::MIN`.
-#[allow(dead_code)]
+// Saturating step counters for compile-time recursive trait bounds.
 pub(crate) const DECREASE<const N: int>: int = N.saturating_sub(1);
-
-/// Increments `I` by 1 with saturation at `int::MAX`.
-#[allow(dead_code)]
 pub(crate) const INCREASE<const N: int>: int = N.saturating_add(1);
 
 pub(crate) const fn uint_to_int(n: uint) -> Result<int> {

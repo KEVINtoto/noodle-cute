@@ -1,11 +1,46 @@
-//! Integer comparisons, static predicates, and extrema (`min` / `max`).
+//! Integer comparisons, three-valued static predicates, and extrema (`min` / `max`).
+//!
+//! Provides heterogeneous `const` comparisons across [`Int<N>`] and [`int`],
+//! type- and value-level static predicates returning `Option<bool>` / `Option<Ordering>`,
+//! and staticness-preserving [`min`] / [`max`].
+//!
+//! # Main Interfaces
+//!
+//! - **Value comparisons**: [`cmp`], [`eq`], [`ne`], [`lt`], [`le`], [`gt`], [`ge`],
+//!   plus `const` `PartialEq` / `Eq` / `PartialOrd` / `Ord` implementations across
+//!   [`Int<N>`] and [`int`].
+//! - **Three-valued static logic**: [`static_true`], [`static_false`], [`static_not`],
+//!   [`static_and`], [`static_or`].
+//! - **Static comparisons**: type-level [`static_eq_of`], [`static_lt_of`],
+//!   [`static_le_of`], [`static_cmp_of`]; value-level [`static_eq`], [`static_ne`],
+//!   [`static_lt`], [`static_le`], [`static_gt`], [`static_ge`], [`static_cmp`];
+//!   and boolean consts [`STATIC_TRUE_EQ`], [`STATIC_TRUE_LT`].
+//! - **Extrema**: [`min`], [`max`], and output type aliases [`Min`], [`Max`].
+//!
+//! # Usage
+//!
+//! ```
+//! # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl, const_ops, const_cmp)]
+//! # #![allow(incomplete_features)]
+//! use noodle_cute::integer::{Int, max, min, static_lt, static_true};
+//!
+//! assert!(Int::<-1> < 0i32);
+//! assert_eq!(min(Int::<2>, Int::<5>), Int::<2>);
+//! assert_eq!(max(Int::<2>, 5i32), 5i32);
+//! assert!(static_true(static_lt(Int::<2>, Int::<5>)));
+//! assert_eq!(static_lt(Int::<2>, 5i32), None);
+//! ```
+//!
+//! # Notes
+//!
+//! - Static predicates return `None` whenever either operand is dynamic;
+//!   [`static_true`] and [`static_false`] map `None` to `false`.
+//! - Using `==`, `<`, etc. on [`Int<N>`] inside `const` contexts requires
+//!   `#![feature(const_cmp)]`.
 
 use core::cmp::Ordering;
 
 use super::{BOTH_STATIC, Int, Integer, StaticInteger, int};
-
-// ---------------------------------------------------------------------------
-// Const PartialEq / Eq / PartialOrd / Ord across static and mixed integers
 
 const impl<const N: int, B: [const] Integer> PartialEq<B> for Int<N> {
     fn eq(&self, b: &B) -> bool {
@@ -38,9 +73,6 @@ const impl<const N: int> PartialOrd<Int<N>> for int {
         self.partial_cmp(&N)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Heterogeneous value comparisons
 
 /// Compares any two CuTe integers mathematically in `const` or runtime contexts.
 ///
@@ -192,25 +224,18 @@ pub const STATIC_TRUE_EQ<A: Integer, B: Integer>: bool = static_true(static_eq_o
 /// `true` iff `A` is statically known to be strictly less than `B` (`false` when either operand is dynamic).
 pub const STATIC_TRUE_LT<A: Integer, B: Integer>: bool = static_true(static_lt_of::<A, B>());
 
-// ---------------------------------------------------------------------------
-// Extrema (`min`, `max`)
-
 const STATIC_MINIMUM<A: StaticInteger, B: StaticInteger>: int = A::VALUE.min(B::VALUE);
-
 const STATIC_MAXIMUM<A: StaticInteger, B: StaticInteger>: int = A::VALUE.max(B::VALUE);
 
-/// Heterogeneous minimum and maximum dispatcher across static and dynamic integers.
+// Dispatches `min`/`max` between `Self` and `B`: `BOTH_STATIC = true` evaluates
+// at compile time to `Int<R>`, `false` evaluates dynamically to `int`.
+#[doc(hidden)]
 pub const trait ExtremaOp<B: [const] Integer, const BOTH_STATIC: bool>:
     [const] Integer
 {
-    /// Output type of `min(self, b)`.
     type MinOutput: [const] Integer;
-    /// Output type of `max(self, b)`.
     type MaxOutput: [const] Integer;
-
-    /// Computes `min(self, b)`.
     fn apply_min(self, b: B) -> Self::MinOutput;
-    /// Computes `max(self, b)`.
     fn apply_max(self, b: B) -> Self::MaxOutput;
 }
 

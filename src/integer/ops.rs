@@ -1,14 +1,54 @@
-//! Binary arithmetic, unary negation, absolute value, ceiling division,
-//! floor division and gcd/lcm for CuTe integers.
+//! Unary and binary arithmetic for static ([`Int<N>`]) and dynamic ([`int`]) integers.
+//!
+//! Implements checked arithmetic in `int`/`uint` width without wider intermediate types,
+//! preserving compile-time static types when operands are static or satisfy absorbing
+//! algebraic identities.
+//!
+//! # Main Interfaces
+//!
+//! - **Unary operations**: [`neg`] (also unary `-` for [`Int<N>`]), [`abs`], and traits
+//!   [`ArithNeg`], [`ArithAbs`].
+//! - **Binary functions**: [`add`], [`sub`], [`mul`], [`div`], [`rem`], [`ceil_div`],
+//!   [`floor_div`], [`floor_rem`], [`floor_divmod`], [`gcd`], [`lcm`], plus `const`
+//!   `core::ops` operator overloads (`+`, `-`, `*`, `/`, `%`) whenever at least one
+//!   operand is [`Int<N>`].
+//! - **Result type aliases**: [`Sum`], [`Difference`], [`Product`], [`Quotient`],
+//!   [`Remainder`], [`CeilQuotient`], [`FloorQuotient`], [`FloorRemainder`], [`Gcd`],
+//!   [`Lcm`], [`ArithOpResult`], and operation tag [`ArithOp`].
+//! - **Generic trait bounds**: [`ArithAdd`], [`ArithSub`], [`ArithMul`], [`ArithDiv`],
+//!   [`ArithRem`], [`ArithCeilDiv`], [`ArithFloorDiv`], [`ArithFloorRem`],
+//!   [`ArithFloorDivMod`], [`ArithGcd`], [`ArithLcm`].
+//!
+//! # Usage
+//!
+//! ```
+//! # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl, const_ops, const_cmp)]
+//! # #![allow(incomplete_features)]
+//! use noodle_cute::integer::{Int, ceil_div, floor_divmod, gcd, lcm};
+//!
+//! const P: Int<6> = Int::<2> * Int::<3>;
+//! assert_eq!(P, Int::<6>);
+//! assert_eq!(ceil_div(Int::<7>, Int::<3>), Int::<3>);
+//! assert_eq!(floor_divmod(-7i32, Int::<3>), (-3i32, 2i32));
+//! assert_eq!(gcd(Int::<-12>, Int::<18>), Int::<6>);
+//! assert_eq!(lcm(Int::<0>, i32::MIN), Int::<0>);
+//! ```
+//!
+//! # Notes
+//!
+//! - Invalid static results (overflow, division by zero, or `neg`/`abs` of `int::MIN`)
+//!   fail at compile time (`E0080`); invalid dynamic results panic in both debug and
+//!   release builds.
+//! - Division/remainder by static `Int<0>` fails at compile time even for dynamic dividends.
+//! - Absorbing identities (`0 * x`, `x * 0`, `x % 1`, `floor_rem(x, 1)`, `lcm(0, x)`,
+//!   `gcd(±1, x)`) preserve static `Int<0>` or `Int<1>`; dividing static `Int<0>` by a
+//!   dynamic divisor preserves `Int<0>` while checking `b != 0` at runtime.
 
 use core::marker::ConstParamTy;
 
 use crate::{NoodleCuteError, NoodleCuteResult, Result, integer::uint};
 
 use super::{Int, Integer, int, uint_to_int};
-
-// ----------------------------------------------------------------------------
-// Unary negation and absolute value
 
 const fn checked_neg(a: int) -> Result<int> {
     a.checked_neg()
@@ -127,48 +167,41 @@ pub const fn abs<I: [const] ArithAbs>(i: I) -> I::Output {
     <I as ArithAbs>::abs(i)
 }
 
-// ----------------------------------------------------------------------------
-// Binary arithmetic operations
-
-/// The binary integer operations unified under [`Arithmetic`].
+/// Binary integer operations supported by [`ArithOpResult`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy)]
 pub enum ArithOp {
-    /// Addition (`+`)
+    /// Addition (`+`).
     Add,
-    /// Subtraction (`-`)
+    /// Subtraction (`-`).
     Sub,
-    /// Multiplication (`*`)
+    /// Multiplication (`*`).
     Mul,
-    /// Truncating integer division (`/`)
+    /// Truncating integer division (`/`).
     Div,
-    /// Truncating integer remainder (`%`)
+    /// Truncating integer remainder (`%`).
     Rem,
-    /// Ceiling integer division (`ceil(a / b)`)
+    /// Ceiling integer division (`ceil(a / b)`).
     CeilDiv,
-    /// Floor integer division (`floor(a / b)`)
+    /// Floor integer division (`floor(a / b)`).
     FloorDiv,
-    /// Floor integer remainder (`a - floor(a / b) * b`)
+    /// Floor integer remainder (`a - floor(a / b) * b`).
     FloorRem,
-    /// Non-negative greatest common divisor (`gcd(|a|, |b|)`)
+    /// Non-negative greatest common divisor (`gcd(|a|, |b|)`).
     Gcd,
-    /// Non-negative least common multiple (`lcm(|a|, |b|)`)
+    /// Non-negative least common multiple (`lcm(|a|, |b|)`).
     Lcm,
 }
 
-/// Dispatch strategy selected from operand staticness and algebraic absorbing rules.
+// Dispatch strategy selected from operand staticness and algebraic absorbing rules:
+// - `Static`: compile-time `Int<R>` (both static, div/rem by static 0, or absorbing identity).
+// - `StaticCheckedDiv`: static `Int<0>` with a runtime `b != 0` check (0 / dyn, etc.).
+// - `Dynamic`: checked evaluation yielding primitive `int`.
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ArithDispatch {
-    /// Result is statically determined at compile time (`Int<R>`), including:
-    /// - Both operands static (invalid results fail at compile time with `E0080`),
-    /// - Division/remainder by static `Int<0>` (always fails at compile time with `E0080`),
-    /// - Unconditional absorbing identities (`0 * x`, `x * 0`, `x % 1`, `floor_rem(x, 1)`,
-    ///   `lcm(0, x)`, `lcm(x, 0)`, `gcd(±1, x)`, `gcd(x, ±1)`).
     Static = 0,
-    /// Static `Int<0>` output with a runtime divisor non-zero check
-    /// (`0 / x`, `0 % x`, `ceil_div(0, x)`, `floor_div(0, x)`, `floor_rem(0, x)`).
     StaticCheckedDiv = 1,
-    /// Checked evaluation yielding primitive [`int`].
     Dynamic = 2,
 }
 
@@ -295,22 +328,20 @@ const fn static_op_result(a: Option<int>, b: Option<int>, op: ArithOp) -> int {
     }
 }
 
-/// Dispatch mode selected for `OP` on operand types `A` and `B` (encoded as [`ArithDispatch`] discriminant).
+// Selects the `ArithDispatch` discriminant for binary `OP` on operand types `A` and `B`.
+#[doc(hidden)]
 pub const ARITH_DISPATCH<A: Integer, B: Integer, const OP: ArithOp>: u8 =
     arith_dispatch(A::STATIC_VALUE, B::STATIC_VALUE, OP) as u8;
 
-/// Evaluates a statically-determined binary operation at compile time, failing on invalid results.
 const STATIC_OP_RESULT<A: Integer, B: Integer, const OP: ArithOp>: int =
     static_op_result(A::STATIC_VALUE, B::STATIC_VALUE, OP);
 
-/// Unified binary operation dispatcher across static and dynamic CuTe integers.
+// Unified binary dispatcher for `Self` and `B` under operation `OP` and `DISPATCH` strategy.
+#[doc(hidden)]
 pub const trait Arithmetic<B: [const] Integer, const OP: ArithOp, const DISPATCH: u8>:
     [const] Integer
 {
-    /// Static result type ([`Int<R>`]) or primitive runtime integer ([`int`]).
     type Output: [const] Integer;
-
-    /// Evaluates the operation, panicking if its operands or result are unrepresentable.
     fn apply(self, b: B) -> Self::Output;
 }
 
@@ -347,12 +378,11 @@ const impl<A: [const] Integer, B: [const] Integer, const OP: ArithOp>
     }
 }
 
-/// Helper trait alias resolving the full [`Arithmetic`] bound automatically.
+// Binds `Arithmetic` to the computed `ARITH_DISPATCH` for `A`, `B`, and `OP`.
 #[doc(hidden)]
 pub const trait ArithmeticAlias<A: Integer, B: Integer, const OP: ArithOp> =
     [const] Arithmetic<B, OP, { ARITH_DISPATCH::<A, B, OP> }>;
 
-/// Disambiguated internal helper calling [`Arithmetic::apply`] for a specific `OP`.
 #[inline(always)]
 const fn apply_op<A, B, const OP: ArithOp>(a: A, b: B) -> ArithOpResult<A, B, OP>
 where
@@ -517,7 +547,7 @@ where
 /// Truncating integer division `a / b`.
 ///
 /// Dividing static `Int<0>` by a dynamic divisor preserves static `Int<0>` while
-/// still checking `b != 0` at runtime ([`ArithDispatch::StaticCheckedDiv`]).
+/// still checking `b != 0` at runtime.
 ///
 /// # Examples
 ///
@@ -560,7 +590,7 @@ where
 ///
 /// Remainder modulo static `Int<1>` always yields static `Int<0>`.
 /// Dividing static `Int<0>` by a dynamic divisor preserves static `Int<0>` while
-/// still checking `b != 0` at runtime ([`ArithDispatch::StaticCheckedDiv`]).
+/// still checking `b != 0` at runtime.
 ///
 /// # Examples
 ///
@@ -635,7 +665,7 @@ where
 /// Floor quotient `floor(a / b)`.
 ///
 /// Dividing static `Int<0>` by a dynamic divisor preserves static `Int<0>` while
-/// still checking `b != 0` at runtime ([`ArithDispatch::StaticCheckedDiv`]).
+/// still checking `b != 0` at runtime.
 ///
 /// # Examples
 ///
@@ -670,7 +700,7 @@ where
 ///
 /// Floor remainder modulo static `Int<1>` always yields static `Int<0>`.
 /// Floor remainder of static `Int<0>` by a dynamic divisor preserves static `Int<0>`
-/// while checking `b != 0` at runtime ([`ArithDispatch::StaticCheckedDiv`]).
+/// while checking `b != 0` at runtime.
 ///
 /// # Examples
 ///
