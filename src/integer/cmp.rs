@@ -227,8 +227,8 @@ pub const STATIC_TRUE_LT<A: Integer, B: Integer>: bool = static_true(static_lt_o
 const STATIC_MINIMUM<A: StaticInteger, B: StaticInteger>: int = A::VALUE.min(B::VALUE);
 const STATIC_MAXIMUM<A: StaticInteger, B: StaticInteger>: int = A::VALUE.max(B::VALUE);
 
-// Dispatches `min`/`max` between `Self` and `B`: `BOTH_STATIC = true` evaluates
-// at compile time to `Int<R>`, `false` evaluates dynamically to `int`.
+/// Dispatches `min`/`max` between `Self` and `B`: `BOTH_STATIC = true` evaluates
+/// at compile time to `Int<R>`, `false` evaluates dynamically to `int`.
 #[doc(hidden)]
 pub const trait ExtremaOp<B: [const] Integer, const BOTH_STATIC: bool>:
     [const] Integer

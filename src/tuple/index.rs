@@ -5,9 +5,9 @@
 //!
 //! - **Mode paths**: [`Mode`] and [`ModeEnd`], built with [`mode!`](crate::mode!).
 //! - **Single-mode indexing**: [`Get`], [`GetOutput`], [`NORMALIZED_INDEX`],
-//!   [`TupleContainer::get`], and [`walk_mode!`](crate::walk_mode!).
+//!   [`TupleContainer::get`](super::TupleContainer::get), and [`walk_mode!`](crate::walk_mode!).
 //! - **Multi-mode selection**: [`Select`] and [`select`].
-//! - **Top-level slicing**: [`SliceRange`], [`slice_range`], [`TupleContainer::slice`],
+//! - **Top-level slicing**: [`SliceRange`], [`slice_range`], [`TupleContainer::slice`](super::TupleContainer::slice),
 //!   [`resolve_tuple_slice`], and [`SLICE_COUNT`].
 //!
 //! # Usage
@@ -38,7 +38,7 @@ use core::marker::PhantomData;
 use crate::integer::{DECREASE, IS_NON_NEG, IS_ONE, IS_ZERO, NOT_ZERO, abs, add, int, mul, sub};
 use crate::slice::{ResolvedSlice, Slice};
 
-use super::{Item, Nil, Til, Tuple, TupleContainer, Wrap};
+use super::{Item, Nil, Til, Tuple, Wrap};
 
 /// Type-level mode index path node constructed by [`mode!`](crate::mode).
 ///
@@ -88,15 +88,15 @@ pub const NORMALIZED_INDEX<const I: int, T: Item>: int = {
     }
 };
 
-// Recursively resolves normalized mode index `NORM` along a `TupleContainer` chain.
-// `FIRST = true` selects the current head; `FIRST = false` decrements `NORM` and recurses on the tail.
+/// Recursively resolves normalized mode index `NORM` along a `Til` chain.
+/// `FIRST = true` selects the current head; `FIRST = false` decrements `NORM` and recurses on the tail.
 #[doc(hidden)]
 pub const trait GetImpl<const FIRST: bool, const NORM: int>: [const] Item {
     type Output: [const] Item;
     fn get(&self) -> Self::Output;
 }
 
-const impl<H, T, const NORM: int> GetImpl<true, NORM> for TupleContainer<H, T>
+const impl<H, T, const NORM: int> GetImpl<true, NORM> for Til<H, T>
 where
     H: [const] Item,
     T: [const] Tuple,
@@ -107,7 +107,7 @@ where
     }
 }
 
-const impl<H, T, const NORM: int> GetImpl<false, NORM> for TupleContainer<H, T>
+const impl<H, T, const NORM: int> GetImpl<false, NORM> for Til<H, T>
 where
     H: [const] Item,
     T: [const] Tuple + [const] GetImpl<{ IS_ZERO::<{ DECREASE::<NORM> }> }, { DECREASE::<NORM> }>,
@@ -118,15 +118,15 @@ where
     }
 }
 
-/// Selects mode `I` of a [`TupleContainer`] by copying the selected item.
+/// Selects mode `I` of a [`TupleContainer`](super::TupleContainer) by copying the selected item.
 ///
 /// Valid indices range from `-RANK` through `RANK - 1`. Negative indices count
 /// backwards from the end. Selection preserves the concrete item type and any
 /// nested structure. An invalid index fails at compile time through index
 /// normalization or trait resolution.
 ///
-/// The trait method supports const evaluation. [`TupleContainer::get`] provides an
-/// inherent convenience method for both `const` and run-time calls.
+/// The trait method supports const evaluation. [`TupleContainer::get`](super::TupleContainer::get)
+/// provides an inherent convenience method for both `const` and run-time calls.
 ///
 /// # Examples
 ///
@@ -134,14 +134,21 @@ where
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl, const_ops, const_cmp)]
 /// # #![allow(incomplete_features)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Get, Nil, Til};
+/// use noodle_cute::tuple::{Get, Nil, TupleContainer};
 ///
-/// let t = Til(10i32, Til(Til(20i32, Til(30i32, Nil)), Til(40i32, Nil)));
+/// let t = TupleContainer::new(
+///     10i32,
+///     TupleContainer::new(
+///         TupleContainer::new(20i32, TupleContainer::new(30i32, Nil)),
+///         TupleContainer::new(40i32, Nil),
+///     ),
+/// );
 /// assert_eq!(Get::<0>::get(&t), 10);
 /// assert_eq!(Get::<-1>::get(&t), 40);
 /// assert_eq!(Get::<-3>::get(&t), 10);
-/// assert_eq!(Get::<1>::get(&t), Til(20i32, Til(30i32, Nil)));
-/// const LAST: Int<2> = Get::<-1>::get(&Til(Int::<1>, Til(Int::<2>, Nil)));
+/// assert_eq!(Get::<1>::get(&t), TupleContainer::new(20i32, TupleContainer::new(30i32, Nil)));
+/// const LAST: Int<2> =
+///     Get::<-1>::get(&TupleContainer::new(Int::<1>, TupleContainer::new(Int::<2>, Nil)));
 /// assert_eq!(LAST, Int::<2>);
 /// ```
 ///
@@ -152,8 +159,8 @@ where
 /// ```compile_fail,E0277
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
 /// # #![allow(incomplete_features)]
-/// use noodle_cute::tuple::{Nil, Til};
-/// let _ = Til(10i32, Til(20i32, Nil)).get::<2>();
+/// use noodle_cute::tuple::{Nil, TupleContainer};
+/// let _ = TupleContainer::new(10i32, TupleContainer::new(20i32, Nil)).get::<2>();
 /// ```
 ///
 /// An index below `-RANK` fails the normalization assertion.
@@ -161,8 +168,8 @@ where
 /// ```compile_fail,E0080
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
 /// # #![allow(incomplete_features)]
-/// use noodle_cute::tuple::{Nil, Til};
-/// let _ = Til(10i32, Til(20i32, Nil)).get::<-3>();
+/// use noodle_cute::tuple::{Nil, TupleContainer};
+/// let _ = TupleContainer::new(10i32, TupleContainer::new(20i32, Nil)).get::<-3>();
 /// ```
 pub const trait Get<const I: int>: [const] Item {
     /// The concrete type of the item at mode `I`.
@@ -171,7 +178,7 @@ pub const trait Get<const I: int>: [const] Item {
     fn get(&self) -> Self::Output;
 }
 
-const impl<H, T, const I: int> Get<I> for TupleContainer<H, T>
+const impl<H, T, const I: int> Get<I> for Til<H, T>
 where
     H: [const] Item,
     T: [const] Tuple,
@@ -198,10 +205,10 @@ where
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
 /// # #![allow(incomplete_features)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{GetOutput, Nil, Til, TupleContainer};
+/// use noodle_cute::tuple::{GetOutput, Nil, TupleContainer};
 ///
 /// type Pair = TupleContainer<Int<3>, TupleContainer<Int<4>, Nil>>;
-/// let pair = Til(Int::<3>, Til(Int::<4>, Nil));
+/// let pair = TupleContainer::new(Int::<3>, TupleContainer::new(Int::<4>, Nil));
 /// let last: GetOutput<Pair, -1> = pair.get::<-1>();
 /// let _: Int<4> = last;
 /// ```
@@ -226,7 +233,7 @@ const impl<T, const I: int, Next> Select<Mode<I, Next>> for T
 where
     T: [const] Get<I> + [const] Select<Next>,
 {
-    type Output = TupleContainer<GetOutput<T, I>, <T as Select<Next>>::Output>;
+    type Output = Til<GetOutput<T, I>, <T as Select<Next>>::Output>;
     fn select(&self) -> Self::Output {
         Til(<T as Get<I>>::get(self), <T as Select<Next>>::select(self))
     }
@@ -268,9 +275,9 @@ const SLICE_FIRST_INDEX<T: Item, const S: Slice>: int = {
     }
 };
 
-// Single-pass forward slice walker over a `Tuple`.
-// `SKIP`: elements to skip before taking; `STEP`: stride between taken elements;
-// `COUNT`: remaining elements to emit; `DONE`: `COUNT == 0`; `SKIPPING`: `SKIP != 0`; `LAST`: `COUNT == 1`.
+/// Single-pass forward slice walker over a `Tuple`.
+/// `SKIP`: elements to skip before taking; `STEP`: stride between taken elements;
+/// `COUNT`: remaining elements to emit; `DONE`: `COUNT == 0`; `SKIPPING`: `SKIP != 0`; `LAST`: `COUNT == 1`.
 #[doc(hidden)]
 pub const trait SliceForward<
     const SKIP: int,
@@ -301,7 +308,7 @@ const impl<
 }
 
 const impl<H: [const] Item, T, const SKIP: int, const STEP: int, const COUNT: int, const LAST: bool>
-    SliceForward<SKIP, STEP, COUNT, false, true, LAST> for TupleContainer<H, T>
+    SliceForward<SKIP, STEP, COUNT, false, true, LAST> for Til<H, T>
 where
     T: [const] Tuple
         + [const] SliceForward<
@@ -327,16 +334,16 @@ where
 }
 
 const impl<H: [const] Item, T: [const] Tuple, const SKIP: int, const STEP: int, const COUNT: int>
-    SliceForward<SKIP, STEP, COUNT, false, false, true> for TupleContainer<H, T>
+    SliceForward<SKIP, STEP, COUNT, false, false, true> for Til<H, T>
 {
-    type Output = TupleContainer<H, Nil>;
+    type Output = Til<H, Nil>;
     fn slice_forward(&self) -> Self::Output {
         Til(self.0, Nil)
     }
 }
 
 const impl<H: [const] Item, T, const SKIP: int, const STEP: int, const COUNT: int>
-    SliceForward<SKIP, STEP, COUNT, false, false, false> for TupleContainer<H, T>
+    SliceForward<SKIP, STEP, COUNT, false, false, false> for Til<H, T>
 where
     T: [const] Tuple
         + [const] SliceForward<
@@ -348,7 +355,7 @@ where
             { IS_ONE::<{ DECREASE::<COUNT> }> },
         >,
 {
-    type Output = TupleContainer<
+    type Output = Til<
         H,
         <T as SliceForward<
             { DECREASE::<STEP> },
@@ -364,8 +371,8 @@ where
     }
 }
 
-// Single-pass reverse slice walker: visits selected elements left-to-right and prepends
-// each onto `Acc` to reverse output order. Const flags match `SliceForward`.
+/// Single-pass reverse slice walker: visits selected elements left-to-right and prepends
+/// each onto `Acc` to reverse output order. Const flags match `SliceForward`.
 #[doc(hidden)]
 pub const trait SliceReverse<
     Acc: [const] Tuple,
@@ -405,7 +412,7 @@ const impl<
     const STEP: int,
     const COUNT: int,
     const LAST: bool,
-> SliceReverse<Acc, SKIP, STEP, COUNT, false, true, LAST> for TupleContainer<H, T>
+> SliceReverse<Acc, SKIP, STEP, COUNT, false, true, LAST> for Til<H, T>
 where
     T: [const] Tuple
         + [const] SliceReverse<
@@ -439,9 +446,9 @@ const impl<
     const SKIP: int,
     const STEP: int,
     const COUNT: int,
-> SliceReverse<Acc, SKIP, STEP, COUNT, false, false, true> for TupleContainer<H, T>
+> SliceReverse<Acc, SKIP, STEP, COUNT, false, false, true> for Til<H, T>
 {
-    type Output = TupleContainer<H, Acc>;
+    type Output = Til<H, Acc>;
     fn slice_reverse(&self, acc: Acc) -> Self::Output {
         Til(self.0, acc)
     }
@@ -454,11 +461,11 @@ const impl<
     const SKIP: int,
     const STEP: int,
     const COUNT: int,
-> SliceReverse<Acc, SKIP, STEP, COUNT, false, false, false> for TupleContainer<H, T>
+> SliceReverse<Acc, SKIP, STEP, COUNT, false, false, false> for Til<H, T>
 where
     T: [const] Tuple
         + [const] SliceReverse<
-            TupleContainer<H, Acc>,
+            Til<H, Acc>,
             { DECREASE::<STEP> },
             STEP,
             { DECREASE::<COUNT> },
@@ -468,7 +475,7 @@ where
         >,
 {
     type Output = <T as SliceReverse<
-        TupleContainer<H, Acc>,
+        Til<H, Acc>,
         { DECREASE::<STEP> },
         STEP,
         { DECREASE::<COUNT> },
@@ -481,8 +488,8 @@ where
     }
 }
 
-// Routes a normalized tuple slice to `SliceForward` (`REVERSE = false`) or `SliceReverse`
-// (`REVERSE = true`), starting at `FIRST` with stride `ABS_STEP` and length `COUNT`.
+/// Routes a normalized tuple slice to `SliceForward` (`REVERSE = false`) or `SliceReverse`
+/// (`REVERSE = true`), starting at `FIRST` with stride `ABS_STEP` and length `COUNT`.
 #[doc(hidden)]
 pub const trait SliceDispatch<
     const FIRST: int,
@@ -583,7 +590,7 @@ pub const fn slice_range<const S: Slice, T: [const] SliceRange<S>>(t: &T) -> T::
     t.slice_range()
 }
 
-impl<H: Item, T: Tuple> TupleContainer<H, T> {
+impl<H: Item, T: Tuple> Til<H, T> {
     /// Slices top-level modes according to `S` (e.g. `t.slice::<{ slice!([1..4]) }>()`).
     ///
     /// # Examples

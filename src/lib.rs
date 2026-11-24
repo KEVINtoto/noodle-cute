@@ -1,7 +1,7 @@
 //! Exact hierarchical layout and tensor algebra in Rust (`no_std`).
 //!
 //! The crate is organized in layers from low-level arithmetic primitives up to
-//! hierarchical tuples and sparse coordinate bases:
+//! hierarchical tuples, sparse coordinate bases, shapes, strides, and layouts:
 //!
 //! - [`integer`]: Static ([`Int<N>`](integer::Int)) and dynamic ([`int`](integer::int))
 //!   signed integers, `const` comparisons, three-valued static predicates, and checked
@@ -17,6 +17,23 @@
 //!   [`BasisCombination`](basis::BasisCombination)) with linear arithmetic, zero-padded
 //!   equality, colexicographical ordering, and tuple conversions
 //!   ([`e!`], [`basis_tuple!`]).
+//! - [`shape`]: Non-negative tensor shapes ([`Shape`](shape::Shape)), partial-order
+//!   compatibility and lattice operations ([`Compatible`](shape::Compatible),
+//!   [`CommonRefinement`](shape::CommonRefinement), [`CommonCoarsening`](shape::CommonCoarsening)),
+//!   colexicographical coordinate-index conversions ([`crd2idx`](shape::crd2idx),
+//!   [`idx2crd`](shape::idx2crd)), bounds checks ([`in_bounds`](shape::in_bounds)), and
+//!   iteration ([`coordinates`](shape::coordinates)).
+//! - [`stride`]: Congruent integer/basis strides ([`Stride`](stride::Stride),
+//!   [`StrideScalar`](stride::StrideScalar)), leaf scaling and accumulation
+//!   ([`StrideMul`](stride::StrideMul), [`Accumulate`](stride::Accumulate),
+//!   [`ScaleStride`](stride::ScaleStride)), [`inner_product`](stride::inner_product),
+//!   [`prefix_product`](stride::prefix_product), and codomain analysis
+//!   ([`CodomainProfile`](stride::CodomainProfile), [`coshape`](stride::coshape)).
+//! - [`layout`]: Hierarchical [`Layout`](layout::Layout) mapping coordinates to offsets,
+//!   mode indexing/slicing, tiler conversion ([`tiler_to_layout`](layout::tiler_to_layout)),
+//!   ordered compact layouts ([`make_ordered_layout`](layout::make_ordered_layout),
+//!   [`make_layout_like`](layout::make_layout_like)), rational element recasting
+//!   ([`recast`](layout::recast())), and [`make_layout!`].
 //!
 //! # Main Root Interfaces
 //!
@@ -59,13 +76,18 @@
     const_ops,
     const_cmp,
     const_option_ops,
-    const_try
+    const_try,
+    unboxed_closures,
+    fn_traits
 )]
 #![allow(incomplete_features)]
 
 pub mod basis;
 pub mod integer;
+pub mod layout;
+pub mod shape;
 pub mod slice;
+pub mod stride;
 pub mod tuple;
 
 /// Errors that can occur during integer arithmetic and conversion.

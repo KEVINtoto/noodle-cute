@@ -42,7 +42,7 @@ use super::{
     EmitBasisTerm,
 };
 
-// Ensures a `BasisTuple` is non-empty by mapping `Nil` to a single `(Int<0>, ModeEnd)` term.
+/// Ensures a `BasisTuple` is non-empty by mapping `Nil` to a single `(Int<0>, ModeEnd)` term.
 #[doc(hidden)]
 pub const trait NonEmptyBasisRepr: [const] BasisTuple {
     type Output: [const] BasisTuple;
@@ -114,7 +114,7 @@ pub const fn is_basis<T: BasisRepr>(_: T) -> bool {
     scalar_eq(T::Output::RANK, 1)
 }
 
-// Resolves path and unit basis for `BasisTerm<V, P>`; `ZERO = true` collapses static zeros to `ModeEnd`.
+/// Resolves path and unit basis for `BasisTerm<V, P>`; `ZERO = true` collapses static zeros to `ModeEnd`.
 #[doc(hidden)]
 pub const trait SingleBasisTerm<V: [const] BasisCoeff, P: [const] BasisPath, const ZERO: bool> {
     type Path: [const] BasisPath;
@@ -180,7 +180,7 @@ where
     }
 }
 
-// Recursively indexes an `Item` along type-level `BasisPath` `P` using `Get`.
+/// Recursively indexes an `Item` along type-level `BasisPath` `P` using `Get`.
 #[doc(hidden)]
 pub const trait ProjectByPath<P: [const] BasisPath>: [const] Item {
     type Output: [const] Item;

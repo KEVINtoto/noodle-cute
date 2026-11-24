@@ -90,8 +90,8 @@ const fn static_reverse(ord: Option<Ordering>) -> Option<Ordering> {
     }
 }
 
-// Normalizes scalars, `BasisTerm`, and `BasisCombination` into a zero-stripped `BasisTuple`
-// for `basis_eq` and `colex_cmp`.
+/// Normalizes scalars, `BasisTerm`, and `BasisCombination` into a zero-stripped `BasisTuple`
+/// for `basis_eq` and `colex_cmp`.
 #[doc(hidden)]
 pub const trait IntoColexTerms: Copy {
     type Terms: [const] BasisTuple;
@@ -125,9 +125,9 @@ const impl<T: [const] BasisTuple> IntoColexTerms for BasisCombination<T> {
     }
 }
 
-// Zero-padded structural equality over path-sorted `BasisTuple` chains (`Self` and `R`).
-// `ORDER` dispatches head comparison; `LEFT_PREFIX` chooses which side to zero-check and
-// advance on `PathOrdering::PrefixConflict`.
+/// Zero-padded structural equality over path-sorted `BasisTuple` chains (`Self` and `R`).
+/// `ORDER` dispatches head comparison; `LEFT_PREFIX` chooses which side to zero-check and
+/// advance on `PathOrdering::PrefixConflict`.
 #[doc(hidden)]
 pub const trait MergeEq<
     R: [const] BasisTuple,
@@ -327,9 +327,9 @@ where
         .static_merge_eq(rhs.into_colex_terms())
 }
 
-// Single-pass colexicographical comparison over path-sorted `BasisTuple` chains (`Self` vs `R`),
-// comparing tails (higher paths) before heads. `ORDER` dispatches head comparison; omitting
-// `PrefixConflict` rejects incompatible depths at compile time.
+/// Single-pass colexicographical comparison over path-sorted `BasisTuple` chains (`Self` vs `R`),
+/// comparing tails (higher paths) before heads. `ORDER` dispatches head comparison; omitting
+/// `PrefixConflict` rejects incompatible depths at compile time.
 #[doc(hidden)]
 pub const trait MergeColex<
     R: [const] BasisTuple,

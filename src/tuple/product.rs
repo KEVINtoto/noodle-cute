@@ -34,8 +34,9 @@
 //!   dynamic leaves, static overflow fails at compile time, and dynamic overflow panics.
 //! - [`product_like`] requires `guide` to be weakly congruent with the target tuple.
 
-use super::{ApplyLeafFunctor, Item, Leaf, Nil, Til, Tuple, TupleContainer, ZipTransformLeaf};
 use crate::integer::{ArithMul, Int, Integer, Product, mul};
+
+use super::{ApplyLeafFunctor, Item, Leaf, Nil, Til, Tuple, ZipTransformLeaf};
 
 /// Recursively multiplies all scalar leaves in a hierarchical tuple (`product(t)`).
 pub const trait TupleProduct: [const] Item {
@@ -59,7 +60,7 @@ const impl<I: [const] Integer> TupleProduct for I {
     }
 }
 
-const impl<H, T> TupleProduct for TupleContainer<H, T>
+const impl<H, T> TupleProduct for Til<H, T>
 where
     H: [const] TupleProduct,
     T: [const] Tuple + [const] TupleProduct,
@@ -98,13 +99,13 @@ const impl<I: [const] Integer> ProductEach for I {
     }
 }
 
-const impl<H, T> ProductEach for TupleContainer<H, T>
+const impl<H, T> ProductEach for Til<H, T>
 where
     H: [const] TupleProduct,
     T: [const] Tuple + [const] ProductEach,
     T::Output: [const] Tuple,
 {
-    type Output = TupleContainer<H::Output, T::Output>;
+    type Output = Til<H::Output, T::Output>;
     fn product_each(&self) -> Self::Output {
         Til(self.0.tuple_product(), self.1.product_each())
     }
@@ -115,7 +116,7 @@ pub const fn product_each<T: [const] ProductEach>(t: &T) -> T::Output {
     t.product_each()
 }
 
-// Internal `ApplyLeafFunctor` used by `ProductLike`: drops guide leaf `G` and reduces subtree `X`.
+/// Internal `ApplyLeafFunctor` used by [`ProductLike`]: drops guide leaf `G` and reduces subtree `X`.
 #[doc(hidden)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct ProductLeafFunctor;

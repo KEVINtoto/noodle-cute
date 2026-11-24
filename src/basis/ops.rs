@@ -127,9 +127,9 @@ where
     }
 }
 
-// Merge-adds two path-sorted `BasisTuple` chains (`Self` and `R`), pruning static zeros.
-// `ORDER` dispatches head comparison (`Dispatch` -> `Less`/`Equal`/`Greater`); omitting
-// `PrefixConflict` rejects incompatible path depths at compile time.
+/// Merge-adds two path-sorted `BasisTuple` chains (`Self` and `R`), pruning static zeros.
+/// `ORDER` dispatches head comparison (`Dispatch` -> `Less`/`Equal`/`Greater`); omitting
+/// `PrefixConflict` rejects incompatible path depths at compile time.
 #[doc(hidden)]
 pub const trait MergeAdd<
     R: [const] BasisTuple,
@@ -310,7 +310,7 @@ where
     }
 }
 
-// Negates every term's coefficient in a `BasisTuple`, pruning static zeros.
+/// Negates every term's coefficient in a `BasisTuple`, pruning static zeros.
 #[doc(hidden)]
 pub const trait NegBasisTuple: [const] BasisTuple {
     type Output: [const] BasisTuple;
@@ -371,8 +371,8 @@ where
     }
 }
 
-// Merge-subtracts two path-sorted `BasisTuple` chains (`Self - R`), pruning static zeros.
-// `ORDER` dispatches head comparison; omitting `PrefixConflict` rejects incompatible depths.
+/// Merge-subtracts two path-sorted `BasisTuple` chains (`Self - R`), pruning static zeros.
+/// `ORDER` dispatches head comparison; omitting `PrefixConflict` rejects incompatible depths.
 #[doc(hidden)]
 pub const trait MergeSub<
     R: [const] BasisTuple,
@@ -531,9 +531,9 @@ where
     }
 }
 
-// Scales every term of a `BasisTuple` by scalar `S`.
-// `ZERO = true` short-circuits static-zero scalars to `Nil`;
-// `LEFT = true` evaluates `S * coeff`, `LEFT = false` evaluates `coeff * S`.
+/// Scales every term of a `BasisTuple` by scalar `S`.
+/// `ZERO = true` short-circuits static-zero scalars to `Nil`;
+/// `LEFT = true` evaluates `S * coeff`, `LEFT = false` evaluates `coeff * S`.
 #[doc(hidden)]
 pub const trait ScaleBasisTerms<S: [const] BasisCoeff, const ZERO: bool, const LEFT: bool>:
     [const] BasisTuple

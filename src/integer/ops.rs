@@ -192,10 +192,10 @@ pub enum ArithOp {
     Lcm,
 }
 
-// Dispatch strategy selected from operand staticness and algebraic absorbing rules:
-// - `Static`: compile-time `Int<R>` (both static, div/rem by static 0, or absorbing identity).
-// - `StaticCheckedDiv`: static `Int<0>` with a runtime `b != 0` check (0 / dyn, etc.).
-// - `Dynamic`: checked evaluation yielding primitive `int`.
+/// Dispatch strategy selected from operand staticness and algebraic absorbing rules:
+/// - `Static`: compile-time `Int<R>` (both static, div/rem by static 0, or absorbing identity).
+/// - `StaticCheckedDiv`: static `Int<0>` with a runtime `b != 0` check (0 / dyn, etc.).
+/// - `Dynamic`: checked evaluation yielding primitive `int`.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -328,7 +328,7 @@ const fn static_op_result(a: Option<int>, b: Option<int>, op: ArithOp) -> int {
     }
 }
 
-// Selects the `ArithDispatch` discriminant for binary `OP` on operand types `A` and `B`.
+/// Selects the `ArithDispatch` discriminant for binary `OP` on operand types `A` and `B`.
 #[doc(hidden)]
 pub const ARITH_DISPATCH<A: Integer, B: Integer, const OP: ArithOp>: u8 =
     arith_dispatch(A::STATIC_VALUE, B::STATIC_VALUE, OP) as u8;
@@ -336,7 +336,7 @@ pub const ARITH_DISPATCH<A: Integer, B: Integer, const OP: ArithOp>: u8 =
 const STATIC_OP_RESULT<A: Integer, B: Integer, const OP: ArithOp>: int =
     static_op_result(A::STATIC_VALUE, B::STATIC_VALUE, OP);
 
-// Unified binary dispatcher for `Self` and `B` under operation `OP` and `DISPATCH` strategy.
+/// Unified binary dispatcher for `Self` and `B` under operation `OP` and `DISPATCH` strategy.
 #[doc(hidden)]
 pub const trait Arithmetic<B: [const] Integer, const OP: ArithOp, const DISPATCH: u8>:
     [const] Integer
@@ -378,7 +378,7 @@ const impl<A: [const] Integer, B: [const] Integer, const OP: ArithOp>
     }
 }
 
-// Binds `Arithmetic` to the computed `ARITH_DISPATCH` for `A`, `B`, and `OP`.
+/// Binds `Arithmetic` to the computed `ARITH_DISPATCH` for `A`, `B`, and `OP`.
 #[doc(hidden)]
 pub const trait ArithmeticAlias<A: Integer, B: Integer, const OP: ArithOp> =
     [const] Arithmetic<B, OP, { ARITH_DISPATCH::<A, B, OP> }>;

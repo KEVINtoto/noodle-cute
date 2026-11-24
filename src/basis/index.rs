@@ -76,7 +76,7 @@ pub const BASIS_NORMALIZED_INDEX<const I: int, const MAX_MODE: int>: int = {
 const TERM_INDEX_MATCH<const I: int, const M: int>: bool =
     scalar_eq(BASIS_NORMALIZED_INDEX::<I, M>, M);
 
-// Computes the largest leading mode index in a `BasisTuple` (`-1` when no leading mode exists).
+/// Computes the largest leading mode index in a `BasisTuple` (`-1` when no leading mode exists).
 #[doc(hidden)]
 pub const trait MaxTopMode: [const] BasisTuple {
     const MAX_MODE: int;
@@ -100,14 +100,14 @@ where
     const MAX_MODE: int = max(M, T::MAX_MODE);
 }
 
-// Extracts terms whose leading mode equals `TARGET`, stripping that outer mode index.
+/// Extracts terms whose leading mode equals `TARGET`, stripping that outer mode index.
 #[doc(hidden)]
 pub const trait CombFilterMode<const TARGET: int>: [const] BasisTuple {
     type Output: [const] BasisTuple;
     fn filter_mode(&self) -> Self::Output;
 }
 
-// Single-step dispatch for `CombFilterMode`: `MATCH = true` emits the inner term for `TARGET`.
+/// Single-step dispatch for `CombFilterMode`: `MATCH = true` emits the inner term for `TARGET`.
 #[doc(hidden)]
 pub const trait CombFilterModeStep<const TARGET: int, const MATCH: bool>:
     [const] BasisTuple
@@ -176,7 +176,7 @@ where
     }
 }
 
-// Collapses filtered terms for one mode into `Int<0>`, scalar `V`, `BasisTerm`, or `BasisCombination`.
+/// Collapses filtered terms for one mode into `Int<0>`, scalar `V`, `BasisTerm`, or `BasisCombination`.
 #[doc(hidden)]
 pub const trait UnwrapModeOutput: [const] BasisTuple {
     type Output: Copy;
@@ -238,8 +238,8 @@ where
     }
 }
 
-// Unwraps the remaining path of a matched `BasisTerm<V, Mode<M, Next>>`:
-// `ModeEnd` yields scalar `V`, nested `Mode` yields `BasisTerm<V, Self>`.
+/// Unwraps the remaining path of a matched `BasisTerm<V, Mode<M, Next>>`:
+/// `ModeEnd` yields scalar `V`, nested `Mode` yields `BasisTerm<V, Self>`.
 #[doc(hidden)]
 pub const trait UnwrapTermNext<V: [const] BasisCoeff>: [const] BasisPath {
     type Output: Copy;
@@ -264,8 +264,8 @@ where
     }
 }
 
-// Dispatches `Get<I>` on a single `BasisTerm`: `MATCH = false` pads with `Int<0>`,
-// `MATCH = true` strips the leading mode via `UnwrapTermNext`.
+/// Dispatches `Get<I>` on a single `BasisTerm`: `MATCH = false` pads with `Int<0>`,
+/// `MATCH = true` strips the leading mode via `UnwrapTermNext`.
 #[doc(hidden)]
 pub const trait BasisTermGetImpl<const MATCH: bool> {
     type Output: Copy;

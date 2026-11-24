@@ -233,8 +233,8 @@ const impl<V: [const] BasisCoeff, P: [const] BasisPath, T: [const] BasisTuple> B
 /// ```compile_fail,E0599
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
 /// # #![allow(incomplete_features)]
-/// use noodle_cute::{basis::{Basis, BasisCombination}, mode, tuple::{Nil, Til}};
-/// let _ = BasisCombination::<Til<Basis<mode![1]>, Til<Basis<mode![0]>, Nil>>>::default();
+/// use noodle_cute::{basis::{Basis, BasisCombination}, mode, tuple::{Nil, TupleContainer}};
+/// let _ = BasisCombination::<TupleContainer<Basis<mode![1]>, TupleContainer<Basis<mode![0]>, Nil>>>::default();
 /// ```
 #[derive(Clone, Copy, Debug)]
 #[repr(transparent)]
@@ -305,7 +305,8 @@ impl BasisCombination<Nil> {
     }
 }
 
-// Formats trailing mode indices inside a multi-index `@(m0, m1, ...)` suffix.
+/// Formats trailing mode indices inside a multi-index `@(m0, m1, ...)` suffix.
+#[doc(hidden)]
 trait BasisPathInnerDisplay {
     fn fmt_path_tail(f: &mut Formatter<'_>) -> core::fmt::Result;
 }
@@ -323,7 +324,8 @@ impl<const M: int, Next: BasisPathInnerDisplay> BasisPathInnerDisplay for Mode<M
     }
 }
 
-// Formats the `@m` or `@(m0, m1, ...)` path suffix of a `BasisTerm` (`ModeEnd` prints nothing).
+/// Formats the `@m` or `@(m0, m1, ...)` path suffix of a `BasisTerm` (`ModeEnd` prints nothing).
+#[doc(hidden)]
 trait BasisPathDisplay {
     fn fmt_path_suffix(f: &mut Formatter<'_>) -> core::fmt::Result;
 }
@@ -357,7 +359,8 @@ impl<V: Display, P: BasisPathDisplay> Display for BasisTerm<V, P> {
     }
 }
 
-// Formats remaining terms of a `BasisCombination` joined by `" + "`.
+/// Formats remaining terms of a `BasisCombination` joined by `" + "`.
+#[doc(hidden)]
 trait BasisCombinationTailDisplay {
     fn fmt_terms_tail(&self, f: &mut Formatter<'_>) -> core::fmt::Result;
 }
@@ -397,17 +400,17 @@ pub(crate) const COEFF_IS_STATIC_ZERO<V: BasisCoeff>: bool = V::IS_STATIC_ZERO;
 pub(crate) const ANY_STATIC_ZERO<A: BasisCoeff, B: BasisCoeff>: bool =
     A::IS_STATIC_ZERO || B::IS_STATIC_ZERO;
 
-// Compile-time guard rejecting static-zero terms (`IS_ZERO == false`).
+/// Compile-time guard rejecting static-zero terms (`IS_ZERO == false`).
 #[doc(hidden)]
 pub const trait ValidBasisTerm<const IS_ZERO: bool> {}
 const impl ValidBasisTerm<false> for () {}
 
-// Compile-time guard requiring strict ascending path order (`ORDER == Less`) and non-static-zero coefficient.
+/// Compile-time guard requiring strict ascending path order (`ORDER == Less`) and non-static-zero coefficient.
 #[doc(hidden)]
 pub const trait ValidBasisOrder<const ORDER: PathOrdering, const IS_ZERO: bool> {}
 const impl ValidBasisOrder<{ PathOrdering::Less }, false> for () {}
 
-// Verifies that every term after `PrevPath` is strictly greater in path order and non-static-zero.
+/// Verifies that every term after `PrevPath` is strictly greater in path order and non-static-zero.
 #[doc(hidden)]
 pub const trait SortedBasisTail<PrevPath: BasisPath>: [const] BasisTuple {}
 
@@ -438,7 +441,7 @@ where
 {
 }
 
-// Prepends `BasisTerm<V, P>` onto `Self` when `OMIT = false`, or drops static zeros when `OMIT = true`.
+/// Prepends `BasisTerm<V, P>` onto `Self` when `OMIT = false`, or drops static zeros when `OMIT = true`.
 #[doc(hidden)]
 pub const trait EmitBasisTerm<V: [const] BasisCoeff, P: [const] BasisPath, const OMIT: bool>:
     [const] BasisTuple

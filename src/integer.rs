@@ -118,7 +118,8 @@ impl<const N: int> Display for Int<N> {
 mod sealed {
     use super::{Int, int};
 
-    // Seals `Integer` and `StaticInteger` to `int` and `Int<N>`.
+    /// Seals [`Integer`](super::Integer) and [`StaticInteger`](super::StaticInteger) to `int` and `Int<N>`.
+    #[doc(hidden)]
     pub trait SealedInteger {}
     impl SealedInteger for int {}
     impl<const N: int> SealedInteger for Int<N> {}
@@ -161,7 +162,7 @@ const impl<const N: int> StaticInteger for Int<N> {
     const VALUE: int = N;
 }
 
-// Compile-time dispatch flag: true when both `A` and `B` are static `Int<N>`.
+/// Compile-time dispatch flag: `true` when both `A` and `B` are static `Int<N>`.
 #[doc(hidden)]
 pub const BOTH_STATIC<A: Integer, B: Integer>: bool = A::IS_STATIC && B::IS_STATIC;
 

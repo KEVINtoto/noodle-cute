@@ -46,7 +46,7 @@ use super::{
     COEFF_IS_STATIC_ZERO, CanonicalBasis, EQ_MODE, EmitBasisTerm,
 };
 
-// Maps one structural profile node at accumulated path prefix `P` to `Nil`, `Basis<P>`, or a nested tuple.
+/// Maps one structural profile node at accumulated path prefix `P` to `Nil`, `Basis<P>`, or a nested tuple.
 #[doc(hidden)]
 pub const trait MakeBasisLikeHead<P: [const] BasisPath> {
     type Output: [const] Item;
@@ -77,7 +77,7 @@ where
     }
 }
 
-// Walks sibling profile nodes under parent path `P`, assigning mode index `IDX` to each head.
+/// Walks sibling profile nodes under parent path `P`, assigning mode index `IDX` to each head.
 #[doc(hidden)]
 pub const trait MakeBasisLikeTail<P: [const] BasisPath, const IDX: int> {
     type Output: [const] Tuple;
@@ -103,7 +103,7 @@ where
     }
 }
 
-// Top-level profile dispatcher for `make_basis_like` (`LeafProfile` -> `Int<1>`, `NilProfile` -> `Nil`).
+/// Top-level profile dispatcher for `make_basis_like` (`LeafProfile` -> `Int<1>`, `NilProfile` -> `Nil`).
 #[doc(hidden)]
 pub const trait MakeBasisLikeTopProfile {
     type Output: [const] Item;
@@ -148,7 +148,7 @@ where
     <T::Profile as MakeBasisLikeTopProfile>::make_basis_top()
 }
 
-// Prepends outer mode index `M` onto every term's path in a `BasisTuple`.
+/// Prepends outer mode index `M` onto every term's path in a `BasisTuple`.
 #[doc(hidden)]
 pub const trait PrependModeToTerms<const M: int>: [const] BasisTuple {
     type Output: [const] BasisTuple;
@@ -175,7 +175,7 @@ where
     }
 }
 
-// Extracts sparse `BasisTuple` terms from one node (`Nil`, scalar, `BasisTerm`, `BasisCombination`, or nested tuple).
+/// Extracts sparse `BasisTuple` terms from one node (`Nil`, scalar, `BasisTerm`, `BasisCombination`, or nested tuple).
 #[doc(hidden)]
 pub const trait CollectBasisNode {
     type Terms: [const] BasisTuple;
@@ -226,7 +226,7 @@ where
     }
 }
 
-// Collects sparse, path-sorted `BasisTerm`s from a hierarchical tuple starting at mode index `M`.
+/// Collects sparse, path-sorted `BasisTerm`s from a hierarchical tuple starting at mode index `M`.
 #[doc(hidden)]
 pub const trait CollectBasisTerms<const M: int>: [const] Tuple {
     type Terms: [const] BasisTuple;
@@ -267,8 +267,8 @@ where
     BasisCombination::<Nil>::new(t)
 }
 
-// Splits the contiguous prefix of terms with leading mode `MODE` (stripping that outer mode),
-// returning `(Head, Tail)` for dense tuple materialization.
+/// Splits the contiguous prefix of terms with leading mode `MODE` (stripping that outer mode),
+/// returning `(Head, Tail)` for dense tuple materialization.
 #[doc(hidden)]
 pub const trait SplitModePrefix<const MODE: int>: [const] FlatTuple {
     type Head: [const] FlatTuple;
@@ -276,7 +276,7 @@ pub const trait SplitModePrefix<const MODE: int>: [const] FlatTuple {
     fn split_mode_prefix(self) -> (Self::Head, Self::Tail);
 }
 
-// Single-step dispatch for `SplitModePrefix`: `MATCH = true` moves the head term into `Head`.
+/// Single-step dispatch for `SplitModePrefix`: `MATCH = true` moves the head term into `Head`.
 #[doc(hidden)]
 pub const trait SplitModePrefixStep<const MODE: int, const MATCH: bool>:
     [const] FlatTuple
@@ -341,16 +341,16 @@ where
     }
 }
 
-// Reconstructs a dense tuple chain from a sorted `BasisTuple` starting at leading mode `MODE`,
-// padding absent lower modes with `Int<0>`.
+/// Reconstructs a dense tuple chain from a sorted `BasisTuple` starting at leading mode `MODE`,
+/// padding absent lower modes with `Int<0>`.
 #[doc(hidden)]
 pub const trait CombModeChain<const MODE: int>: [const] FlatTuple {
     type Output: [const] Tuple;
     fn comb_mode_chain(self) -> Self::Output;
 }
 
-// Single-step dispatch for `CombModeChain`: `MATCH = false` emits `Int<0>` for gap `MODE`,
-// `MATCH = true` splits and recursively materializes all terms under `MODE`.
+/// Single-step dispatch for `CombModeChain`: `MATCH = false` emits `Int<0>` for gap `MODE`,
+/// `MATCH = true` splits and recursively materializes all terms under `MODE`.
 #[doc(hidden)]
 pub const trait CombModeChainStep<const MODE: int, const MATCH: bool>:
     [const] FlatTuple
@@ -359,7 +359,7 @@ pub const trait CombModeChainStep<const MODE: int, const MATCH: bool>:
     fn comb_mode_chain_step(self) -> Self::Output;
 }
 
-// Materializes a path-sorted `BasisTuple` into `Int<0>` (empty), scalar `V` (`ModeEnd`), or a dense tuple.
+/// Materializes a path-sorted `BasisTuple` into `Int<0>` (empty), scalar `V` (`ModeEnd`), or a dense tuple.
 #[doc(hidden)]
 pub const trait CombAsTuple: [const] FlatTuple {
     type Output: [const] Item;
