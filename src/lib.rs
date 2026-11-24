@@ -1,7 +1,7 @@
 //! Exact hierarchical layout and tensor algebra in Rust (`no_std`).
 //!
 //! The crate is organized in layers from low-level arithmetic primitives up to
-//! hierarchical tuples, sparse coordinate bases, shapes, strides, and layouts:
+//! hierarchical tuples, sparse coordinate bases, shapes, strides, layouts, and layout algebra:
 //!
 //! - [`integer`]: Static ([`Int<N>`](integer::Int)) and dynamic ([`int`](integer::int))
 //!   signed integers, `const` comparisons, three-valued static predicates, and checked
@@ -34,6 +34,14 @@
 //!   ordered compact layouts ([`make_ordered_layout`](layout::make_ordered_layout),
 //!   [`make_layout_like`](layout::make_layout_like)), rational element recasting
 //!   ([`recast`](layout::recast())), and [`make_layout!`].
+//! - [`algebra`]: Layout algebra transformations including [`coalesce`](algebra::coalesce()),
+//!   [`nullspace`](algebra::nullspace()), [`composition`](algebra::composition()),
+//!   [`complement`](algebra::complement()), [`right_inverse`](algebra::right_inverse),
+//!   [`left_inverse`](algebra::left_inverse), [`logical_divide`](algebra::logical_divide()),
+//!   [`zipped_divide`](algebra::zipped_divide), [`logical_product`](algebra::logical_product()),
+//!   [`blocked_product`](algebra::blocked_product), [`raked_product`](algebra::raked_product),
+//!   [`greatest_common_domain`](algebra::greatest_common_domain()), and
+//!   [`layout_add`](algebra::layout_add()).
 //!
 //! # Main Root Interfaces
 //!
@@ -82,6 +90,7 @@
 )]
 #![allow(incomplete_features)]
 
+pub mod algebra;
 pub mod basis;
 pub mod integer;
 pub mod layout;
