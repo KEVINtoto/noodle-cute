@@ -248,7 +248,7 @@ const fn checked_gcd(a: int, b: int) -> Result<int> {
     uint_to_int(ua)
 }
 
-const fn checked_lcm(a: int, b: int) -> Result<int> {
+pub(crate) const fn checked_lcm(a: int, b: int) -> Result<int> {
     if a == 0 || b == 0 {
         return Ok(0);
     }
@@ -258,6 +258,17 @@ const fn checked_lcm(a: int, b: int) -> Result<int> {
         return Err(NoodleCuteError::ArithmeticOverflow);
     };
     uint_to_int(prod)
+}
+
+/// Returns `true` iff `l * s == r` mathematically without overflowing `int`.
+pub(crate) const fn integer_product_eq(l: int, s: int, r: int) -> bool {
+    matches!(l.checked_mul(s), Some(p) if p == r)
+}
+
+/// Returns `true` iff `divisor` divides `p * factor` (for positive inputs) without wider types.
+pub(crate) const fn divides_product(divisor: int, p: int, factor: int) -> bool {
+    let g = gcd(divisor, p);
+    rem(factor, div(divisor, g)) == 0
 }
 
 const fn checked_op(a: int, b: int, op: ArithOp) -> Result<int> {

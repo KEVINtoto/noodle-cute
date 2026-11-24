@@ -60,7 +60,7 @@
 //! - Negative dynamic [`int`] extents panic at runtime when queried.
 
 use crate::integer::{IS_NON_NEG, IS_ZERO, Int, Integer, int, mul};
-use crate::tuple::{Item, Leaf, Nil, Til, Tuple};
+use crate::tuple::{FlatTuple, Item, Leaf, Nil, Til, Tuple};
 
 pub mod compatible;
 pub mod coord;
@@ -207,3 +207,35 @@ const impl<S: sealed::SealedShapeScalar + [const] Integer + [const] Leaf + [cons
 /// Marker trait for hierarchical tuple shapes (`Nil` or `TupleContainer<H, T>`).
 pub const trait ShapeTuple: [const] Tuple + [const] Shape {}
 const impl<S: [const] Tuple + [const] Shape> ShapeTuple for S {}
+
+const SHAPE_LEAF_IS_STATIC_ZERO<S: ShapeScalar>: bool = matches!(S::STATIC_VALUE, Some(0));
+
+/// Compile-time guard rejecting static zero shape leaves (`IS_ZERO == false`).
+#[doc(hidden)]
+pub const trait ValidPositiveShapeLeaf<const IS_ZERO: bool> {}
+const impl ValidPositiveShapeLeaf<false> for () {}
+
+/// Validates that every flattened shape leaf is strictly positive (`> 0`),
+/// rejecting static `Int<0>` at compile time and panicking on dynamic `<= 0`.
+#[doc(hidden)]
+pub const trait AssertPositiveShape: FlatTuple {
+    fn assert_positive_shape(self);
+}
+
+const impl AssertPositiveShape for Nil {
+    fn assert_positive_shape(self) {}
+}
+
+const impl<H, T> AssertPositiveShape for Til<H, T>
+where
+    H: [const] ShapeScalar,
+    T: [const] AssertPositiveShape,
+    (): ValidPositiveShapeLeaf<{ SHAPE_LEAF_IS_STATIC_ZERO::<H> }>,
+{
+    fn assert_positive_shape(self) {
+        if !<H as Integer>::IS_STATIC {
+            assert!(self.0.value() > 0, "shape extent must be positive");
+        }
+        self.1.assert_positive_shape();
+    }
+}
