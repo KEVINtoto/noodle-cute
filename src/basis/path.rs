@@ -36,7 +36,7 @@ use core::marker::ConstParamTy;
 use crate::integer::{IS_NON_NEG, add, cmp as scalar_cmp, eq as scalar_eq, int, lt};
 use crate::tuple::{Mode, ModeEnd};
 
-// Compile-time guard restricting basis path mode indices to non-negative values (`VALID == true`).
+/// Compile-time guard restricting basis path mode indices to non-negative values (`VALID == true`).
 #[doc(hidden)]
 pub const trait ValidBasisMode<const VALID: bool> {}
 const impl ValidBasisMode<true> for () {}
@@ -59,7 +59,7 @@ where
     const DEPTH: int = add(1, Next::DEPTH);
 }
 
-// Appends non-negative mode index `M` to the end of `Self`, producing a longer `BasisPath`.
+/// Appends non-negative mode index `M` to the end of `Self`, producing a longer `BasisPath`.
 #[doc(hidden)]
 pub const trait AppendMode<const M: int>: [const] BasisPath {
     type Output: [const] BasisPath;

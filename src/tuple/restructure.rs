@@ -37,28 +37,30 @@
 //! - [`Lift`] inserts padding before the child for non-negative indices and after for
 //!   negative indices.
 
+use crate::integer::{DECREASE, IS_NON_NEG, IS_ZERO, int, sub};
+
 use super::{
     FlatTuple, Get, GetOutput, Item, Leaf, LeafProfile, MakeNodeFunctor, Mode, ModeEnd,
-    NORMALIZED_INDEX, Nil, NilProfile, Til, Tuple, TupleContainer, TupleProfile,
+    NORMALIZED_INDEX, Nil, NilProfile, Til, Tuple, TupleProfile,
 };
-use crate::integer::{DECREASE, IS_NON_NEG, IS_ZERO, int, sub};
 
 /// Wraps scalar leaves in a singleton tuple and preserves built-in tuple containers.
 ///
-/// A leaf becomes `Til(self, Nil)`. [`Nil`] and [`TupleContainer`] return
-/// copies of themselves. Custom leaf types automatically inherit the [`Leaf`] implementation.
+/// A leaf becomes `TupleContainer::new(self, Nil)`. [`Nil`] and
+/// [`TupleContainer`](super::TupleContainer) return copies of themselves. Custom leaf
+/// types automatically inherit the [`Leaf`] implementation.
 ///
 /// # Examples
 ///
 /// ```
 /// # #![feature(const_trait_impl, const_ops, const_cmp)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Nil, Til, TupleContainer, Wrap};
+/// use noodle_cute::tuple::{Nil, TupleContainer, Wrap};
 ///
 /// const WRAPPED: TupleContainer<Int<3>, Nil> = Int::<3>.wrap();
-/// assert_eq!(WRAPPED, Til(Int::<3>, Nil));
-/// assert_eq!(7i32.wrap(), Til(7i32, Nil));
-/// let nested = Til(1i32, Til(Til(2i32, Nil), Nil));
+/// assert_eq!(WRAPPED, TupleContainer::new(Int::<3>, Nil));
+/// assert_eq!(7i32.wrap(), TupleContainer::new(7i32, Nil));
+/// let nested = TupleContainer::new(1i32, TupleContainer::new(TupleContainer::new(2i32, Nil), Nil));
 /// assert_eq!(nested.wrap(), nested);
 /// assert_eq!(Nil.wrap(), Nil);
 /// ```
@@ -77,13 +79,13 @@ const impl Wrap for Nil {
 }
 
 const impl<L: [const] Leaf> Wrap for L {
-    type Wrapped = TupleContainer<Self, Nil>;
+    type Wrapped = Til<Self, Nil>;
     fn wrap(&self) -> Self::Wrapped {
         Til(*self, Nil)
     }
 }
 
-const impl<H: [const] Item, T: [const] Tuple> Wrap for TupleContainer<H, T> {
+const impl<H: [const] Item, T: [const] Tuple> Wrap for Til<H, T> {
     type Wrapped = Self;
     fn wrap(&self) -> Self::Wrapped {
         *self
@@ -101,16 +103,16 @@ const impl<H: [const] Item, T: [const] Tuple> Wrap for TupleContainer<H, T> {
 /// ```
 /// # #![feature(const_trait_impl, const_ops, const_cmp)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Nil, Til, Unwrap};
+/// use noodle_cute::tuple::{Nil, TupleContainer, Unwrap};
 ///
-/// const UNWRAPPED: Int<3> = Til(Til(Int::<3>, Nil), Nil).unwrap();
+/// const UNWRAPPED: Int<3> = TupleContainer::new(TupleContainer::new(Int::<3>, Nil), Nil).unwrap();
 /// assert_eq!(UNWRAPPED, Int::<3>);
 /// assert_eq!(7i32.unwrap(), 7i32);
-/// assert_eq!(Til(Nil, Nil).unwrap(), Nil);
+/// assert_eq!(TupleContainer::new(Nil, Nil).unwrap(), Nil);
 /// assert_eq!(Nil.unwrap(), Nil);
 ///
-/// let pair = Til(Til(1i32, Nil), Til(2i32, Nil));
-/// assert_eq!(Til(Til(pair, Nil), Nil).unwrap(), pair);
+/// let pair = TupleContainer::new(TupleContainer::new(1i32, Nil), TupleContainer::new(2i32, Nil));
+/// assert_eq!(TupleContainer::new(TupleContainer::new(pair, Nil), Nil).unwrap(), pair);
 /// ```
 pub const trait Unwrap: [const] Item {
     /// The item reached by recursively unwrapping enclosing singletons.
@@ -133,16 +135,14 @@ const impl<L: [const] Leaf> Unwrap for L {
     }
 }
 
-const impl<H: [const] Unwrap> Unwrap for TupleContainer<H, Nil> {
+const impl<H: [const] Unwrap> Unwrap for Til<H, Nil> {
     type Unwrapped = H::Unwrapped;
     fn unwrap(&self) -> Self::Unwrapped {
         self.0.unwrap()
     }
 }
 
-const impl<H: [const] Item, TH: [const] Item, TT: [const] Tuple> Unwrap
-    for TupleContainer<H, TupleContainer<TH, TT>>
-{
+const impl<H: [const] Item, TH: [const] Item, TT: [const] Tuple> Unwrap for Til<H, Til<TH, TT>> {
     type Unwrapped = Self;
     fn unwrap(&self) -> Self::Unwrapped {
         *self
@@ -159,16 +159,16 @@ const impl<H: [const] Item, TH: [const] Item, TT: [const] Tuple> Unwrap
 /// ```
 /// # #![feature(const_trait_impl, const_ops, const_cmp)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Append, Nil, Til, TupleContainer};
+/// use noodle_cute::tuple::{Append, Nil, TupleContainer};
 ///
 /// const APPENDED: TupleContainer<i32, TupleContainer<Int<2>, Nil>> =
-///     Til(1i32, Nil).append(Til(Int::<2>, Nil));
-/// assert_eq!(APPENDED, Til(1i32, Til(Int::<2>, Nil)));
+///     TupleContainer::new(1i32, Nil).append(TupleContainer::new(Int::<2>, Nil));
+/// assert_eq!(APPENDED, TupleContainer::new(1i32, TupleContainer::new(Int::<2>, Nil)));
 ///
-/// let nested = Til(Til(1i32, Til(2i32, Nil)), Nil);
+/// let nested = TupleContainer::new(TupleContainer::new(1i32, TupleContainer::new(2i32, Nil)), Nil);
 /// assert_eq!(
-///     nested.append(Til(3i32, Nil)),
-///     Til(nested.0, Til(3i32, Nil))
+///     nested.append(TupleContainer::new(3i32, Nil)),
+///     TupleContainer::new(nested.0, TupleContainer::new(3i32, Nil))
 /// );
 /// assert_eq!(Nil.append(nested), nested);
 /// assert_eq!(nested.append(Nil), nested);
@@ -178,8 +178,8 @@ const impl<H: [const] Item, TH: [const] Item, TT: [const] Tuple> Unwrap
 /// An integer right operand fails the tuple bound (including when appending to `Nil`).
 ///
 /// ```compile_fail,E0277
-/// use noodle_cute::tuple::{Append, Nil, Til};
-/// let _ = Til(1i32, Nil).append(2i32);
+/// use noodle_cute::tuple::{Append, Nil, TupleContainer};
+/// let _ = TupleContainer::new(1i32, Nil).append(2i32);
 /// ```
 ///
 /// ```compile_fail,E0277
@@ -207,13 +207,13 @@ const impl<R: [const] Tuple> Append<R> for Nil {
     }
 }
 
-const impl<H, T, R> Append<R> for TupleContainer<H, T>
+const impl<H, T, R> Append<R> for Til<H, T>
 where
     R: [const] Tuple,
     H: [const] Item,
     T: [const] Tuple + [const] Append<R>,
 {
-    type Output = TupleContainer<H, <T as Append<R>>::Output>;
+    type Output = Til<H, <T as Append<R>>::Output>;
     fn append(&self, rhs: R) -> Self::Output {
         Til(self.0, self.1.append(rhs))
     }
@@ -221,23 +221,24 @@ where
 
 /// Inserts `rhs` as the new head mode of a [`Tuple`].
 ///
-/// [`Nil`] becomes the singleton tuple `Til(rhs, Nil)`, and a [`TupleContainer`]
-/// becomes `Til(rhs, *self)` in $O(1)$, preserving its existing modes as the tail.
+/// [`Nil`] becomes the singleton tuple `TupleContainer::new(rhs, Nil)`, and a
+/// [`TupleContainer`](super::TupleContainer) becomes `TupleContainer::new(rhs, *self)`
+/// in $O(1)$, preserving its existing modes as the tail.
 ///
 /// # Examples
 ///
 /// ```
 /// # #![feature(const_trait_impl, const_ops, const_cmp)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Nil, Prepend, Til, TupleContainer};
+/// use noodle_cute::tuple::{Nil, Prepend, TupleContainer};
 ///
 /// const PREPENDED: TupleContainer<i32, TupleContainer<Int<2>, Nil>> =
-///     Til(Int::<2>, Nil).prepend(1i32);
-/// assert_eq!(PREPENDED, Til(1i32, Til(Int::<2>, Nil)));
-/// assert_eq!(Nil.prepend(0i32), Til(0i32, Nil));
+///     TupleContainer::new(Int::<2>, Nil).prepend(1i32);
+/// assert_eq!(PREPENDED, TupleContainer::new(1i32, TupleContainer::new(Int::<2>, Nil)));
+/// assert_eq!(Nil.prepend(0i32), TupleContainer::new(0i32, Nil));
 /// assert_eq!(
-///     Til(2i32, Nil).prepend(Til(1i32, Nil)),
-///     Til(Til(1i32, Nil), Til(2i32, Nil))
+///     TupleContainer::new(2i32, Nil).prepend(TupleContainer::new(1i32, Nil)),
+///     TupleContainer::new(TupleContainer::new(1i32, Nil), TupleContainer::new(2i32, Nil))
 /// );
 /// ```
 ///
@@ -262,13 +263,13 @@ pub const trait Prepend<R: [const] Item>: [const] Tuple {
 }
 
 const impl<T: [const] Tuple, R: [const] Item> Prepend<R> for T {
-    type Output = TupleContainer<R, Self>;
+    type Output = Til<R, Self>;
     fn prepend(&self, rhs: R) -> Self::Output {
         Til(rhs, *self)
     }
 }
 
-// Flattens `Self` right-to-left onto flat accumulator `Tail` in a single pass.
+/// Flattens `Self` right-to-left onto flat accumulator `Tail` in a single pass.
 #[doc(hidden)]
 pub const trait FlattenTo<Tail: [const] FlatTuple>: [const] Item {
     type Output: [const] FlatTuple;
@@ -283,13 +284,13 @@ const impl<Tail: [const] FlatTuple> FlattenTo<Tail> for Nil {
 }
 
 const impl<L: [const] Leaf, Tail: [const] FlatTuple> FlattenTo<Tail> for L {
-    type Output = TupleContainer<Self, Tail>;
+    type Output = Til<Self, Tail>;
     fn flatten_to(&self, tail: Tail) -> Self::Output {
         Til(*self, tail)
     }
 }
 
-const impl<H, T, Tail> FlattenTo<Tail> for TupleContainer<H, T>
+const impl<H, T, Tail> FlattenTo<Tail> for Til<H, T>
 where
     Tail: [const] FlatTuple,
     T: [const] Tuple + [const] FlattenTo<Tail>,
@@ -312,12 +313,16 @@ where
 /// ```
 /// # #![feature(const_trait_impl, const_ops, const_cmp)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Flatten, Nil, Til, TupleContainer};
+/// use noodle_cute::tuple::{Flatten, Nil, TupleContainer};
 ///
 /// const FLAT: TupleContainer<Int<1>, TupleContainer<i32, Nil>> =
-///     Til(Til(Int::<1>, Til(2i32, Nil)), Til(Nil, Nil)).flatten();
-/// assert_eq!(FLAT, Til(Int::<1>, Til(2i32, Nil)));
-/// assert_eq!(42i32.flatten(), Til(42i32, Nil));
+///     TupleContainer::new(
+///         TupleContainer::new(Int::<1>, TupleContainer::new(2i32, Nil)),
+///         TupleContainer::new(Nil, Nil),
+///     )
+///     .flatten();
+/// assert_eq!(FLAT, TupleContainer::new(Int::<1>, TupleContainer::new(2i32, Nil)));
+/// assert_eq!(42i32.flatten(), TupleContainer::new(42i32, Nil));
 /// assert_eq!(Nil.flatten(), Nil);
 /// ```
 pub const trait Flatten: [const] Item {
@@ -335,13 +340,13 @@ const impl Flatten for Nil {
 }
 
 const impl<L: [const] Leaf> Flatten for L {
-    type Output = TupleContainer<Self, Nil>;
+    type Output = Til<Self, Nil>;
     fn flatten(&self) -> Self::Output {
         self.wrap()
     }
 }
 
-const impl<H, T> Flatten for TupleContainer<H, T>
+const impl<H, T> Flatten for Til<H, T>
 where
     H: [const] Item,
     T: [const] Tuple,
@@ -353,7 +358,7 @@ where
     }
 }
 
-// Consumes the prefix of a `FlatTuple` matching structural profile `P`, returning `(Output, Rest)`.
+/// Consumes the prefix of a `FlatTuple` matching structural profile `P`, returning `(Output, Rest)`.
 #[doc(hidden)]
 pub const trait UnflattenPrefix<P>: [const] FlatTuple {
     type Output: [const] Item;
@@ -369,9 +374,7 @@ const impl<F: [const] FlatTuple> UnflattenPrefix<NilProfile> for F {
     }
 }
 
-const impl<H: [const] Leaf, T: [const] FlatTuple> UnflattenPrefix<LeafProfile>
-    for TupleContainer<H, T>
-{
+const impl<H: [const] Leaf, T: [const] FlatTuple> UnflattenPrefix<LeafProfile> for Til<H, T> {
     type Output = H;
     type Rest = T;
     fn unflatten_prefix(&self) -> (H, T) {
@@ -385,7 +388,7 @@ where
     <F as UnflattenPrefix<HP>>::Rest: [const] UnflattenPrefix<TP>,
     <<F as UnflattenPrefix<HP>>::Rest as UnflattenPrefix<TP>>::Output: [const] Tuple,
 {
-    type Output = TupleContainer<
+    type Output = Til<
         <F as UnflattenPrefix<HP>>::Output,
         <<F as UnflattenPrefix<HP>>::Rest as UnflattenPrefix<TP>>::Output,
     >;
@@ -427,7 +430,7 @@ pub const fn unflatten_like<F: [const] Unflatten<G::Profile>, G: Item>(
     flat.unflatten()
 }
 
-// Constructs a hierarchy matching `Self`'s structural profile with copies of leaf item `X`.
+/// Constructs a hierarchy matching `Self`'s structural profile with copies of leaf item `X`.
 #[doc(hidden)]
 pub const trait RepeatLikeProfile<X: [const] Item> {
     type Output: [const] Item;
@@ -453,7 +456,7 @@ const impl<X: [const] Item, HP: [const] RepeatLikeProfile<X>, TP: [const] Repeat
 where
     TP::Output: [const] Tuple,
 {
-    type Output = TupleContainer<HP::Output, TP::Output>;
+    type Output = Til<HP::Output, TP::Output>;
     fn repeat_like_profile(x: X) -> Self::Output {
         Til(HP::repeat_like_profile(x), TP::repeat_like_profile(x))
     }
@@ -482,7 +485,7 @@ pub const fn repeat_like<X: [const] Item, G: [const] RepeatLike<X>>(x: X, guide:
     guide.repeat_like(x)
 }
 
-// Recursively replaces normalized mode `NORM` with `X`; `FIRST = true` replaces the current head.
+/// Recursively replaces normalized mode `NORM` with `X`; `FIRST = true` replaces the current head.
 #[doc(hidden)]
 pub const trait ReplaceImpl<X: [const] Item, const FIRST: bool, const NORM: int>:
     [const] Item
@@ -492,20 +495,20 @@ pub const trait ReplaceImpl<X: [const] Item, const FIRST: bool, const NORM: int>
 }
 
 const impl<H: [const] Item, T: [const] Tuple, X: [const] Item, const NORM: int>
-    ReplaceImpl<X, true, NORM> for TupleContainer<H, T>
+    ReplaceImpl<X, true, NORM> for Til<H, T>
 {
-    type Output = TupleContainer<X, T>;
+    type Output = Til<X, T>;
     fn replace_impl(&self, x: X) -> Self::Output {
         Til(x, self.1)
     }
 }
 
 const impl<H: [const] Item, T: [const] Tuple, X: [const] Item, const NORM: int>
-    ReplaceImpl<X, false, NORM> for TupleContainer<H, T>
+    ReplaceImpl<X, false, NORM> for Til<H, T>
 where
     T: [const] ReplaceImpl<X, { IS_ZERO::<{ DECREASE::<NORM> }> }, { DECREASE::<NORM> }>,
 {
-    type Output = TupleContainer<
+    type Output = Til<
         H,
         <T as ReplaceImpl<X, { IS_ZERO::<{ DECREASE::<NORM> }> }, { DECREASE::<NORM> }>>::Output,
     >;
@@ -514,7 +517,7 @@ where
     }
 }
 
-/// Replaces top-level mode `I` of a [`TupleContainer`] with `x`.
+/// Replaces top-level mode `I` of a [`TupleContainer`](super::TupleContainer) with `x`.
 pub const trait ReplaceAt<X: [const] Item, const I: int>: [const] Item {
     /// Resulting tuple after replacing mode `I` with `X`.
     type Output: [const] Tuple;
@@ -523,7 +526,7 @@ pub const trait ReplaceAt<X: [const] Item, const I: int>: [const] Item {
 }
 
 const impl<H: [const] Item, T: [const] Tuple, X: [const] Item, const I: int> ReplaceAt<X, I>
-    for TupleContainer<H, T>
+    for Til<H, T>
 where
     Self: [const] ReplaceImpl<
             X,
@@ -584,13 +587,14 @@ pub const fn replace<Path, T: [const] Replace<X, Path>, X: [const] Item>(t: &T, 
     t.replace(x)
 }
 
-// Leading/trailing sibling pad counts for `Lift` at signed mode index `I`.
+/// Leading sibling pad count for [`Lift`] at signed mode index `I`.
 #[doc(hidden)]
 pub const LIFT_BEFORE<const I: int>: int = if IS_NON_NEG::<I> { I } else { 0 };
+/// Trailing sibling pad count for [`Lift`] at signed mode index `I`.
 #[doc(hidden)]
 pub const LIFT_AFTER<const I: int>: int = if IS_NON_NEG::<I> { 0 } else { sub(-1, I) };
 
-// Prepends `N` copies of `Pad` before `Tail` (`DONE = true` when `N == 0`).
+/// Prepends `N` copies of `Pad` before `Tail` (`DONE = true` when `N == 0`).
 #[doc(hidden)]
 pub const trait PadRepeat<Pad: Copy, Tail: Copy, const N: int, const DONE: bool> {
     type Output: Copy;
@@ -620,12 +624,12 @@ where
     }
 }
 
-// Trailing `Pad` chain placed after the lifted child at signed mode index `I`.
+/// Trailing `Pad` chain placed after the lifted child at signed mode index `I`.
 #[doc(hidden)]
 pub type AfterPads<Pad, const I: int> =
     <() as PadRepeat<Pad, Nil, { LIFT_AFTER::<I> }, { IS_ZERO::<{ LIFT_AFTER::<I> }> }>>::Output;
 
-// Full child chain `[Pad..., Inner, Pad...]` constructed at one `Lift` level for mode index `I`.
+/// Full child chain `[Pad..., Inner, Pad...]` constructed at one [`Lift`] level for mode index `I`.
 #[doc(hidden)]
 pub type LiftChildren<Inner, Pad, const I: int> = <() as PadRepeat<
     Pad,

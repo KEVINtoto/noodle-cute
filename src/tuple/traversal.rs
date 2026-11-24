@@ -41,13 +41,14 @@
 //!   for intermediate cons tails.
 //! - [`AllLeaves`] is vacuously `true` and [`AnyLeaf`] is `false` on [`Nil`].
 
-use super::{FlatTuple, Item, Leaf, LeafProfile, Nil, Til, Tuple, TupleContainer};
 use crate::integer::int;
+
+use super::{FlatTuple, Item, Leaf, LeafProfile, Nil, Til, Tuple};
 
 /// A mapping from one leaf type to an [`Item`] for [`TransformLeaf`].
 ///
 /// Implement this trait for every input leaf type the functor handles. The
-/// output can be an integer, custom item, [`Nil`], or a nested [`TupleContainer`].
+/// output can be an integer, custom item, [`Nil`], or a nested [`TupleContainer`](super::TupleContainer).
 /// A const implementation enables const evaluation of the mapping.
 ///
 /// # Examples
@@ -90,7 +91,7 @@ pub const trait TransformLeafFunctor<L: [const] Leaf> {
 ///
 /// ```
 /// # #![feature(const_trait_impl)]
-/// use noodle_cute::tuple::{Item, LeafProfile, Nil, Til, TransformLeaf, TransformLeafFunctor};
+/// use noodle_cute::tuple::{Item, LeafProfile, Nil, TransformLeaf, TransformLeafFunctor, TupleContainer};
 ///
 /// #[derive(Clone, Copy, Debug, PartialEq)]
 /// struct Pair(i32, i32);
@@ -108,12 +109,15 @@ pub const trait TransformLeafFunctor<L: [const] Leaf> {
 ///         Pair(leaf, leaf + 1)
 ///     }
 /// }
-/// const MAPPED: Til<Pair, Nil> = Til(3i32, Nil).transform(&ToPair);
-/// assert_eq!(MAPPED, Til(Pair(3, 4), Nil));
-/// let nested = Til(1i32, Til(Til(2i32, Nil), Nil));
+/// const MAPPED: TupleContainer<Pair, Nil> = TupleContainer::new(3i32, Nil).transform(&ToPair);
+/// assert_eq!(MAPPED, TupleContainer::new(Pair(3, 4), Nil));
+/// let nested = TupleContainer::new(1i32, TupleContainer::new(TupleContainer::new(2i32, Nil), Nil));
 /// assert_eq!(
 ///     nested.transform(&ToPair),
-///     Til(Pair(1, 2), Til(Til(Pair(2, 3), Nil), Nil))
+///     TupleContainer::new(
+///         Pair(1, 2),
+///         TupleContainer::new(TupleContainer::new(Pair(2, 3), Nil), Nil),
+///     )
 /// );
 /// assert_eq!(Nil.transform(&ToPair), Nil);
 /// ```
@@ -121,7 +125,7 @@ pub const trait TransformLeafFunctor<L: [const] Leaf> {
 /// A functor may map leaves to empty or nonempty tuples.
 ///
 /// ```
-/// use noodle_cute::tuple::{Nil, Til, TransformLeaf, TransformLeafFunctor, TupleContainer};
+/// use noodle_cute::tuple::{Nil, TransformLeaf, TransformLeafFunctor, TupleContainer};
 ///
 /// #[derive(Clone, Copy)]
 /// struct Empty;
@@ -132,19 +136,19 @@ pub const trait TransformLeafFunctor<L: [const] Leaf> {
 ///     }
 /// }
 /// assert_eq!(1i32.transform(&Empty), Nil);
-/// assert_eq!(Til(1i32, Nil).transform(&Empty), Til(Nil, Nil));
+/// assert_eq!(TupleContainer::new(1i32, Nil).transform(&Empty), TupleContainer::new(Nil, Nil));
 ///
 /// #[derive(Clone, Copy)]
 /// struct Duplicate;
 /// impl TransformLeafFunctor<i32> for Duplicate {
 ///     type Output = TupleContainer<i32, TupleContainer<i32, Nil>>;
 ///     fn apply(&self, leaf: i32) -> Self::Output {
-///         Til(leaf, Til(leaf, Nil))
+///         TupleContainer::new(leaf, TupleContainer::new(leaf, Nil))
 ///     }
 /// }
 /// assert_eq!(
-///     Til(2i32, Nil).transform(&Duplicate),
-///     Til(Til(2i32, Til(2i32, Nil)), Nil)
+///     TupleContainer::new(2i32, Nil).transform(&Duplicate),
+///     TupleContainer::new(TupleContainer::new(2i32, TupleContainer::new(2i32, Nil)), Nil)
 /// );
 /// ```
 ///
@@ -183,20 +187,20 @@ where
     }
 }
 
-const impl<H, T, F> TransformLeaf<F> for TupleContainer<H, T>
+const impl<H, T, F> TransformLeaf<F> for Til<H, T>
 where
     H: [const] Item + [const] TransformLeaf<F>,
     T: [const] Tuple + [const] TransformLeaf<F>,
     H::Output: [const] Item,
     T::Output: [const] Tuple,
 {
-    type Output = TupleContainer<H::Output, T::Output>;
+    type Output = Til<H::Output, T::Output>;
     fn transform(&self, f: &F) -> Self::Output {
         Til(self.0.transform(f), self.1.transform(f))
     }
 }
 
-// Computes combined `IS_STATIC` over a native Rust tuple stored inside `ZipLeaf`.
+/// Computes combined `IS_STATIC` over a native Rust tuple stored inside [`ZipLeaf`].
 #[doc(hidden)]
 pub const trait TupleIsStatic {
     const IS_STATIC: bool = false;
@@ -259,12 +263,12 @@ const impl<T: Copy + TupleIsStatic> Item for ZipLeaf<T> {
     type Profile = LeafProfile;
 }
 
-// Verifies that 0..=5 peer trees all match a `Nil` node during lockstep traversal.
+/// Verifies that 0..=5 peer trees all match a [`Nil`] node during lockstep traversal.
 #[doc(hidden)]
 pub const trait PeersMatchNil: Copy {}
 
-// Attaches primary leaf `L` to 0..=5 synchronized peer subtrees:
-// `Args` is `L` (0 peers) or `(L, B...)`; `ZippedTuple` is always a tuple `(L, ...)` for `ZipLeaf`.
+/// Attaches primary leaf `L` to 0..=5 synchronized peer subtrees:
+/// `Args` is `L` (0 peers) or `(L, B...)`; `ZippedTuple` is always a tuple `(L, ...)` for [`ZipLeaf`].
 #[doc(hidden)]
 pub const trait PeersAttachLeaf<L: [const] Leaf>: Copy {
     type Args: Copy;
@@ -273,7 +277,7 @@ pub const trait PeersAttachLeaf<L: [const] Leaf>: Copy {
     fn attach_zip(self, leaf: L) -> Self::ZippedTuple;
 }
 
-// Splits 0..=5 peer `TupleContainer` nodes into corresponding `(Heads, Tails)` for recursion.
+/// Splits 0..=5 peer `Til` nodes into corresponding `(Heads, Tails)` for recursion.
 #[doc(hidden)]
 pub const trait PeersSplit: Copy {
     type Heads: Copy;
@@ -311,7 +315,7 @@ const impl<L: [const] Leaf, B: [const] Item> PeersAttachLeaf<L> for B {
         (leaf, self)
     }
 }
-const impl<H: [const] Item, T: [const] Tuple> PeersSplit for TupleContainer<H, T> {
+const impl<H: [const] Item, T: [const] Tuple> PeersSplit for Til<H, T> {
     type Heads = H;
     type Tails = T;
     fn split(self) -> (Self::Heads, Self::Tails) {
@@ -337,7 +341,7 @@ macro_rules! impl_peers_tuple {
         }
 
         const impl<$($H: [const] Item, $T: [const] Tuple),+> PeersSplit
-            for ($(TupleContainer<$H, $T>,)+)
+            for ($(Til<$H, $T>,)+)
         {
             type Heads = ($($H,)+);
             type Tails = ($($T,)+);
@@ -382,7 +386,7 @@ pub const trait MakeNodeFunctor<Children> {
     fn make(&self, children: Children) -> Self::Output;
 }
 
-/// Default [`MakeNodeFunctor`] reconstructing [`Nil`] and [`TupleContainer`] nodes unchanged.
+/// Default [`MakeNodeFunctor`] reconstructing [`Nil`] and [`TupleContainer`](super::TupleContainer) nodes unchanged.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct MakeTuple;
 
@@ -393,9 +397,9 @@ const impl MakeNodeFunctor<Nil> for MakeTuple {
     }
 }
 
-const impl<H: [const] Item, T: [const] Tuple> MakeNodeFunctor<TupleContainer<H, T>> for MakeTuple {
-    type Output = TupleContainer<H, T>;
-    fn make(&self, children: TupleContainer<H, T>) -> TupleContainer<H, T> {
+const impl<H: [const] Item, T: [const] Tuple> MakeNodeFunctor<Til<H, T>> for MakeTuple {
+    type Output = Til<H, T>;
+    fn make(&self, children: Til<H, T>) -> Til<H, T> {
         children
     }
 }
@@ -411,8 +415,8 @@ pub const trait TransformApplyLeaf<Make, F, Peers = ()>: [const] Item {
     fn transform_apply(&self, make: &Make, f: &F, peers: Peers) -> Self::Output;
 }
 
-// Traverses remaining cons cells at one tuple level without re-invoking `Make`,
-// ensuring `MakeNodeFunctor::make` runs once per tuple root (`F`: leaf functor, `Peers`: peer tails).
+/// Traverses remaining cons cells at one tuple level without re-invoking `Make`,
+/// ensuring [`MakeNodeFunctor::make`] runs once per tuple root (`F`: leaf functor, `Peers`: peer tails).
 #[doc(hidden)]
 pub const trait TransformApplyLevel<Make, F, Peers = ()>: [const] Tuple {
     type Output;
@@ -426,7 +430,7 @@ const impl<Make, F, Peers: PeersMatchNil> TransformApplyLevel<Make, F, Peers> fo
     }
 }
 
-const impl<H, T, Make, F, Peers> TransformApplyLevel<Make, F, Peers> for TupleContainer<H, T>
+const impl<H, T, Make, F, Peers> TransformApplyLevel<Make, F, Peers> for Til<H, T>
 where
     H: [const] Item + [const] TransformApplyLeaf<Make, F, Peers::Heads>,
     T: [const] Tuple + [const] TransformApplyLevel<Make, F, Peers::Tails>,
@@ -465,7 +469,7 @@ where
     }
 }
 
-const impl<H, T, Make, F, Peers> TransformApplyLeaf<Make, F, Peers> for TupleContainer<H, T>
+const impl<H, T, Make, F, Peers> TransformApplyLeaf<Make, F, Peers> for Til<H, T>
 where
     H: [const] Item + [const] TransformApplyLeaf<Make, F, Peers::Heads>,
     T: [const] Tuple + [const] TransformApplyLevel<Make, F, Peers::Tails>,
@@ -498,7 +502,7 @@ where
     t.transform_apply(make, f, peers)
 }
 
-/// Synchronized leaf transformation preserving enclosing [`TupleContainer`] structure via [`MakeTuple`].
+/// Synchronized leaf transformation preserving enclosing [`TupleContainer`](super::TupleContainer) structure via [`MakeTuple`].
 pub const trait ZipTransformLeaf<F, Peers = ()>: [const] Item {
     /// Mapped [`Item`] retaining matching tuple structure.
     type Output: [const] Item;
@@ -525,7 +529,7 @@ where
     t.zip_transform(f, peers)
 }
 
-// Zips leaves of `Self` and `Peers` right-to-left onto flat accumulator `Tail` in a single pass.
+/// Zips leaves of `Self` and `Peers` right-to-left onto flat accumulator `Tail` in a single pass.
 #[doc(hidden)]
 pub const trait ZipLeavesTo<Peers, Tail: [const] FlatTuple>: [const] Item {
     type Output: [const] FlatTuple;
@@ -542,13 +546,13 @@ const impl<Peers: PeersMatchNil, Tail: [const] FlatTuple> ZipLeavesTo<Peers, Tai
 const impl<L: [const] Leaf, Peers: [const] PeersAttachLeaf<L>, Tail: [const] FlatTuple>
     ZipLeavesTo<Peers, Tail> for L
 {
-    type Output = TupleContainer<ZipLeaf<Peers::ZippedTuple>, Tail>;
+    type Output = Til<ZipLeaf<Peers::ZippedTuple>, Tail>;
     fn zip_leaves_to(&self, peers: Peers, tail: Tail) -> Self::Output {
         Til(ZipLeaf(peers.attach_zip(*self)), tail)
     }
 }
 
-const impl<H, T, Peers, Tail> ZipLeavesTo<Peers, Tail> for TupleContainer<H, T>
+const impl<H, T, Peers, Tail> ZipLeavesTo<Peers, Tail> for Til<H, T>
 where
     Tail: [const] FlatTuple,
     Peers: [const] PeersSplit,
@@ -579,13 +583,13 @@ const impl<Peers: PeersMatchNil> ZipLeaves<Peers> for Nil {
 }
 
 const impl<L: [const] Leaf, Peers: [const] PeersAttachLeaf<L>> ZipLeaves<Peers> for L {
-    type Output = TupleContainer<ZipLeaf<Peers::ZippedTuple>, Nil>;
+    type Output = Til<ZipLeaf<Peers::ZippedTuple>, Nil>;
     fn zip_leaves(&self, peers: Peers) -> Self::Output {
         Til(ZipLeaf(peers.attach_zip(*self)), Nil)
     }
 }
 
-const impl<H, T, Peers> ZipLeaves<Peers> for TupleContainer<H, T>
+const impl<H, T, Peers> ZipLeaves<Peers> for Til<H, T>
 where
     H: [const] Item,
     T: [const] Tuple,
@@ -636,7 +640,7 @@ where
     }
 }
 
-const impl<H, T, F, Acc, Peers> FoldLeaf<F, Acc, Peers> for TupleContainer<H, T>
+const impl<H, T, F, Acc, Peers> FoldLeaf<F, Acc, Peers> for Til<H, T>
 where
     Peers: [const] PeersSplit,
     H: [const] Item + [const] FoldLeaf<F, Acc, Peers::Heads>,
@@ -686,7 +690,7 @@ where
     }
 }
 
-const impl<H, T, P, Peers> AllLeaves<P, Peers> for TupleContainer<H, T>
+const impl<H, T, P, Peers> AllLeaves<P, Peers> for Til<H, T>
 where
     Peers: [const] PeersSplit,
     H: [const] Item + [const] AllLeaves<P, Peers::Heads>,
@@ -721,7 +725,7 @@ where
     }
 }
 
-const impl<H, T, P, Peers> AnyLeaf<P, Peers> for TupleContainer<H, T>
+const impl<H, T, P, Peers> AnyLeaf<P, Peers> for Til<H, T>
 where
     Peers: [const] PeersSplit,
     H: [const] Item + [const] AnyLeaf<P, Peers::Heads>,
