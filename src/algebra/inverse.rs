@@ -29,6 +29,18 @@
 //!   Violations are rejected at compile time for static inputs and panic in [`left_inverse`]
 //!   for dynamic inputs.
 //!
+//! For binary-polynomial strides, inversion works on independently addressable
+//! coordinate bits. Canonical two-mode polynomial radices use the divisor's
+//! degree to bound the low digit. Static binary modes may split into smaller
+//! modes when successive inverse columns have different strides. Runtime axes
+//! with three or more active modes use binary elimination and return a fixed
+//! hierarchy of binary or unit extents. A partial binary digit contributes its
+//! independently variable low bits. The same basis handles non-binary static
+//! axes of three or more modes. Mixed integer and binary axes
+//! require binary domain extents so their index fields can be combined by XOR.
+//! The stride walk may return a partial inverse when a mode cannot extend the
+//! covered prefix.
+//!
 //! # Main Interfaces
 //!
 //! - [`RightInverse`] / [`right_inverse`] / [`Layout::right_inverse`]
@@ -170,16 +182,22 @@
 use core::marker::ConstParamTy;
 
 use crate::basis::{
-    Basis, BasisPath, ComparePath, MakeBasisLikeOutput, MakeBasisLikeTopProfile, ModeEnd,
-    PathOrdering, make_basis_like,
+    Basis, BasisCoeff, BasisPath, CoeffAlgebra, ComparePath, MakeBasisLikeOutput,
+    MakeBasisLikeTopProfile, ModeEnd, PathOrdering, make_basis_like,
 };
-use crate::integer::{IS_NON_NEG, Int, Integer, div, eq, int, mul, rem};
+use crate::integer::ops::{BinaryPreimages, checked_clmul};
+use crate::integer::{BOTH_STATIC, IS_NON_NEG, Int, Integer, div, eq, int, mul, rem};
 use crate::layout::{Coprofile, Layout, LayoutBase, Tiler, tiler_to_layout};
-use crate::shape::{AssertPositiveShape, Shape, ShapeScalar, ValidShapeExtent};
-use crate::stride::{PrefixProduct, Stride, StrideScalar, prefix_product_with};
-use crate::tuple::{FlatTuple, Flatten, Item, LeafProfile, Nil, Til, Tuple};
+use crate::shape::{
+    AssertPositiveShape, BinaryExtents, IndexToCoord, Shape, ShapeScalar, ValidShapeExtent,
+};
+use crate::stride::{InnerProduct, PrefixProduct, Stride, StrideScalar, prefix_product_with};
+use crate::swizzle::{F2, F2Scalar, F2XorOutput, F2XorScalar, f2, f2_add};
+use crate::tuple::{Append, FlatTuple, Flatten, Item, Leaf, LeafProfile, Nil, Til, Tuple};
 
 use super::coalesce::{Coalesce, DropTrailingUnit};
+use crate::layout::ScaleIfNotOne;
+use crate::stride::ContainsF2;
 
 /// Scalar `(shape, stride, pps)` mode triple collected along a single codomain axis.
 #[doc(hidden)]
@@ -191,7 +209,7 @@ pub struct ModeTriple<S, D, P> {
     pub pps: P,
 }
 
-const impl<S: Item, D: Item, P: Item> Item for ModeTriple<S, D, P> {
+const impl<S: Item, D: BasisCoeff, P: Item> Item for ModeTriple<S, D, P> {
     const RANK: int = 1;
     const DEPTH: int = 0;
     const LEAVES: int = 1;
@@ -215,11 +233,10 @@ const fn inverse_axis_filter_action<S, D, TargetP>() -> InverseAxisFilterAction
 where
     S: ShapeScalar,
     D: StrideScalar,
-    D::Value: Integer,
     TargetP: BasisPath,
     D::Path: ComparePath<TargetP>,
 {
-    if matches!(D::Value::STATIC_VALUE, Some(0)) {
+    if D::Value::IS_STATIC_ZERO {
         return InverseAxisFilterAction::Skip;
     }
     match D::Path::ORDER {
@@ -240,7 +257,6 @@ where
 const INVERSE_AXIS_FILTER_ACTION<S: ShapeScalar, D: StrideScalar, TargetP: BasisPath>:
     InverseAxisFilterAction = inverse_axis_filter_action::<S, D, TargetP>()
 where
-    D::Value: Integer,
     D::Path: ComparePath<TargetP>;
 
 /// Applies one [`InverseAxisFilterAction`] to prepend `(S, D::Value, P)` onto suffix `Self`.
@@ -265,7 +281,6 @@ const impl<S, D, P, Rest> FilterInverseStep<S, D, P, { InverseAxisFilterAction::
 where
     S: ShapeScalar,
     D: [const] StrideScalar,
-    D::Value: [const] Integer,
     P: ShapeScalar,
     Rest: FlatTuple,
 {
@@ -305,7 +320,6 @@ where
     S: ShapeScalar,
     TS: FlatTuple + [const] FilterInverseModes<TargetP, TD, TP>,
     D: [const] StrideScalar,
-    D::Value: [const] Integer,
     TD: FlatTuple,
     P: ShapeScalar,
     TP: FlatTuple,
@@ -326,7 +340,7 @@ where
     }
 }
 
-const fn inverse_mode_precedes<DX: Integer, DY: Integer>() -> bool {
+const fn inverse_mode_precedes<DX: BasisCoeff, DY: BasisCoeff>() -> bool {
     match (DX::STATIC_VALUE, DY::STATIC_VALUE) {
         (Some(x), Some(y)) => x <= y,
         (Some(_), None) => true,
@@ -335,7 +349,8 @@ const fn inverse_mode_precedes<DX: Integer, DY: Integer>() -> bool {
     }
 }
 
-const INVERSE_MODE_PRECEDES<DX: Integer, DY: Integer>: bool = inverse_mode_precedes::<DX, DY>();
+const INVERSE_MODE_PRECEDES<DX: BasisCoeff, DY: BasisCoeff>: bool =
+    inverse_mode_precedes::<DX, DY>();
 
 /// Single insertion-sort step placing `ModeTriple<SX, DX, PX>` before (`PRECEDES == true`)
 /// or after (`false`) the head of sorted suffix `Self`.
@@ -347,14 +362,16 @@ pub const trait InsertSortedTripleStep<SX, DX, PX, const PRECEDES: bool>: FlatTu
 
 /// Inserts `ModeTriple<SX, DX, PX>` into sorted [`ModeTriple`] tuple `Self` by ascending static stride.
 #[doc(hidden)]
-pub const trait InsertSortedTriple<SX: ShapeScalar, DX: Integer, PX: ShapeScalar>:
+pub const trait InsertSortedTriple<SX: ShapeScalar, DX: BasisCoeff, PX: ShapeScalar>:
     FlatTuple
 {
     type Output: FlatTuple;
     fn insert_sorted_triple(self, mode: ModeTriple<SX, DX, PX>) -> Self::Output;
 }
 
-const impl<SX: ShapeScalar, DX: Integer, PX: ShapeScalar> InsertSortedTriple<SX, DX, PX> for Nil {
+const impl<SX: ShapeScalar, DX: BasisCoeff, PX: ShapeScalar> InsertSortedTriple<SX, DX, PX>
+    for Nil
+{
     type Output = Til<ModeTriple<SX, DX, PX>, Nil>;
     fn insert_sorted_triple(self, mode: ModeTriple<SX, DX, PX>) -> Self::Output {
         Til(mode, Nil)
@@ -365,10 +382,10 @@ const impl<SX, DX, PX, SY, DY, PY, Rest> InsertSortedTripleStep<SX, DX, PX, true
     for Til<ModeTriple<SY, DY, PY>, Rest>
 where
     SX: ShapeScalar,
-    DX: Integer,
+    DX: BasisCoeff,
     PX: ShapeScalar,
     SY: ShapeScalar,
-    DY: Integer,
+    DY: BasisCoeff,
     PY: ShapeScalar,
     Rest: FlatTuple,
 {
@@ -382,10 +399,10 @@ const impl<SX, DX, PX, SY, DY, PY, Rest> InsertSortedTripleStep<SX, DX, PX, fals
     for Til<ModeTriple<SY, DY, PY>, Rest>
 where
     SX: ShapeScalar,
-    DX: Integer,
+    DX: BasisCoeff,
     PX: ShapeScalar,
     SY: ShapeScalar,
-    DY: Integer,
+    DY: BasisCoeff,
     PY: ShapeScalar,
     Rest: FlatTuple + [const] InsertSortedTriple<SX, DX, PX>,
 {
@@ -399,10 +416,10 @@ const impl<SX, DX, PX, SY, DY, PY, Rest> InsertSortedTriple<SX, DX, PX>
     for Til<ModeTriple<SY, DY, PY>, Rest>
 where
     SX: ShapeScalar,
-    DX: Integer,
+    DX: BasisCoeff,
     PX: ShapeScalar,
     SY: ShapeScalar,
-    DY: Integer,
+    DY: BasisCoeff,
     PY: ShapeScalar,
     Rest: FlatTuple,
     Self: [const] InsertSortedTripleStep<SX, DX, PX, { INVERSE_MODE_PRECEDES::<DX, DY> }>,
@@ -432,7 +449,7 @@ const impl SortInverseModes for Nil {
 const impl<SH, DH, PH, T> SortInverseModes for Til<ModeTriple<SH, DH, PH>, T>
 where
     SH: ShapeScalar,
-    DH: Integer,
+    DH: BasisCoeff,
     PH: ShapeScalar,
     T: FlatTuple + [const] SortInverseModes,
     T::Output: [const] InsertSortedTriple<SH, DH, PH>,
@@ -442,6 +459,61 @@ where
         self.1.sort_inverse_modes().insert_sorted_triple(self.0)
     }
 }
+
+/// Algebraic classification of active strides collected along a single codomain axis.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy)]
+pub enum AxisAlgebra {
+    /// Empty axis or all active strides are integers.
+    Integer,
+    /// All active strides on this axis are `F2`.
+    F2,
+    /// Mixed `Integer`/`F2` strides on the same axis or unsupported custom ring.
+    Invalid,
+}
+
+const fn algebra_of_coeff(alg: CoeffAlgebra) -> AxisAlgebra {
+    match alg {
+        CoeffAlgebra::Integer => AxisAlgebra::Integer,
+        CoeffAlgebra::F2 => AxisAlgebra::F2,
+        CoeffAlgebra::Other => AxisAlgebra::Invalid,
+    }
+}
+
+const fn combine_axis_algebra(head: AxisAlgebra, tail: AxisAlgebra) -> AxisAlgebra {
+    match (head, tail) {
+        (AxisAlgebra::Integer, AxisAlgebra::Integer) => AxisAlgebra::Integer,
+        (AxisAlgebra::F2, AxisAlgebra::F2) => AxisAlgebra::F2,
+        _ => AxisAlgebra::Invalid,
+    }
+}
+
+/// Determines the uniform [`AxisAlgebra`] of a sorted flat list of [`ModeTriple`]s.
+#[doc(hidden)]
+pub const trait AxisAlgebraOf: FlatTuple {
+    const ALGEBRA: AxisAlgebra;
+}
+
+const impl AxisAlgebraOf for Nil {
+    const ALGEBRA: AxisAlgebra = AxisAlgebra::Integer;
+}
+
+const impl<S: Item, D: BasisCoeff, P: Item> AxisAlgebraOf for Til<ModeTriple<S, D, P>, Nil> {
+    const ALGEBRA: AxisAlgebra = algebra_of_coeff(D::ALGEBRA);
+}
+
+const impl<S: Item, D: BasisCoeff, P: Item, H2, T2> AxisAlgebraOf
+    for Til<ModeTriple<S, D, P>, Til<H2, T2>>
+where
+    Til<H2, T2>: AxisAlgebraOf,
+{
+    const ALGEBRA: AxisAlgebra = combine_axis_algebra(
+        algebra_of_coeff(D::ALGEBRA),
+        <Til<H2, T2> as AxisAlgebraOf>::ALGEBRA,
+    );
+}
+
+const AXIS_ALGEBRA_OF<M: AxisAlgebraOf>: AxisAlgebra = M::ALGEBRA;
 
 /// Prepends one inverse `(S, P)` mode onto an empty, scalar, or tuple flat suffix layout.
 #[doc(hidden)]
@@ -1204,15 +1276,20 @@ where
     }
 }
 
-/// Selects the per-axis fold & finalization (`RIGHT = true` for right inverse, `false` for left).
+/// Selects the per-axis fold & finalization (`RIGHT = true` for right inverse, `false` for left)
+/// dispatched by [`AxisAlgebra`].
 #[doc(hidden)]
-pub const trait InvertSortedAxis<const RIGHT: bool>: FlatTuple {
+pub const trait InvertSortedAxis<
+    const RIGHT: bool,
+    const ALGEBRA: AxisAlgebra = { AxisAlgebra::Integer },
+>: FlatTuple
+{
     type Shape: Shape;
     type Stride: Stride<Self::Shape>;
     fn invert_sorted_axis(self) -> Layout<Self::Shape, Self::Stride>;
 }
 
-const impl<M> InvertSortedAxis<true> for M
+const impl<M> InvertSortedAxis<true, { AxisAlgebra::Integer }> for M
 where
     M: FlatTuple + [const] RightInverseFold<Int<1>>,
     Layout<<M as RightInverseFold<Int<1>>>::Shape, <M as RightInverseFold<Int<1>>>::Stride>:
@@ -1232,7 +1309,7 @@ where
     }
 }
 
-const impl<M> InvertSortedAxis<false> for M
+const impl<M> InvertSortedAxis<false, { AxisAlgebra::Integer }> for M
 where
     M: FlatTuple + [const] LeftInverseFold<Int<1>, Int<1>, Int<0>>,
     Layout<
@@ -1252,6 +1329,902 @@ where
     fn invert_sorted_axis(self) -> Layout<Self::Shape, Self::Stride> {
         let raw = self.left_inverse_fold(Int, Int, Int);
         raw.finalize_left_axis()
+    }
+}
+
+// ------------------------------------------------------------------
+// F2 axis inversion (characteristic-2 back-substitution for right_inverse,
+// unit-gap validation for left_inverse)
+// ------------------------------------------------------------------
+
+/// Appends one inverse `(S, D)` mode onto an empty, scalar, or tuple flat prefix layout.
+#[doc(hidden)]
+pub const trait AppendInverseMode<S: ShapeScalar, D: StrideScalar>: Copy {
+    type Shape: Shape;
+    type Stride: Stride<Self::Shape>;
+    fn append_inverse_mode(self, s: S, d: D) -> Layout<Self::Shape, Self::Stride>;
+}
+
+const impl<S, D> AppendInverseMode<S, D> for Layout<Nil, Nil>
+where
+    S: ShapeScalar,
+    D: StrideScalar + Stride<S>,
+{
+    type Shape = S;
+    type Stride = D;
+
+    fn append_inverse_mode(self, s: S, d: D) -> Layout<Self::Shape, Self::Stride> {
+        Layout::new(s, d)
+    }
+}
+
+const impl<ST, DT, S, D> AppendInverseMode<S, D> for Layout<ST, DT>
+where
+    ST: ShapeScalar,
+    DT: StrideScalar + Stride<ST>,
+    S: ShapeScalar,
+    D: StrideScalar + Stride<S>,
+{
+    type Shape = Til<ST, Til<S, Nil>>;
+    type Stride = Til<DT, Til<D, Nil>>;
+
+    fn append_inverse_mode(self, s: S, d: D) -> Layout<Self::Shape, Self::Stride> {
+        Layout::new(Til(self.shape, Til(s, Nil)), Til(self.stride, Til(d, Nil)))
+    }
+}
+
+const impl<HS, TS, HD, TD, S, D> AppendInverseMode<S, D> for Layout<Til<HS, TS>, Til<HD, TD>>
+where
+    HS: [const] ShapeScalar,
+    TS: [const] Tuple + Shape,
+    HD: [const] StrideScalar + Stride<HS>,
+    TD: [const] Tuple + Stride<TS>,
+    S: [const] ShapeScalar,
+    D: [const] StrideScalar + Stride<S>,
+    Til<HS, TS>: [const] Append<Til<S, Nil>>,
+    Til<HD, TD>: [const] Append<Til<D, Nil>>,
+    <Til<HS, TS> as Append<Til<S, Nil>>>::Output: Shape,
+    <Til<HD, TD> as Append<Til<D, Nil>>>::Output:
+        Stride<<Til<HS, TS> as Append<Til<S, Nil>>>::Output>,
+{
+    type Shape = <Til<HS, TS> as Append<Til<S, Nil>>>::Output;
+    type Stride = <Til<HD, TD> as Append<Til<D, Nil>>>::Output;
+
+    fn append_inverse_mode(self, s: S, d: D) -> Layout<Self::Shape, Self::Stride> {
+        Layout::new(
+            self.shape.append(Til(s, Nil)),
+            self.stride.append(Til(d, Nil)),
+        )
+    }
+}
+
+/// Evaluates an accumulated `F2` inverse prefix layout at a dynamic `F2<int>` residue,
+/// returning `F2(0)` for the empty prefix `Layout<Nil, Nil>`.
+#[doc(hidden)]
+pub const trait F2BackSubDynEval: Copy {
+    fn eval_f2_residue(&self, residue: F2<int>) -> F2<int>;
+}
+
+const impl F2BackSubDynEval for Layout<Nil, Nil> {
+    fn eval_f2_residue(&self, _: F2<int>) -> F2<int> {
+        f2(0i32)
+    }
+}
+
+const impl<S, D, OutV> F2BackSubDynEval for Layout<S, D>
+where
+    S: ShapeScalar,
+    D: StrideScalar + Stride<S>,
+    F2<int>: [const] IndexToCoord<S>,
+    <F2<int> as IndexToCoord<S>>::Output: [const] InnerProduct<D, Output = F2<OutV>>,
+    OutV: [const] F2Scalar,
+{
+    fn eval_f2_residue(&self, residue: F2<int>) -> F2<int> {
+        f2(self.call(residue).value())
+    }
+}
+
+const impl<HS, TS, HD, TD, OutV> F2BackSubDynEval for Layout<Til<HS, TS>, Til<HD, TD>>
+where
+    HS: ShapeScalar,
+    TS: Tuple + Shape,
+    HD: StrideScalar + Stride<HS>,
+    TD: Tuple + Stride<TS>,
+    F2<int>: [const] IndexToCoord<Til<HS, TS>>,
+    <F2<int> as IndexToCoord<Til<HS, TS>>>::Output:
+        [const] InnerProduct<Til<HD, TD>, Output = F2<OutV>>,
+    OutV: [const] F2Scalar,
+{
+    fn eval_f2_residue(&self, residue: F2<int>) -> F2<int> {
+        f2(self.call(residue).value())
+    }
+}
+
+/// Compile-time action for one mode in the sorted 1D `F2` right-inverse chain walk.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy)]
+pub enum F2RightFoldAction {
+    /// Mode statically cannot continue the chain (out-of-range reach or exhausted).
+    StaticSkip,
+    /// Static `D == CurrD` (zero residue), static `S`, and `clmul(CurrD, S)` fits in `int`.
+    StaticZeroResStaticNext,
+    /// Static `D == CurrD` (zero residue), static `S`, and `clmul(CurrD, S)` overflows `int`.
+    StaticZeroResExhausted,
+    /// Static `D == CurrD` (zero residue) with dynamic `S`.
+    StaticZeroResDynamicNext,
+    /// Static non-zero residue with `clmul(S - 1, residue) < CurrD` and `clmul(CurrD, S)` fits.
+    StaticBackSubStaticNext,
+    /// Resolve successive input bits separately across a multi-mode inverse prefix.
+    SplitBits,
+    /// Static non-zero residue with `clmul(S - 1, residue) < CurrD` and `clmul(CurrD, S)` overflows.
+    StaticBackSubExhausted,
+    /// Dynamic `D`, `CurrD`, or dynamic `S` with non-zero residue: evaluate at runtime.
+    DynamicStep,
+}
+
+const fn f2_right_fold_action<S: ShapeScalar, D: F2Scalar, CurrD: RightRunningExtent>()
+-> F2RightFoldAction {
+    if CurrD::IS_EXHAUSTED {
+        return F2RightFoldAction::StaticSkip;
+    }
+    match (D::STATIC_VALUE, CurrD::STATIC_EXTENT) {
+        (Some(d), Some(c)) => {
+            let residue = c ^ d;
+            if residue == 0 {
+                match S::STATIC_VALUE {
+                    Some(s) => {
+                        if checked_clmul(c, s).is_ok() {
+                            F2RightFoldAction::StaticZeroResStaticNext
+                        } else {
+                            F2RightFoldAction::StaticZeroResExhausted
+                        }
+                    }
+                    None => F2RightFoldAction::StaticZeroResDynamicNext,
+                }
+            } else {
+                match S::STATIC_VALUE {
+                    Some(s) => {
+                        if s <= 1 {
+                            return F2RightFoldAction::StaticSkip;
+                        }
+                        match checked_clmul(s - 1, residue) {
+                            Ok(reach) if reach < c => {
+                                if checked_clmul(c, s).is_ok() {
+                                    F2RightFoldAction::StaticBackSubStaticNext
+                                } else {
+                                    F2RightFoldAction::StaticBackSubExhausted
+                                }
+                            }
+                            _ => F2RightFoldAction::StaticSkip,
+                        }
+                    }
+                    None => F2RightFoldAction::DynamicStep,
+                }
+            }
+        }
+        _ => F2RightFoldAction::DynamicStep,
+    }
+}
+
+const F2_RIGHT_FOLD_ACTION<S: ShapeScalar, D: F2Scalar, CurrD: RightRunningExtent, Acc: LayoutBase>:
+    F2RightFoldAction = {
+    let action = f2_right_fold_action::<S, D, CurrD>();
+    if matches!(action,F2RightFoldAction::StaticBackSubStaticNext | F2RightFoldAction::StaticBackSubExhausted)
+        && Acc::Shape::LEAVES > 1 && matches!(S::STATIC_VALUE,Some(s) if s > 2 && s.count_ones()==1) {
+        F2RightFoldAction::SplitBits
+    } else { action }
+};
+
+const STATIC_F2_RESIDUE<CurrD: RightRunningExtent, D: F2Scalar>: int =
+    match (CurrD::STATIC_EXTENT, D::STATIC_VALUE) {
+        (Some(c), Some(d)) => c ^ d,
+        _ => 0,
+    };
+
+const STATIC_F2_NEXT_D<CurrD: RightRunningExtent, S: ShapeScalar>: int =
+    match (CurrD::STATIC_EXTENT, S::STATIC_VALUE) {
+        (Some(c), Some(s)) => match checked_clmul(c, s) {
+            Ok(v) => v,
+            Err(_) => 1,
+        },
+        _ => 1,
+    };
+
+/// Converts a non-negative `ShapeScalar` (`Int<N>` or `int`) into `F2<Self>`.
+#[doc(hidden)]
+pub const trait ShapeScalarToF2: [const] ShapeScalar {
+    type Scalar: [const] F2Scalar;
+    fn to_f2(self) -> F2<Self::Scalar>;
+}
+
+const impl ShapeScalarToF2 for int {
+    type Scalar = int;
+    fn to_f2(self) -> F2<int> {
+        F2::new(self)
+    }
+}
+
+const impl<const N: int> ShapeScalarToF2 for Int<N>
+where
+    (): [const] ValidShapeExtent<{ IS_NON_NEG::<N> }>,
+    (): [const] crate::swizzle::ValidF2Value<{ IS_NON_NEG::<N> }>,
+{
+    type Scalar = Int<N>;
+    fn to_f2(self) -> F2<Int<N>> {
+        f2(Int::<N>)
+    }
+}
+
+/// Executes one [`F2RightFoldAction`] step threading `(CurrD, Acc)` forward across sorted `F2` modes.
+#[doc(hidden)]
+pub const trait F2RightInverseFoldStep<
+    CurrD: RightRunningExtent,
+    Acc: Copy,
+    const ACTION: F2RightFoldAction,
+>: FlatTuple
+{
+    type Shape: Shape;
+    type Stride: Stride<Self::Shape>;
+    fn f2_right_inverse_fold_step(
+        self,
+        curr_d: CurrD,
+        acc: Acc,
+    ) -> Layout<Self::Shape, Self::Stride>;
+}
+
+/// Forward-accumulating fold over sorted `F2` [`ModeTriple`]s carrying running covered
+/// extent `CurrD` and accepted prefix layout `Acc` for characteristic-2 back-substitution.
+#[doc(hidden)]
+pub const trait F2RightInverseFold<CurrD: RightRunningExtent, Acc: Copy>: FlatTuple {
+    type Shape: Shape;
+    type Stride: Stride<Self::Shape>;
+    fn f2_right_inverse_fold(self, curr_d: CurrD, acc: Acc) -> Layout<Self::Shape, Self::Stride>;
+}
+
+const impl<CurrD: RightRunningExtent, AccS: Shape, AccD: Stride<AccS>>
+    F2RightInverseFold<CurrD, Layout<AccS, AccD>> for Nil
+{
+    type Shape = AccS;
+    type Stride = AccD;
+
+    fn f2_right_inverse_fold(
+        self,
+        _: CurrD,
+        acc: Layout<AccS, AccD>,
+    ) -> Layout<Self::Shape, Self::Stride> {
+        acc
+    }
+}
+
+const impl<S, D, P, Rest, CurrD, Acc> F2RightInverseFold<CurrD, Acc>
+    for Til<ModeTriple<S, F2<D>, P>, Rest>
+where
+    S: ShapeScalar,
+    D: F2Scalar,
+    P: ShapeScalar,
+    Rest: FlatTuple,
+    CurrD: RightRunningExtent,
+    Acc: [const] LayoutBase,
+    Self: [const] F2RightInverseFoldStep<CurrD, Acc, { F2_RIGHT_FOLD_ACTION::<S, D, CurrD, Acc> }>,
+{
+    type Shape = <Self as F2RightInverseFoldStep<
+        CurrD,
+        Acc,
+        { F2_RIGHT_FOLD_ACTION::<S, D, CurrD, Acc> },
+    >>::Shape;
+    type Stride = <Self as F2RightInverseFoldStep<
+        CurrD,
+        Acc,
+        { F2_RIGHT_FOLD_ACTION::<S, D, CurrD, Acc> },
+    >>::Stride;
+
+    fn f2_right_inverse_fold(self, curr_d: CurrD, acc: Acc) -> Layout<Self::Shape, Self::Stride> {
+        self.f2_right_inverse_fold_step(curr_d, acc)
+    }
+}
+
+const impl<S, D, P, Rest, CurrD, Acc>
+    F2RightInverseFoldStep<CurrD, Acc, { F2RightFoldAction::StaticSkip }>
+    for Til<ModeTriple<S, F2<D>, P>, Rest>
+where
+    S: ShapeScalar,
+    D: F2Scalar,
+    P: ShapeScalar,
+    CurrD: RightRunningExtent,
+    Acc: Copy,
+    Rest: FlatTuple + [const] F2RightInverseFold<CurrD, Acc>,
+{
+    type Shape = <Rest as F2RightInverseFold<CurrD, Acc>>::Shape;
+    type Stride = <Rest as F2RightInverseFold<CurrD, Acc>>::Stride;
+
+    fn f2_right_inverse_fold_step(
+        self,
+        curr_d: CurrD,
+        acc: Acc,
+    ) -> Layout<Self::Shape, Self::Stride> {
+        self.1.f2_right_inverse_fold(curr_d, acc)
+    }
+}
+
+type AppendedLayout<Acc, S, D> =
+    Layout<<Acc as AppendInverseMode<S, D>>::Shape, <Acc as AppendInverseMode<S, D>>::Stride>;
+
+const impl<S, D, P, Rest, CurrD, Acc>
+    F2RightInverseFoldStep<CurrD, Acc, { F2RightFoldAction::StaticZeroResStaticNext }>
+    for Til<ModeTriple<S, F2<D>, P>, Rest>
+where
+    S: ShapeScalar,
+    D: F2Scalar,
+    P: [const] ShapeScalarToF2,
+    F2<P::Scalar>: StrideScalar + Stride<S>,
+    CurrD: RightRunningExtent,
+    Acc: [const] AppendInverseMode<S, F2<P::Scalar>>,
+    Rest: FlatTuple
+        + [const] F2RightInverseFold<
+            Int<{ STATIC_F2_NEXT_D::<CurrD, S> }>,
+            AppendedLayout<Acc, S, F2<P::Scalar>>,
+        >,
+{
+    type Shape = <Rest as F2RightInverseFold<
+        Int<{ STATIC_F2_NEXT_D::<CurrD, S> }>,
+        AppendedLayout<Acc, S, F2<P::Scalar>>,
+    >>::Shape;
+    type Stride = <Rest as F2RightInverseFold<
+        Int<{ STATIC_F2_NEXT_D::<CurrD, S> }>,
+        AppendedLayout<Acc, S, F2<P::Scalar>>,
+    >>::Stride;
+
+    fn f2_right_inverse_fold_step(self, _: CurrD, acc: Acc) -> Layout<Self::Shape, Self::Stride> {
+        let next_acc = acc.append_inverse_mode(self.0.shape, self.0.pps.to_f2());
+        self.1.f2_right_inverse_fold(Int, next_acc)
+    }
+}
+
+const impl<S, D, P, Rest, CurrD, Acc>
+    F2RightInverseFoldStep<CurrD, Acc, { F2RightFoldAction::StaticZeroResExhausted }>
+    for Til<ModeTriple<S, F2<D>, P>, Rest>
+where
+    S: ShapeScalar,
+    D: F2Scalar,
+    P: [const] ShapeScalarToF2,
+    F2<P::Scalar>: StrideScalar + Stride<S>,
+    CurrD: RightRunningExtent,
+    Acc: [const] AppendInverseMode<S, F2<P::Scalar>>,
+    Rest: FlatTuple
+        + [const] F2RightInverseFold<ExhaustedExtent, AppendedLayout<Acc, S, F2<P::Scalar>>>,
+{
+    type Shape =
+        <Rest as F2RightInverseFold<ExhaustedExtent, AppendedLayout<Acc, S, F2<P::Scalar>>>>::Shape;
+    type Stride = <Rest as F2RightInverseFold<
+        ExhaustedExtent,
+        AppendedLayout<Acc, S, F2<P::Scalar>>,
+    >>::Stride;
+
+    fn f2_right_inverse_fold_step(self, _: CurrD, acc: Acc) -> Layout<Self::Shape, Self::Stride> {
+        let next_acc = acc.append_inverse_mode(self.0.shape, self.0.pps.to_f2());
+        self.1.f2_right_inverse_fold(ExhaustedExtent, next_acc)
+    }
+}
+
+const impl<S, D, P, Rest, CurrD, Acc>
+    F2RightInverseFoldStep<CurrD, Acc, { F2RightFoldAction::StaticZeroResDynamicNext }>
+    for Til<ModeTriple<S, F2<D>, P>, Rest>
+where
+    S: [const] ShapeScalar,
+    D: F2Scalar,
+    P: [const] ShapeScalarToF2,
+    F2<P::Scalar>: StrideScalar + Stride<S>,
+    CurrD: [const] RightRunningExtent,
+    Acc: [const] AppendInverseMode<S, F2<P::Scalar>>,
+    Rest: FlatTuple
+        + [const] F2RightInverseFold<DynamicExtent, AppendedLayout<Acc, S, F2<P::Scalar>>>,
+{
+    type Shape =
+        <Rest as F2RightInverseFold<DynamicExtent, AppendedLayout<Acc, S, F2<P::Scalar>>>>::Shape;
+    type Stride =
+        <Rest as F2RightInverseFold<DynamicExtent, AppendedLayout<Acc, S, F2<P::Scalar>>>>::Stride;
+
+    fn f2_right_inverse_fold_step(
+        self,
+        curr_d: CurrD,
+        acc: Acc,
+    ) -> Layout<Self::Shape, Self::Stride> {
+        let s = self.0.shape.value();
+        let next_curr = match curr_d.dynamic_extent() {
+            Some(c) => match checked_clmul(c, s) {
+                Ok(v) => DynamicExtent(Some(v)),
+                Err(_) => DynamicExtent(None),
+            },
+            None => DynamicExtent(None),
+        };
+        let next_acc = acc.append_inverse_mode(self.0.shape, self.0.pps.to_f2());
+        self.1.f2_right_inverse_fold(next_curr, next_acc)
+    }
+}
+
+const HALF_EXTENT<S: Integer>: int = div(S::STATIC_VALUE.unwrap(),2);
+type SplitF2Modes<S, D, P, Rest> = Til<
+    ModeTriple<Int<2>, F2<D>, P>,
+    Til<
+        ModeTriple<
+            Int<{ HALF_EXTENT::<S> }>,
+            F2<crate::integer::Product<D, Int<2>>>,
+            crate::integer::Product<P, Int<2>>,
+        >,
+        Rest,
+    >,
+>;
+
+const impl<S, D, P, Rest, CurrD, Acc>
+    F2RightInverseFoldStep<CurrD, Acc, { F2RightFoldAction::SplitBits }>
+    for Til<ModeTriple<S, F2<D>, P>, Rest>
+where
+    S: ShapeScalar,
+    D: [const] F2Scalar + [const] crate::integer::ArithMul<D, Int<2>>,
+    P: [const] ShapeScalar + [const] crate::integer::ArithMul<P, Int<2>>,
+    crate::integer::Product<D, Int<2>>: [const] F2Scalar,
+    Rest: FlatTuple,
+    CurrD: RightRunningExtent,
+    Acc: Copy,
+    SplitF2Modes<S, D, P, Rest>: [const] F2RightInverseFold<CurrD, Acc>,
+{
+    type Shape = <SplitF2Modes<S, D, P, Rest> as F2RightInverseFold<CurrD, Acc>>::Shape;
+    type Stride = <SplitF2Modes<S, D, P, Rest> as F2RightInverseFold<CurrD, Acc>>::Stride;
+    fn f2_right_inverse_fold_step(self, c: CurrD, acc: Acc) -> Layout<Self::Shape, Self::Stride> {
+        let mode = self.0;
+        let low = ModeTriple {
+            shape: Int::<2>,
+            stride: mode.stride,
+            pps: mode.pps,
+        };
+        let high = ModeTriple {
+            shape: Int::<{ HALF_EXTENT::<S> }>,
+            stride: F2::new(mul(mode.stride.inner(), Int::<2>)),
+            pps: mul(mode.pps, Int::<2>),
+        };
+        Til(low, Til(high, self.1)).f2_right_inverse_fold(c, acc)
+    }
+}
+
+type StaticBackSubStride<P, CorrV> = F2<F2XorOutput<<P as ShapeScalarToF2>::Scalar, CorrV>>;
+
+const impl<S, D, P, Rest, CurrD, AccS, AccD, CorrV>
+    F2RightInverseFoldStep<
+        CurrD,
+        Layout<AccS, AccD>,
+        { F2RightFoldAction::StaticBackSubStaticNext },
+    > for Til<ModeTriple<S, F2<D>, P>, Rest>
+where
+    S: ShapeScalar,
+    D: F2Scalar,
+    P: [const] ShapeScalarToF2,
+    CurrD: RightRunningExtent,
+    AccS: Shape,
+    AccD: Stride<AccS>,
+    (): [const] crate::swizzle::ValidF2Value<{ IS_NON_NEG::<{ STATIC_F2_RESIDUE::<CurrD, D> }> }>,
+    F2<Int<{ STATIC_F2_RESIDUE::<CurrD, D> }>>: [const] IndexToCoord<AccS>,
+    <F2<Int<{ STATIC_F2_RESIDUE::<CurrD, D> }>> as IndexToCoord<AccS>>::Output:
+        [const] InnerProduct<AccD, Output = F2<CorrV>>,
+    CorrV: [const] F2Scalar,
+    P::Scalar: [const] F2XorScalar<CorrV, { BOTH_STATIC::<P::Scalar, CorrV> }>,
+    StaticBackSubStride<P, CorrV>: StrideScalar + Stride<S>,
+    Layout<AccS, AccD>: [const] AppendInverseMode<S, StaticBackSubStride<P, CorrV>>,
+    Rest: FlatTuple
+        + [const] F2RightInverseFold<
+            Int<{ STATIC_F2_NEXT_D::<CurrD, S> }>,
+            AppendedLayout<Layout<AccS, AccD>, S, StaticBackSubStride<P, CorrV>>,
+        >,
+{
+    type Shape = <Rest as F2RightInverseFold<
+        Int<{ STATIC_F2_NEXT_D::<CurrD, S> }>,
+        AppendedLayout<Layout<AccS, AccD>, S, StaticBackSubStride<P, CorrV>>,
+    >>::Shape;
+    type Stride = <Rest as F2RightInverseFold<
+        Int<{ STATIC_F2_NEXT_D::<CurrD, S> }>,
+        AppendedLayout<Layout<AccS, AccD>, S, StaticBackSubStride<P, CorrV>>,
+    >>::Stride;
+
+    fn f2_right_inverse_fold_step(
+        self,
+        _: CurrD,
+        acc: Layout<AccS, AccD>,
+    ) -> Layout<Self::Shape, Self::Stride> {
+        let corr = acc.call(f2(Int::<{ STATIC_F2_RESIDUE::<CurrD, D> }>));
+        let stride = f2_add(self.0.pps.to_f2(), corr);
+        let next_acc = acc.append_inverse_mode(self.0.shape, stride);
+        self.1.f2_right_inverse_fold(Int, next_acc)
+    }
+}
+
+const impl<S, D, P, Rest, CurrD, AccS, AccD, CorrV>
+    F2RightInverseFoldStep<CurrD, Layout<AccS, AccD>, { F2RightFoldAction::StaticBackSubExhausted }>
+    for Til<ModeTriple<S, F2<D>, P>, Rest>
+where
+    S: ShapeScalar,
+    D: F2Scalar,
+    P: [const] ShapeScalarToF2,
+    CurrD: RightRunningExtent,
+    AccS: Shape,
+    AccD: Stride<AccS>,
+    (): [const] crate::swizzle::ValidF2Value<{ IS_NON_NEG::<{ STATIC_F2_RESIDUE::<CurrD, D> }> }>,
+    F2<Int<{ STATIC_F2_RESIDUE::<CurrD, D> }>>: [const] IndexToCoord<AccS>,
+    <F2<Int<{ STATIC_F2_RESIDUE::<CurrD, D> }>> as IndexToCoord<AccS>>::Output:
+        [const] InnerProduct<AccD, Output = F2<CorrV>>,
+    CorrV: [const] F2Scalar,
+    P::Scalar: [const] F2XorScalar<CorrV, { BOTH_STATIC::<P::Scalar, CorrV> }>,
+    StaticBackSubStride<P, CorrV>: StrideScalar + Stride<S>,
+    Layout<AccS, AccD>: [const] AppendInverseMode<S, StaticBackSubStride<P, CorrV>>,
+    Rest: FlatTuple
+        + [const] F2RightInverseFold<
+            ExhaustedExtent,
+            AppendedLayout<Layout<AccS, AccD>, S, StaticBackSubStride<P, CorrV>>,
+        >,
+{
+    type Shape = <Rest as F2RightInverseFold<
+        ExhaustedExtent,
+        AppendedLayout<Layout<AccS, AccD>, S, StaticBackSubStride<P, CorrV>>,
+    >>::Shape;
+    type Stride = <Rest as F2RightInverseFold<
+        ExhaustedExtent,
+        AppendedLayout<Layout<AccS, AccD>, S, StaticBackSubStride<P, CorrV>>,
+    >>::Stride;
+
+    fn f2_right_inverse_fold_step(
+        self,
+        _: CurrD,
+        acc: Layout<AccS, AccD>,
+    ) -> Layout<Self::Shape, Self::Stride> {
+        let corr = acc.call(f2(Int::<{ STATIC_F2_RESIDUE::<CurrD, D> }>));
+        let stride = f2_add(self.0.pps.to_f2(), corr);
+        let next_acc = acc.append_inverse_mode(self.0.shape, stride);
+        self.1.f2_right_inverse_fold(ExhaustedExtent, next_acc)
+    }
+}
+
+const impl<S, D, P, Rest, CurrD, Acc>
+    F2RightInverseFoldStep<CurrD, Acc, { F2RightFoldAction::DynamicStep }>
+    for Til<ModeTriple<S, F2<D>, P>, Rest>
+where
+    S: [const] ShapeScalar,
+    D: [const] F2Scalar,
+    P: [const] ShapeScalar,
+    CurrD: [const] RightRunningExtent,
+    Acc: [const] F2BackSubDynEval + [const] AppendInverseMode<int, F2<int>>,
+    Rest: FlatTuple + [const] F2RightInverseFold<DynamicExtent, AppendedLayout<Acc, int, F2<int>>>,
+{
+    type Shape =
+        <Rest as F2RightInverseFold<DynamicExtent, AppendedLayout<Acc, int, F2<int>>>>::Shape;
+    type Stride =
+        <Rest as F2RightInverseFold<DynamicExtent, AppendedLayout<Acc, int, F2<int>>>>::Stride;
+
+    fn f2_right_inverse_fold_step(
+        self,
+        curr_d: CurrD,
+        acc: Acc,
+    ) -> Layout<Self::Shape, Self::Stride> {
+        let s = self.0.shape.value();
+        let d = self.0.stride.value();
+        let curr_opt = curr_d.dynamic_extent();
+        let matched = if s <= 1 || d == 0 {
+            false
+        } else if let Some(c) = curr_opt {
+            let residue = c ^ d;
+            if residue == 0 {
+                true
+            } else {
+                matches!(checked_clmul(s - 1, residue), Ok(reach) if reach < c)
+            }
+        } else {
+            false
+        };
+        if matched {
+            let c = curr_opt.unwrap();
+            let residue = c ^ d;
+            let base_stride = f2(Integer::value(self.0.pps));
+            let stride = if residue == 0 {
+                base_stride
+            } else {
+                f2_add(base_stride, acc.eval_f2_residue(f2(residue)))
+            };
+            let next_curr = match checked_clmul(c, s) {
+                Ok(v) => DynamicExtent(Some(v)),
+                Err(_) => DynamicExtent(None),
+            };
+            let next_acc = acc.append_inverse_mode(s, stride);
+            self.1.f2_right_inverse_fold(next_curr, next_acc)
+        } else {
+            let next_acc = acc.append_inverse_mode(1, f2(0i32));
+            self.1
+                .f2_right_inverse_fold(DynamicExtent(curr_opt), next_acc)
+        }
+    }
+}
+
+/// Polynomial division by a non-binary radix s produces remainders below
+/// 2^degree(s). Keep the original polynomial positional weight for the quotient.
+/// When both the forward and inverse strides encode the divisor, the mapping
+/// is the identity on the resulting contiguous binary space.
+const fn polynomial_radices(s: int, d: int, p: int, t: int, e: int, q: int) -> [int; 4] {
+    let mut modes = [s, t, e, q];
+    if p == 1 && q == s && s.count_ones() > 1 && t > 1 {
+        let h = 1 << (int::BITS - 1 - s.leading_zeros());
+        modes[0] = h;
+        if d == 1 && e == s && t.count_ones() == 1 {
+            modes[2] = h;
+            modes[3] = h;
+        }
+    } else if q == 1 && p == t && t.count_ones() > 1 && s > 1 {
+        modes[1] = 1 << (int::BITS - 1 - t.leading_zeros());
+    }
+    modes
+}
+/// Normalizes a canonical polynomial radix before the inverse stride walk.
+#[doc(hidden)]
+pub const trait InverseRadix: FlatTuple {
+    type Modes: FlatTuple;
+    fn inverse_radix(self) -> Self::Modes;
+}
+
+type PairModes<S, D, P, T, E, Q> = Til<ModeTriple<S, F2<D>, P>, Til<ModeTriple<T, F2<E>, Q>, Nil>>;
+const PAIR_VALUES<S:Integer,D:Integer,P:Integer,T:Integer,E:Integer,Q:Integer>:[int;4] =
+    match (S::STATIC_VALUE,D::STATIC_VALUE,P::STATIC_VALUE,T::STATIC_VALUE,E::STATIC_VALUE,Q::STATIC_VALUE) {
+        (Some(s),Some(d),Some(p),Some(t),Some(e),Some(q)) => polynomial_radices(s,d,p,t,e,q),
+        _=>[0;4],
+    };
+const PAIR_CASE<S:Integer,D:Integer,P:Integer,T:Integer,E:Integer,Q:Integer>:int =
+    if matches!((S::STATIC_VALUE,T::STATIC_VALUE),(Some(s),Some(t)) if s.count_ones()==1 && t.count_ones()==1) {0}
+    else if S::IS_STATIC && D::IS_STATIC && P::IS_STATIC && T::IS_STATIC && E::IS_STATIC && Q::IS_STATIC {1}
+    else {-1};
+const PAIR_S<S:Integer,D:Integer,P:Integer,T:Integer,E:Integer,Q:Integer>:int=PAIR_VALUES::<S,D,P,T,E,Q>[0];
+const PAIR_T<S:Integer,D:Integer,P:Integer,T:Integer,E:Integer,Q:Integer>:int=PAIR_VALUES::<S,D,P,T,E,Q>[1];
+const PAIR_E<S:Integer,D:Integer,P:Integer,T:Integer,E:Integer,Q:Integer>:int=PAIR_VALUES::<S,D,P,T,E,Q>[2];
+const PAIR_Q<S:Integer,D:Integer,P:Integer,T:Integer,E:Integer,Q:Integer>:int=PAIR_VALUES::<S,D,P,T,E,Q>[3];
+/// Selects unchanged, static, or runtime normalization for two sorted modes.
+#[doc(hidden)]
+pub const trait NormalizeRadix<const CASE: int>: FlatTuple {
+    type Modes: FlatTuple;
+    fn normalize_radix(self) -> Self::Modes;
+}
+const impl<M: FlatTuple> NormalizeRadix<0> for M {
+    type Modes = M;
+    fn normalize_radix(self) -> M {
+        self
+    }
+}
+const impl<S: ShapeScalar, D: F2Scalar, P: ShapeScalar, T: ShapeScalar, E: F2Scalar, Q: ShapeScalar>
+    NormalizeRadix<1> for PairModes<S, D, P, T, E, Q>
+where
+    (): [const] crate::swizzle::ValidF2Value<{ IS_NON_NEG::<{ PAIR_E::<S, D, P, T, E, Q> }> }>,
+{
+    type Modes = PairModes<
+        Int<{ PAIR_S::<S, D, P, T, E, Q> }>,
+        D,
+        P,
+        Int<{ PAIR_T::<S, D, P, T, E, Q> }>,
+        Int<{ PAIR_E::<S, D, P, T, E, Q> }>,
+        Int<{ PAIR_Q::<S, D, P, T, E, Q> }>,
+    >;
+    fn normalize_radix(self) -> Self::Modes {
+        Til(
+            ModeTriple {
+                shape: Int,
+                stride: self.0.stride,
+                pps: self.0.pps,
+            },
+            Til(
+                ModeTriple {
+                    shape: Int,
+                    stride: f2(Int),
+                    pps: Int,
+                },
+                Nil,
+            ),
+        )
+    }
+}
+const impl<
+    S: [const] ShapeScalar,
+    D: [const] F2Scalar,
+    P: [const] ShapeScalar,
+    T: [const] ShapeScalar,
+    E: [const] F2Scalar,
+    Q: [const] ShapeScalar,
+> NormalizeRadix<-1> for PairModes<S, D, P, T, E, Q>
+{
+    type Modes = PairModes<int, D, P, int, int, int>;
+    fn normalize_radix(self) -> Self::Modes {
+        let a = self.0;
+        let b = self.1.0;
+        let [s, t, e, q] = polynomial_radices(
+            a.shape.value(),
+            a.stride.value(),
+            a.pps.value(),
+            b.shape.value(),
+            b.stride.value(),
+            b.pps.value(),
+        );
+        Til(
+            ModeTriple {
+                shape: s,
+                stride: a.stride,
+                pps: a.pps,
+            },
+            Til(
+                ModeTriple {
+                    shape: t,
+                    stride: f2(e),
+                    pps: q,
+                },
+                Nil,
+            ),
+        )
+    }
+}
+const impl<S: ShapeScalar, D: F2Scalar, P: ShapeScalar, T: ShapeScalar, E: F2Scalar, Q: ShapeScalar>
+    InverseRadix for PairModes<S, D, P, T, E, Q>
+where
+    Self: [const] NormalizeRadix<{ PAIR_CASE::<S, D, P, T, E, Q> }>,
+{
+    type Modes = <Self as NormalizeRadix<{ PAIR_CASE::<S, D, P, T, E, Q> }>>::Modes;
+    fn inverse_radix(self) -> Self::Modes {
+        self.normalize_radix()
+    }
+}
+const impl<H: Leaf> InverseRadix for Til<H, Nil> {
+    type Modes = Self;
+    fn inverse_radix(self) -> Self {
+        self
+    }
+}
+const impl<H: Leaf, J: Leaf, K: Leaf, T: FlatTuple> InverseRadix for Til<H, Til<J, Til<K, T>>> {
+    type Modes = Self;
+    fn inverse_radix(self) -> Self {
+        self
+    }
+}
+/// Adds each independent coordinate bit of a sorted mode to the binary basis.
+#[doc(hidden)]
+pub const trait InsertInverseBits: FlatTuple {
+    const STATIC_BINARY: bool;
+    fn insert_bits(self, basis: &mut BinaryPreimages);
+}
+const impl InsertInverseBits for Nil {
+    const STATIC_BINARY: bool = true;
+    fn insert_bits(self, _: &mut BinaryPreimages) {}
+}
+const impl<
+    S: [const] ShapeScalar,
+    D: [const] F2Scalar,
+    P: [const] ShapeScalar,
+    T: [const] InsertInverseBits,
+> InsertInverseBits for Til<ModeTriple<S, F2<D>, P>, T>
+{
+    const STATIC_BINARY: bool = matches!(S::STATIC_VALUE,Some(s) if s.count_ones()==1)
+        && matches!(P::STATIC_VALUE,Some(p) if p.count_ones()==1)
+        && T::STATIC_BINARY;
+
+    fn insert_bits(self, basis: &mut BinaryPreimages) {
+        let s = self.0.shape.value();
+        let d = self.0.stride.value();
+        let p = self.0.pps.value();
+        if d != 0 && s > 1 {
+            // Only the complete low binary field can be varied independently.
+            let mut k = 1;
+            while k <= s / 2 {
+                basis.insert(mul(d, k), mul(p, k));
+                k = mul(k, 2);
+            }
+        }
+        self.1.insert_bits(basis);
+    }
+}
+
+/// Selects the static stride fold or the runtime binary basis for a multi-mode axis.
+#[doc(hidden)]
+pub const trait InvertF2Axis<const BINARY: bool>: FlatTuple {
+    type Shape: Shape;
+    type Stride: Stride<Self::Shape>;
+    fn invert_f2_axis(self) -> Layout<Self::Shape, Self::Stride>;
+}
+const impl<M> InvertF2Axis<false> for M
+where
+    M: [const] InverseRadix,
+    M::Modes: FlatTuple + [const] F2RightInverseFold<Int<1>, Layout<Nil, Nil>>,
+    Layout<
+        <M::Modes as F2RightInverseFold<Int<1>, Layout<Nil, Nil>>>::Shape,
+        <M::Modes as F2RightInverseFold<Int<1>, Layout<Nil, Nil>>>::Stride,
+    >: [const] FinalizeRightAxis,
+{
+    type Shape = <Layout<
+        <M::Modes as F2RightInverseFold<Int<1>, Layout<Nil, Nil>>>::Shape,
+        <M::Modes as F2RightInverseFold<Int<1>, Layout<Nil, Nil>>>::Stride,
+    > as FinalizeRightAxis>::Shape;
+    type Stride = <Layout<
+        <M::Modes as F2RightInverseFold<Int<1>, Layout<Nil, Nil>>>::Shape,
+        <M::Modes as F2RightInverseFold<Int<1>, Layout<Nil, Nil>>>::Stride,
+    > as FinalizeRightAxis>::Stride;
+
+    fn invert_f2_axis(self) -> Layout<Self::Shape, Self::Stride> {
+        self.inverse_radix()
+            .f2_right_inverse_fold(Int, Layout::new(Nil, Nil))
+            .finalize_right_axis()
+    }
+}
+
+// A fixed tuple keeps the return type independent of the runtime matrix rank.
+// Unused high bits contribute unit extents and zero strides.
+type Bits4<V> = Til<V, Til<V, Til<V, Til<V, Nil>>>>;
+type Bits8<V> = Til<Bits4<V>, Til<Bits4<V>, Nil>>;
+type Bits32<V> = Til<Bits8<V>, Til<Bits8<V>, Til<Bits8<V>, Til<Bits8<V>, Nil>>>>;
+const fn four<V: [const] Item>(a: &[V; 32], i: usize) -> Bits4<V> {
+    crate::tuple![a[i], a[i + 1], a[i + 2], a[i + 3]]
+}
+const fn eight<V: [const] Item>(a: &[V; 32], i: usize) -> Bits8<V> {
+    crate::tuple![four(a, i), four(a, i + 4)]
+}
+const fn binary_tuple<V: [const] Item>(a: &[V; 32]) -> Bits32<V> {
+    crate::tuple![eight(a, 0), eight(a, 8), eight(a, 16), eight(a, 24)]
+}
+const impl<M: [const] InsertInverseBits> InvertF2Axis<true> for M {
+    type Shape = Bits32<int>;
+    type Stride = Bits32<F2<int>>;
+    fn invert_f2_axis(self) -> Layout<Self::Shape, Self::Stride> {
+        let mut basis = BinaryPreimages::new();
+        self.insert_bits(&mut basis);
+        let mut shape = [1; 32];
+        let mut stride = [f2(0i32); 32];
+        let mut k = 0;
+        while k < 31 {
+            let Some(x) = basis.solve(1 << k) else {
+                break;
+            };
+            shape[k] = 2;
+            stride[k] = f2(x);
+            k += 1;
+        }
+        Layout::new(binary_tuple(&shape), binary_tuple(&stride))
+    }
+}
+const USE_BINARY_BASIS<M: InsertInverseBits>: bool = M::RANK > 2 && (!M::IS_STATIC || !M::STATIC_BINARY);
+const impl<M> InvertSortedAxis<true, { AxisAlgebra::F2 }> for M
+where
+    M: InsertInverseBits + [const] InvertF2Axis<{ USE_BINARY_BASIS::<M> }>,
+{
+    type Shape = <M as InvertF2Axis<{ USE_BINARY_BASIS::<M> }>>::Shape;
+    type Stride = <M as InvertF2Axis<{ USE_BINARY_BASIS::<M> }>>::Stride;
+    fn invert_sorted_axis(self) -> Layout<Self::Shape, Self::Stride> {
+        self.invert_f2_axis()
+    }
+}
+/// Validates a single-mode `F2` axis for `left_inverse` (`gap == 1`, i.e. stride == `F2(1)`).
+const F2_LEFT_UNIT_OK<D: F2Scalar>: bool = match D::STATIC_VALUE {
+    Some(d) => d == 1,
+    None => true,
+};
+
+/// Compile-time guard restricting `F2` `left_inverse` to unit-gap (`F2(1)`) chains.
+#[doc(hidden)]
+pub const trait ValidF2LeftInverse<const OK: bool> {}
+const impl ValidF2LeftInverse<true> for () {}
+
+const impl<S, D, P> InvertSortedAxis<false, { AxisAlgebra::F2 }>
+    for Til<ModeTriple<S, F2<D>, P>, Nil>
+where
+    S: [const] ShapeScalar,
+    D: [const] F2Scalar,
+    P: [const] ShapeScalar + StrideScalar + Stride<S>,
+    (): [const] ValidF2LeftInverse<{ F2_LEFT_UNIT_OK::<D> }>,
+{
+    type Shape = S;
+    type Stride = P;
+
+    fn invert_sorted_axis(self) -> Layout<S, P> {
+        let d = self.0.stride.value();
+        assert!(
+            d == 1,
+            "left_inverse on F2-strided layout requires every gap to be 1"
+        );
+        Layout::new(self.0.shape, self.0.pps)
     }
 }
 
@@ -1287,10 +2260,17 @@ where
     FD: FlatTuple,
     FP: FlatTuple,
     <FS as FilterInverseModes<ModeEnd, FD, FP>>::Output: [const] SortInverseModes,
-    SortedAxisModes<ModeEnd, FS, FD, FP>: [const] InvertSortedAxis<RIGHT>,
+    SortedAxisModes<ModeEnd, FS, FD, FP>: AxisAlgebraOf
+        + [const] InvertSortedAxis<RIGHT, { AXIS_ALGEBRA_OF::<SortedAxisModes<ModeEnd, FS, FD, FP>> }>,
 {
-    type Shape = <SortedAxisModes<ModeEnd, FS, FD, FP> as InvertSortedAxis<RIGHT>>::Shape;
-    type Stride = <SortedAxisModes<ModeEnd, FS, FD, FP> as InvertSortedAxis<RIGHT>>::Stride;
+    type Shape = <SortedAxisModes<ModeEnd, FS, FD, FP> as InvertSortedAxis<
+        RIGHT,
+        { AXIS_ALGEBRA_OF::<SortedAxisModes<ModeEnd, FS, FD, FP>> },
+    >>::Shape;
+    type Stride = <SortedAxisModes<ModeEnd, FS, FD, FP> as InvertSortedAxis<
+        RIGHT,
+        { AXIS_ALGEBRA_OF::<SortedAxisModes<ModeEnd, FS, FD, FP>> },
+    >>::Stride;
 
     fn build_inverse(
         self,
@@ -1313,10 +2293,17 @@ where
     FD: FlatTuple,
     FP: FlatTuple,
     <FS as FilterInverseModes<P, FD, FP>>::Output: [const] SortInverseModes,
-    SortedAxisModes<P, FS, FD, FP>: [const] InvertSortedAxis<RIGHT>,
+    SortedAxisModes<P, FS, FD, FP>: AxisAlgebraOf
+        + [const] InvertSortedAxis<RIGHT, { AXIS_ALGEBRA_OF::<SortedAxisModes<P, FS, FD, FP>> }>,
 {
-    type Shape = <SortedAxisModes<P, FS, FD, FP> as InvertSortedAxis<RIGHT>>::Shape;
-    type Stride = <SortedAxisModes<P, FS, FD, FP> as InvertSortedAxis<RIGHT>>::Stride;
+    type Shape = <SortedAxisModes<P, FS, FD, FP> as InvertSortedAxis<
+        RIGHT,
+        { AXIS_ALGEBRA_OF::<SortedAxisModes<P, FS, FD, FP>> },
+    >>::Shape;
+    type Stride = <SortedAxisModes<P, FS, FD, FP> as InvertSortedAxis<
+        RIGHT,
+        { AXIS_ALGEBRA_OF::<SortedAxisModes<P, FS, FD, FP>> },
+    >>::Stride;
 
     fn build_inverse(
         self,
@@ -1426,9 +2413,40 @@ where
     bases.build_inverse(flat_s, flat_d, flat_p)
 }
 
+/// Verifies that an F2 preimage can be decoded by the original domain shape.
+#[doc(hidden)]
+pub const trait InverseCoordinates<const F2_INDEX: bool>: Shape {
+    fn validate_inverse_coordinates(self);
+}
+const impl<S: Shape> InverseCoordinates<false> for S {
+    fn validate_inverse_coordinates(self) {}
+}
+const impl<S: [const] BinaryExtents> InverseCoordinates<true> for S
+where
+    F2<int>: [const] IndexToCoord<S>,
+{
+    fn validate_inverse_coordinates(self) {
+        if !self.binary_extents() {
+            let _ = f2(0i32).index_to_coord(&self);
+        }
+    }
+}
+const RETURNS_F2<L: LayoutBase>: bool = L::Stride::HAS_F2 where L::Stride: ContainsF2;
+
+const LIFT_INVERSE<L:LayoutBase,S:BinaryExtents>:bool = {
+    let mixed=L::Stride::HAS_F2 && L::Stride::HAS_INTEGER;
+    assert!(!mixed || !matches!(S::STATIC_BINARY,Some(false)), "mixed inverse needs disjoint binary domain fields");
+    mixed
+} where L::Stride: ContainsF2;
+
+const KEEP_INVERSE<L:LayoutBase,S:BinaryExtents>:bool = !LIFT_INVERSE::<L,S> where L::Stride:ContainsF2;
+
 const impl<S, D> RightInverse for Layout<S, D>
 where
-    S: Shape + [const] Flatten,
+    S: [const] BinaryExtents
+        + Shape
+        + [const] Flatten
+        + [const] InverseCoordinates<{ RETURNS_F2::<BuiltInverseLayout<true, S, D>> }>,
     D: Stride<S> + [const] Flatten,
     S::Output: [const] AssertPositiveShape,
     Layout<S::Output, D::Output>: [const] Coalesce<true>,
@@ -1440,11 +2458,27 @@ where
     Self: [const] Coprofile,
     <<Self as Coprofile>::Output as Item>::Profile: [const] MakeBasisLikeTopProfile,
     LayoutBases<S, D>: [const] BuildInverse<true, CoalescedFlatS<S, D>, CoalescedFlatD<S, D>, CoalescedFlatP<S, D>>,
+    BuiltInverseLayout<true, S, D>: LayoutBase
+        + [const] ScaleIfNotOne<F2<Int<1>>, { KEEP_INVERSE::<BuiltInverseLayout<true, S, D>, S> }>,
+    <BuiltInverseLayout<true, S, D> as LayoutBase>::Stride: ContainsF2,
 {
-    type Output = BuiltInverseLayout<true, S, D>;
+    type Output = <BuiltInverseLayout<true, S, D> as ScaleIfNotOne<
+        F2<Int<1>>,
+        { KEEP_INVERSE::<BuiltInverseLayout<true, S, D>, S> },
+    >>::Output;
 
     fn right_inverse(self) -> Self::Output {
-        invert_layout::<true, S, D>(self)
+        <S as InverseCoordinates<{RETURNS_F2::<BuiltInverseLayout<true,S,D>>}>>::validate_inverse_coordinates(self.shape);
+        if LIFT_INVERSE::<BuiltInverseLayout<true, S, D>, S> {
+            assert!(
+                self.shape.binary_extents(),
+                "mixed inverse needs disjoint binary domain fields"
+            );
+        }
+        <BuiltInverseLayout<true, S, D> as ScaleIfNotOne<
+            F2<Int<1>>,
+            { KEEP_INVERSE::<BuiltInverseLayout<true, S, D>, S> },
+        >>::scale_if_not_one(invert_layout::<true, S, D>(self), f2(Int::<1>))
     }
 }
 

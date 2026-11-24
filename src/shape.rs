@@ -239,3 +239,35 @@ where
         self.1.assert_positive_shape();
     }
 }
+
+/// Tests whether domain coordinates occupy disjoint binary fields.
+#[doc(hidden)]
+pub const trait BinaryExtents: Shape {
+    const STATIC_BINARY: Option<bool>;
+    fn binary_extents(self) -> bool;
+}
+const impl<S: [const] ShapeScalar> BinaryExtents for S {
+    const STATIC_BINARY: Option<bool> = match S::STATIC_VALUE {
+        Some(s) => Some(s > 0 && s.count_ones() == 1),
+        None => None,
+    };
+    fn binary_extents(self) -> bool {
+        self.value() > 0 && self.value().count_ones() == 1
+    }
+}
+const impl BinaryExtents for Nil {
+    const STATIC_BINARY: Option<bool> = Some(true);
+    fn binary_extents(self) -> bool {
+        true
+    }
+}
+const impl<H: [const] BinaryExtents, T: [const] BinaryExtents + Tuple> BinaryExtents for Til<H, T> {
+    const STATIC_BINARY: Option<bool> = match (H::STATIC_BINARY, T::STATIC_BINARY) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,
+    };
+    fn binary_extents(self) -> bool {
+        self.0.binary_extents() && self.1.binary_extents()
+    }
+}

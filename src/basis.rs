@@ -50,7 +50,7 @@
 
 use core::cmp::Ordering;
 use core::fmt::{Display, Formatter};
-use core::marker::PhantomData;
+use core::marker::{ConstParamTy, PhantomData};
 
 use crate::integer::{
     Int, Integer, cmp as scalar_cmp, eq as scalar_eq, int, static_cmp, static_cmp_of, static_eq_of,
@@ -73,6 +73,17 @@ pub use ops::*;
 pub use path::*;
 pub use repr::*;
 
+/// Algebraic ring classification for [`BasisCoeff`] implementations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy)]
+pub enum CoeffAlgebra {
+    /// Ordinary signed integers (`int` / [`Int<N>`]).
+    Integer,
+    /// Binary polynomial ring over GF(2) ([`F2`](crate::swizzle::F2)).
+    F2,
+    /// Any other custom external coefficient ring.
+    Other,
+}
+
 /// Coefficient abstraction for basis terms, implemented for all [`Integer`] types
 /// and extensible to algebraic rings such as `F2`.
 pub const trait BasisCoeff: Copy {
@@ -82,8 +93,10 @@ pub const trait BasisCoeff: Copy {
     const IS_STATIC: bool = false;
     /// Compile-time ordering against zero, or `None` if dynamic.
     const STATIC_CMP_ZERO: Option<Ordering> = None;
-    /// Compile-time signed integer value when the coefficient is a static [`Integer`].
+    /// Compile-time signed integer value when the coefficient's scalar value is statically known.
     const STATIC_VALUE: Option<int> = None;
+    /// Algebraic ring tag distinguishing integer arithmetic from `F2` and custom rings.
+    const ALGEBRA: CoeffAlgebra = CoeffAlgebra::Other;
     /// Multiplicative identity type in this coefficient's algebra.
     type Unit: [const] BasisCoeff;
 
@@ -114,6 +127,7 @@ const impl<I: [const] Integer> BasisCoeff for I {
     const IS_STATIC: bool = I::IS_STATIC;
     const STATIC_CMP_ZERO: Option<Ordering> = static_cmp_of::<I, Int<0>>();
     const STATIC_VALUE: Option<int> = I::STATIC_VALUE;
+    const ALGEBRA: CoeffAlgebra = CoeffAlgebra::Integer;
     type Unit = Int<1>;
 
     fn is_zero(&self) -> bool {

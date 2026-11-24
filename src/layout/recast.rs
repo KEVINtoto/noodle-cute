@@ -30,10 +30,13 @@
 //!
 //! - Requires non-negative shape extents and strictly positive scale numerators/denominators.
 //! - Zero-stride leaves (`0`, `Int<0>`, or empty `BasisCombination<Nil>`) preserve `(shape, 0)`.
+//! - F2 strides support aligned binary scaling and carry-free integer progressions.
+//!   Packing a smaller power-of-two stride groups adjacent coordinates into one element.
 //! - Divisibility violations or [`int`] overflow fail at compile time when shape, stride, and
 //!   scale are all static, and panic at runtime when any operand is dynamic.
 
 use crate::basis::{BasisCoeff, BasisCombination, BasisPath, BasisTerm};
+use crate::integer::ops::carry_free_mask;
 use crate::integer::{IS_NON_NEG, Int, Integer, add, ceil_div, div, floor_divmod, gcd, int, mul};
 use crate::shape::{Shape, ShapeScalar, ValidShapeExtent};
 use crate::stride::Stride;
@@ -81,6 +84,27 @@ pub const fn recast_leaf_values(s: int, dd: int, num: int, den: int) -> (int, in
         return (ceil_div(s, n2), 1);
     }
     panic!("recast divisibility condition violated")
+}
+
+/// Computes `(new_shape, new_stride)` for one `F2` stride leaf under scale `num / den`.
+pub(crate) const fn recast_f2_leaf_values(s: int, dd: int, num: int, den: int) -> (int, int) {
+    assert!(num > 0 && den > 0, "recast scale must be positive");
+    let g = gcd(num, den);
+    let n = div(num, g);
+    let d = div(den, g);
+    let result = recast_leaf_values(s, dd, n, d);
+    // Binary scaling shifts the polynomial coefficients directly. Other
+    // ratios are exact when both address sequences are ordinary progressions.
+    let binary =
+        n.count_ones() == 1 && d.count_ones() == 1 && (dd % n == 0 || dd.count_ones() == 1);
+    assert!(
+        dd <= 1
+            || s <= 1
+            || binary
+            || (carry_free_mask(s, dd).is_some() && carry_free_mask(result.0, result.1).is_some()),
+        "F2 recast changes the element offsets"
+    );
+    result
 }
 
 /// Positive integer or rational scale accepted by [`recast`].
@@ -138,24 +162,62 @@ const impl<N: [const] Integer, D: [const] Integer> RecastScale for Fraction<N, D
     }
 }
 
-/// Extracts and rebuilds scalar stride coefficients (`int` or `Int<D>`) across static
-/// (`StaticOut<NEW_D>`) and dynamic (`DynamicOut`) recast paths.
+/// Constructs the static recast output stride leaf for concrete value `NEW_D`.
+#[doc(hidden)]
+pub const trait MakeStaticRecastStride<const NEW_D: int>: Leaf {
+    type Output: Leaf;
+    fn make_static_recast_stride() -> Self::Output;
+}
+
+const impl<const NEW_D: int> MakeStaticRecastStride<NEW_D> for int {
+    type Output = Int<NEW_D>;
+    fn make_static_recast_stride() -> Int<NEW_D> {
+        Int::<NEW_D>
+    }
+}
+
+const impl<const D: int, const NEW_D: int> MakeStaticRecastStride<NEW_D> for Int<D> {
+    type Output = Int<NEW_D>;
+    fn make_static_recast_stride() -> Int<NEW_D> {
+        Int::<NEW_D>
+    }
+}
+
+const impl<V, P, const NEW_D: int> MakeStaticRecastStride<NEW_D> for BasisTerm<V, P>
+where
+    V: [const] BasisCoeff + [const] MakeStaticRecastStride<NEW_D>,
+    <V as MakeStaticRecastStride<NEW_D>>::Output: [const] BasisCoeff,
+    P: [const] BasisPath,
+{
+    type Output = BasisTerm<<V as MakeStaticRecastStride<NEW_D>>::Output, P>;
+    fn make_static_recast_stride() -> Self::Output {
+        BasisTerm::new(V::make_static_recast_stride())
+    }
+}
+
+const impl<const NEW_D: int> MakeStaticRecastStride<NEW_D> for BasisCombination<Nil> {
+    type Output = BasisCombination<Nil>;
+    fn make_static_recast_stride() -> Self::Output {
+        BasisCombination::<Nil>::zero()
+    }
+}
+
+/// Extracts and rebuilds scalar stride coefficients (`int`, `Int<D>`, or `F2`) across static
+/// and dynamic (`DynamicOut`) recast paths.
 #[doc(hidden)]
 pub const trait RecastStrideScalar: [const] BasisCoeff + Leaf {
     const IS_STATIC_COEFF: bool;
     const STATIC_SIGNED: Option<int>;
-    type StaticOut<const NEW_D: int>: [const] BasisCoeff + Leaf;
+    const IS_F2_COEFF: bool = false;
     type DynamicOut: [const] BasisCoeff + Leaf;
 
     fn signed_coeff(&self) -> int;
     fn make_dynamic_out(new_d: int) -> Self::DynamicOut;
-    fn make_static_out<const NEW_D: int>() -> Self::StaticOut<NEW_D>;
 }
 
 const impl RecastStrideScalar for int {
     const IS_STATIC_COEFF: bool = false;
     const STATIC_SIGNED: Option<int> = None;
-    type StaticOut<const NEW_D: int> = Int<NEW_D>;
     type DynamicOut = int;
 
     fn signed_coeff(&self) -> int {
@@ -164,15 +226,11 @@ const impl RecastStrideScalar for int {
     fn make_dynamic_out(new_d: int) -> int {
         new_d
     }
-    fn make_static_out<const NEW_D: int>() -> Int<NEW_D> {
-        Int::<NEW_D>
-    }
 }
 
 const impl<const D: int> RecastStrideScalar for Int<D> {
     const IS_STATIC_COEFF: bool = true;
     const STATIC_SIGNED: Option<int> = Some(D);
-    type StaticOut<const NEW_D: int> = Int<NEW_D>;
     type DynamicOut = int;
 
     fn signed_coeff(&self) -> int {
@@ -181,30 +239,25 @@ const impl<const D: int> RecastStrideScalar for Int<D> {
     fn make_dynamic_out(new_d: int) -> int {
         new_d
     }
-    fn make_static_out<const NEW_D: int>() -> Int<NEW_D> {
-        Int::<NEW_D>
-    }
 }
 
 /// Abstracts over scalar, [`BasisTerm`], and empty `BasisCombination<Nil>` stride leaves in
-/// [`RecastPair`], providing signed coefficient extraction and static (`StaticOut<NEW_D>`) /
-/// dynamic (`DynamicOut`) reconstruction.
+/// [`RecastPair`], providing signed coefficient extraction and dynamic reconstruction.
 #[doc(hidden)]
 pub const trait RecastStrideLeaf: Leaf {
     const IS_STATIC_STRIDE: bool;
     const STATIC_SIGNED: Option<int>;
-    type StaticOut<const NEW_D: int>: Leaf;
+    const IS_F2_STRIDE: bool = false;
     type DynamicOut: Leaf;
 
     fn signed_coeff(&self) -> int;
     fn make_dynamic_out(new_d: int) -> Self::DynamicOut;
-    fn make_static_out<const NEW_D: int>() -> Self::StaticOut<NEW_D>;
 }
 
 const impl<V: [const] RecastStrideScalar> RecastStrideLeaf for V {
     const IS_STATIC_STRIDE: bool = V::IS_STATIC_COEFF;
     const STATIC_SIGNED: Option<int> = V::STATIC_SIGNED;
-    type StaticOut<const NEW_D: int> = V::StaticOut<NEW_D>;
+    const IS_F2_STRIDE: bool = V::IS_F2_COEFF;
     type DynamicOut = V::DynamicOut;
 
     fn signed_coeff(&self) -> int {
@@ -213,9 +266,6 @@ const impl<V: [const] RecastStrideScalar> RecastStrideLeaf for V {
     fn make_dynamic_out(new_d: int) -> Self::DynamicOut {
         V::make_dynamic_out(new_d)
     }
-    fn make_static_out<const NEW_D: int>() -> Self::StaticOut<NEW_D> {
-        V::make_static_out::<NEW_D>()
-    }
 }
 
 const impl<V: [const] RecastStrideScalar, P: [const] BasisPath> RecastStrideLeaf
@@ -223,7 +273,7 @@ const impl<V: [const] RecastStrideScalar, P: [const] BasisPath> RecastStrideLeaf
 {
     const IS_STATIC_STRIDE: bool = V::IS_STATIC_COEFF;
     const STATIC_SIGNED: Option<int> = V::STATIC_SIGNED;
-    type StaticOut<const NEW_D: int> = BasisTerm<V::StaticOut<NEW_D>, P>;
+    const IS_F2_STRIDE: bool = V::IS_F2_COEFF;
     type DynamicOut = BasisTerm<V::DynamicOut, P>;
 
     fn signed_coeff(&self) -> int {
@@ -232,15 +282,11 @@ const impl<V: [const] RecastStrideScalar, P: [const] BasisPath> RecastStrideLeaf
     fn make_dynamic_out(new_d: int) -> Self::DynamicOut {
         BasisTerm::new(V::make_dynamic_out(new_d))
     }
-    fn make_static_out<const NEW_D: int>() -> Self::StaticOut<NEW_D> {
-        BasisTerm::new(V::make_static_out::<NEW_D>())
-    }
 }
 
 const impl RecastStrideLeaf for BasisCombination<Nil> {
     const IS_STATIC_STRIDE: bool = true;
     const STATIC_SIGNED: Option<int> = Some(0);
-    type StaticOut<const NEW_D: int> = BasisCombination<Nil>;
     type DynamicOut = BasisCombination<Nil>;
 
     fn signed_coeff(&self) -> int {
@@ -249,15 +295,16 @@ const impl RecastStrideLeaf for BasisCombination<Nil> {
     fn make_dynamic_out(_: int) -> Self::DynamicOut {
         BasisCombination::<Nil>::zero()
     }
-    fn make_static_out<const NEW_D: int>() -> Self::StaticOut<NEW_D> {
-        BasisCombination::<Nil>::zero()
-    }
 }
 
 const STATIC_RECAST_LEAF<S: Integer, D: RecastStrideLeaf, Scale: RecastScale>: (int, int) = {
     let s = S::STATIC_VALUE.expect("recast static shape missing");
     let dd = D::STATIC_SIGNED.expect("recast static stride missing");
-    recast_leaf_values(s, dd, Scale::STATIC_NUM, Scale::STATIC_DEN)
+    if D::IS_F2_STRIDE {
+        recast_f2_leaf_values(s, dd, Scale::STATIC_NUM, Scale::STATIC_DEN)
+    } else {
+        recast_leaf_values(s, dd, Scale::STATIC_NUM, Scale::STATIC_DEN)
+    }
 };
 
 const STATIC_RECAST_S<S: Integer, D: RecastStrideLeaf, Scale: RecastScale>: int =
@@ -288,12 +335,13 @@ pub const trait RecastLeafDispatch<
 const impl<S, D, Scale> RecastLeafDispatch<D, Scale, true> for S
 where
     S: [const] ShapeScalar,
-    D: [const] RecastStrideLeaf,
+    D: [const] RecastStrideLeaf
+        + [const] MakeStaticRecastStride<{ STATIC_RECAST_D::<S, D, Scale> }>,
     Scale: [const] RecastScale,
     (): [const] ValidShapeExtent<{ IS_NON_NEG::<{ STATIC_RECAST_S::<S, D, Scale> }> }>,
 {
     type NewShape = Int<{ STATIC_RECAST_S::<S, D, Scale> }>;
-    type NewStride = D::StaticOut<{ STATIC_RECAST_D::<S, D, Scale> }>;
+    type NewStride = <D as MakeStaticRecastStride<{ STATIC_RECAST_D::<S, D, Scale> }>>::Output;
 
     fn recast_leaf(self, _: D, _: Scale) -> (Self::NewShape, Self::NewStride) {
         let _ = (
@@ -302,7 +350,7 @@ where
         );
         (
             Int,
-            D::make_static_out::<{ STATIC_RECAST_D::<S, D, Scale> }>(),
+            <D as MakeStaticRecastStride<{ STATIC_RECAST_D::<S, D, Scale> }>>::make_static_recast_stride(),
         )
     }
 }
@@ -319,7 +367,11 @@ where
     fn recast_leaf(self, d: D, scale: Scale) -> (Self::NewShape, Self::NewStride) {
         let (num, den) = scale.to_num_den();
         let dd = d.signed_coeff();
-        let (new_s, new_d) = recast_leaf_values(self.value(), dd, num, den);
+        let (new_s, new_d) = if D::IS_F2_STRIDE {
+            recast_f2_leaf_values(self.value(), dd, num, den)
+        } else {
+            recast_leaf_values(self.value(), dd, num, den)
+        };
         (new_s, D::make_dynamic_out(new_d))
     }
 }

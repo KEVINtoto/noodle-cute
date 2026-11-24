@@ -797,3 +797,65 @@ fn test_static_absorbing_and_checked_div_dispatch() {
     assert_eq!(GG, Int::<1>);
     assert_eq!(GL, Int::<0>);
 }
+
+#[test]
+fn test_bitwise_and_signed_shift_ops() {
+    // Static bitwise operations and operators
+    const AND_SS: Int<0b1000> = Int::<0b1010> & Int::<0b1100>;
+    const OR_SS: Int<0b1110> = Int::<0b1010> | Int::<0b1100>;
+    const XOR_SS: Int<0b0110> = Int::<0b1010> ^ Int::<0b1100>;
+    const SHL_POS: Int<0b100000> = shiftl(Int::<0b1000>, Int::<2>);
+    const SHL_NEG: Int<0b10> = shiftl(Int::<0b1000>, Int::<-2>);
+    const SHR_POS: Int<0b10> = shiftr(Int::<0b1000>, Int::<2>);
+    const SHR_NEG: Int<0b100000> = shiftr(Int::<0b1000>, Int::<-2>);
+    const SHL_NEG_ONE_31: Int<I32_MIN> = shiftl(Int::<-1>, Int::<31>);
+    const SHL_SAT_ZERO: Int<0> = shiftl(Int::<1>, Int::<I32_MIN>);
+    const SHR_SAT_NEG: Int<-1> = shiftr(Int::<-5>, Int::<100>);
+    const SHR_SAT_POS: Int<0> = shiftr(Int::<5>, Int::<100>);
+
+    assert_eq!(AND_SS, Int::<0b1000>);
+    assert_eq!(OR_SS, Int::<0b1110>);
+    assert_eq!(XOR_SS, Int::<0b0110>);
+    assert_eq!(SHL_POS, Int::<0b100000>);
+    assert_eq!(SHL_NEG, Int::<0b10>);
+    assert_eq!(SHR_POS, Int::<0b10>);
+    assert_eq!(SHR_NEG, Int::<0b100000>);
+    assert_eq!(SHL_NEG_ONE_31, Int::<I32_MIN>);
+    assert_eq!(SHL_SAT_ZERO, Int::<0>);
+    assert_eq!(SHR_SAT_NEG, Int::<-1>);
+    assert_eq!(SHR_SAT_POS, Int::<0>);
+
+    // Absorbing identities preserve static types with dynamic operands
+    let dyn_v = 0x1234_5678i32;
+    let z_and_l: Int<0> = Int::<0> & dyn_v;
+    let z_and_r: Int<0> = dyn_v & Int::<0>;
+    let m1_or_l: Int<-1> = Int::<-1> | dyn_v;
+    let m1_or_r: Int<-1> = dyn_v | Int::<-1>;
+    let z_shl: Int<0> = shiftl(Int::<0>, dyn_v);
+    let z_shr: Int<0> = shiftr(Int::<0>, dyn_v);
+    assert_eq!((z_and_l, z_and_r), (Int::<0>, Int::<0>));
+    assert_eq!((m1_or_l, m1_or_r), (Int::<-1>, Int::<-1>));
+    assert_eq!((z_shl, z_shr), (Int::<0>, Int::<0>));
+
+    // Mixed and dynamic bitwise / signed-shift evaluation
+    assert_eq!(bitand(0b1010i32, Int::<0b1100>), 0b1000);
+    assert_eq!(bitor(0b1010i32, Int::<0b1100>), 0b1110);
+    assert_eq!(bitxor(0b1010i32, Int::<0b1100>), 0b0110);
+    assert_eq!(0b1010i32 ^ Int::<0b1100>, 0b0110);
+    assert_eq!(shiftl(0b1000i32, 2i32), 0b100000);
+    assert_eq!(shiftl(0b1000i32, -2i32), 0b10);
+    assert_eq!(shiftr(0b1000i32, 2i32), 0b10);
+    assert_eq!(shiftr(0b1000i32, -2i32), 0b100000);
+    assert_eq!(shiftl(1i32, 30i32), 1 << 30);
+    assert_eq!(shiftl(-1i32, 31i32), I32_MIN);
+    assert_eq!(shiftr(-7i32, 1i32), -4);
+    assert_eq!(shiftl(1i32, I32_MIN), 0);
+
+    // Runtime left-shift overflows panic
+    assert!(catch_unwind(|| shiftl(1i32, 31i32)).is_err());
+    assert!(catch_unwind(|| shiftl(2i32, 30i32)).is_err());
+    assert!(catch_unwind(|| shiftl(-2i32, 31i32)).is_err());
+    assert!(catch_unwind(|| shiftl(1i32, 32i32)).is_err());
+    assert!(catch_unwind(|| shiftr(1i32, -31i32)).is_err());
+    assert!(catch_unwind(|| shiftr(1i32, I32_MIN)).is_err());
+}
