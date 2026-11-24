@@ -51,19 +51,144 @@
 //!   stride and static extents for compile-time divisibility checking.
 //! - Stride overflow follows [`crate::integer`] rules (compile-time error for static operands,
 //!   runtime panic for dynamic operands).
+//!
+//! Integer RHS modes entering binary-polynomial strides must combine without
+//! carrying, both within each coordinate and between modes on the same axis.
+//!
+//! ```compile_fail
+//! # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+//! # #![allow(incomplete_features)]
+//! use noodle_cute::{algebra::composition, integer::Int, layout::Layout, swizzle::f2};
+//! const BAD: Layout<Int<4>, noodle_cute::swizzle::StaticF2<3>> = composition(
+//!     Layout::new(Int::<16>, f2(Int::<1>)), Layout::new(Int::<4>, Int::<3>));
+//! ```
 
 use core::marker::ConstParamTy;
 
-use crate::basis::{ProjectByPath, SingleBasis};
+use crate::basis::ComparePath;
+use crate::basis::{BasisCoeff, ProjectByPath, SingleBasis};
+use crate::integer::ops::carry_free_mask;
+use crate::integer::uint;
 use crate::integer::{
     ArithFloorDiv, FloorQuotient, IS_NON_NEG, Int, Integer, div, floor_div, floor_rem, int, sub,
 };
 use crate::layout::{Coprofile, Layout, Tiler, tiler_to_layout};
 use crate::shape::{Shape, ShapeScalar, ValidShapeExtent};
+use crate::stride::{ContainsF2, same_path};
 use crate::stride::{Stride, StrideMul, StrideScalar};
+use crate::swizzle::F2;
 use crate::tuple::{Item, LeafProfile, Nil, Til, Tuple, Wrap};
 
 use super::coalesce::{Coalesce, CoalesceExtended, DropTrailingUnit};
+
+/// Tracks integer bit contributions before distributing composition across RHS modes.
+#[doc(hidden)]
+pub const trait CompositionMask<S: Copy>: Copy {
+    const STATIC_MASK: Option<uint>;
+    fn mask(self, shape: S) -> uint;
+}
+const impl<S: [const] ShapeScalar, I: [const] Integer> CompositionMask<S> for I {
+    const STATIC_MASK: Option<uint> = match (S::STATIC_VALUE, I::STATIC_VALUE) {
+        (Some(s), Some(d)) => Some(carry_free_mask(s, d).unwrap_or(uint::MAX)),
+        _ => None,
+    };
+    fn mask(self, s: S) -> uint {
+        carry_free_mask(s.value(), self.value()).expect("integer stride carries in F2 composition")
+    }
+}
+const impl<S: Copy, V: Copy> CompositionMask<S> for F2<V> {
+    const STATIC_MASK: Option<uint> = Some(0);
+    fn mask(self, _: S) -> uint {
+        0
+    }
+}
+/// Checks cross-mode carries on matching codomain paths in two RHS subtrees.
+#[doc(hidden)]
+pub const trait CrossModeCarry<S: Copy, R: Copy, T: Copy>: Copy {
+    const STATIC_OK: Option<bool>;
+    fn disjoint(self, s: S, rhs: R, t: T) -> bool;
+}
+const impl<L, R, S, T> CrossModeCarry<S, R, T> for L
+where
+    L: [const] StrideScalar,
+    R: [const] StrideScalar,
+    S: ShapeScalar,
+    T: ShapeScalar,
+    L::Path: ComparePath<R::Path>,
+    L::Value: [const] CompositionMask<S>,
+    R::Value: [const] CompositionMask<T>,
+{
+    const STATIC_OK: Option<bool> = if !same_path::<L::Path, R::Path>() {
+        Some(true)
+    } else {
+        match (L::Value::STATIC_MASK, R::Value::STATIC_MASK) {
+            (Some(l), Some(r)) => Some(l != uint::MAX && r != uint::MAX && l & r == 0),
+            _ => None,
+        }
+    };
+    fn disjoint(self, s: S, rhs: R, t: T) -> bool {
+        !same_path::<L::Path, R::Path>() || self.value().mask(s) & rhs.value().mask(t) == 0
+    }
+}
+const fn both(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,
+    }
+}
+const impl<L: StrideScalar, S: ShapeScalar> CrossModeCarry<S, Nil, Nil> for L {
+    const STATIC_OK: Option<bool> = Some(true);
+    fn disjoint(self, _: S, _: Nil, _: Nil) -> bool {
+        true
+    }
+}
+const impl<L, S, RH, RT, TH, TT> CrossModeCarry<S, Til<RH, RT>, Til<TH, TT>> for L
+where
+    L: StrideScalar + [const] CrossModeCarry<S, RH, TH> + [const] CrossModeCarry<S, RT, TT>,
+    S: ShapeScalar,
+    RH: Copy,
+    RT: Copy,
+    TH: Copy,
+    TT: Copy,
+{
+    const STATIC_OK: Option<bool> = both(
+        <L as CrossModeCarry<S, RH, TH>>::STATIC_OK,
+        <L as CrossModeCarry<S, RT, TT>>::STATIC_OK,
+    );
+    fn disjoint(self, s: S, r: Til<RH, RT>, t: Til<TH, TT>) -> bool {
+        self.disjoint(s, r.0, t.0) && self.disjoint(s, r.1, t.1)
+    }
+}
+const impl<R: Copy, T: Copy> CrossModeCarry<Nil, R, T> for Nil {
+    const STATIC_OK: Option<bool> = Some(true);
+    fn disjoint(self, _: Nil, _: R, _: T) -> bool {
+        true
+    }
+}
+const impl<LH, LT, SH, ST, R: Copy, T: Copy> CrossModeCarry<Til<SH, ST>, R, T> for Til<LH, LT>
+where
+    LH: [const] CrossModeCarry<SH, R, T>,
+    LT: [const] CrossModeCarry<ST, R, T>,
+    SH: Copy,
+    ST: Copy,
+{
+    const STATIC_OK: Option<bool> = both(LH::STATIC_OK, LT::STATIC_OK);
+    fn disjoint(self, s: Til<SH, ST>, r: R, t: T) -> bool {
+        self.0.disjoint(s.0, r, t) && self.1.disjoint(s.1, r, t)
+    }
+}
+const CHECK_OVERLAP<L:ContainsF2,H:CrossModeCarry<S,R,T>,S:Copy,R:Copy,T:Copy>:bool={
+    assert!(!L::HAS_F2 || !matches!(H::STATIC_OK,Some(false)), "integer modes carry in F2 composition");
+    L::HAS_F2 && H::STATIC_OK.is_none()
+};
+
+const NEEDS_MASK_CHECK<L: ContainsF2, D: CompositionMask<S>, S: Copy>: bool =
+    {
+        assert!(!L::HAS_F2 || !matches!(D::STATIC_MASK, Some(uint::MAX)),
+                "integer carries in F2 composition");
+        L::HAS_F2 && D::STATIC_MASK.is_none()
+    };
 
 /// Compile-time action when dividing out stride `M` from head mode `S0:D0`.
 #[doc(hidden)]
@@ -480,15 +605,18 @@ const impl<B: Copy> AtomCompose<B> for Layout<Nil, Nil> {
 const impl<SA, DA, SB, DB> AtomCompose<Layout<SB, DB>> for Layout<SA, DA>
 where
     SA: [const] ShapeScalar,
-    DA: StrideScalar + Stride<SA> + [const] StrideMul<DB>,
+    DA: ContainsF2 + StrideScalar + Stride<SA> + [const] StrideMul<DB>,
     SB: [const] ShapeScalar,
-    DB: Integer + Stride<SB>,
+    DB: [const] CompositionMask<SB> + BasisCoeff + Stride<SB>,
     <DA as StrideMul<DB>>::Output: Stride<SB>,
 {
     type Output = Layout<SB, <DA as StrideMul<DB>>::Output>;
     fn atom_compose(self, b: Layout<SB, DB>) -> Self::Output {
         let _ = self.shape.size();
         let _ = b.shape.size();
+        if NEEDS_MASK_CHECK::<DA, DB, SB> {
+            b.stride.mask(b.shape);
+        }
         Layout::new(b.shape, self.stride.stride_mul(b.stride))
     }
 }
@@ -755,7 +883,8 @@ const impl<SA, DA, BS0, BS1, BST, BD0, BD1, BDT, HeadOutS, HeadOutD, TailOutS, T
     Composition<Layout<Til<BS0, Til<BS1, BST>>, Til<BD0, Til<BD1, BDT>>>> for Layout<SA, DA>
 where
     SA: Shape,
-    DA: Stride<SA>,
+    DA: ContainsF2 + Stride<SA>,
+    BD0: [const] CrossModeCarry<BS0, Til<BD1, BDT>, Til<BS1, BST>>,
     BS0: Shape,
     BD0: Stride<BS0>,
     BS1: Shape,
@@ -778,6 +907,12 @@ where
         self,
         b: Layout<Til<BS0, Til<BS1, BST>>, Til<BD0, Til<BD1, BDT>>>,
     ) -> Self::Output {
+        if CHECK_OVERLAP::<DA, BD0, BS0, Til<BD1, BDT>, Til<BS1, BST>> {
+            assert!(
+                b.stride.0.disjoint(b.shape.0, b.stride.1, b.shape.1),
+                "integer modes carry in F2 composition"
+            );
+        }
         let head_res = self.composition(Layout::new(b.shape.0, b.stride.0));
         let tail_res = self.composition(Layout::new(b.shape.1, b.stride.1));
         Layout::new(
@@ -819,7 +954,7 @@ where
     DA: Stride<SA>,
     SB: [const] ShapeScalar,
     DB: [const] StrideScalar + [const] SingleBasis + Stride<SB>,
-    DB::Value: Integer + Stride<SB>,
+    DB::Value: BasisCoeff + Stride<SB>,
     Layout<SB, DB>: [const] Coprofile,
     Self: [const] CoalesceExtended<
             <<Layout<SB, DB> as Coprofile>::Output as Item>::Profile,

@@ -9,15 +9,18 @@
 //! - **Unary operations**: [`neg`] (also unary `-` for [`Int<N>`]), [`abs`], and traits
 //!   [`ArithNeg`], [`ArithAbs`].
 //! - **Binary functions**: [`add`], [`sub`], [`mul`], [`div`], [`rem`], [`ceil_div`],
-//!   [`floor_div`], [`floor_rem`], [`floor_divmod`], [`gcd`], [`lcm`], plus `const`
-//!   `core::ops` operator overloads (`+`, `-`, `*`, `/`, `%`) whenever at least one
-//!   operand is [`Int<N>`].
+//!   [`floor_div`], [`floor_rem`], [`floor_divmod`], [`gcd`], [`lcm`], [`bitand`],
+//!   [`bitor`], [`bitxor`], [`shiftl`], [`shiftr`], plus `const` `core::ops` operator
+//!   overloads (`+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`) whenever at least one operand is
+//!   [`Int<N>`].
 //! - **Result type aliases**: [`Sum`], [`Difference`], [`Product`], [`Quotient`],
 //!   [`Remainder`], [`CeilQuotient`], [`FloorQuotient`], [`FloorRemainder`], [`Gcd`],
-//!   [`Lcm`], [`ArithOpResult`], and operation tag [`ArithOp`].
+//!   [`Lcm`], [`BitAndResult`], [`BitOrResult`], [`BitXorResult`], [`ShiftLResult`],
+//!   [`ShiftRResult`], [`ArithOpResult`], and operation tag [`ArithOp`].
 //! - **Generic trait bounds**: [`ArithAdd`], [`ArithSub`], [`ArithMul`], [`ArithDiv`],
 //!   [`ArithRem`], [`ArithCeilDiv`], [`ArithFloorDiv`], [`ArithFloorRem`],
-//!   [`ArithFloorDivMod`], [`ArithGcd`], [`ArithLcm`].
+//!   [`ArithFloorDivMod`], [`ArithGcd`], [`ArithLcm`], [`ArithBitAnd`], [`ArithBitOr`],
+//!   [`ArithBitXor`], [`ArithShiftL`], [`ArithShiftR`].
 //!
 //! # Usage
 //!
@@ -190,6 +193,16 @@ pub enum ArithOp {
     Gcd,
     /// Non-negative least common multiple (`lcm(|a|, |b|)`).
     Lcm,
+    /// Bitwise AND (`&`).
+    BitAnd,
+    /// Bitwise OR (`|`).
+    BitOr,
+    /// Bitwise XOR (`^`).
+    BitXor,
+    /// Signed left shift (`a << s` for `s >= 0`, `a >> (-s)` for `s < 0`).
+    ShiftL,
+    /// Signed right shift (`a >> s` for `s >= 0`, `a << (-s)` for `s < 0`).
+    ShiftR,
 }
 
 /// Dispatch strategy selected from operand staticness and algebraic absorbing rules:
@@ -271,6 +284,132 @@ pub(crate) const fn divides_product(divisor: int, p: int, factor: int) -> bool {
     rem(factor, div(divisor, g)) == 0
 }
 
+/// Returns the bit length of a non-negative integer (`0 -> 0`, `1 -> 1`, `5 -> 3`).
+pub(crate) const fn bit_length_non_neg(a: int) -> int {
+    assert!(a >= 0, "bit_length requires a non-negative integer");
+    (uint::BITS - (a as uint).leading_zeros()) as int
+}
+
+const fn checked_shl_u(a: int, k: uint) -> Result<int> {
+    if a == 0 {
+        return Ok(0);
+    }
+    if k < uint::BITS {
+        let shifted = a.wrapping_shl(k);
+        if (shifted >> k) == a {
+            return Ok(shifted);
+        }
+    }
+    Err(NoodleCuteError::ArithmeticOverflow)
+}
+
+const fn checked_shr_u(a: int, k: uint) -> int {
+    if k >= uint::BITS - 1 {
+        if a < 0 { -1 } else { 0 }
+    } else {
+        a >> k
+    }
+}
+
+const fn checked_shiftl(a: int, s: int) -> Result<int> {
+    if s >= 0 {
+        checked_shl_u(a, s as uint)
+    } else {
+        Ok(checked_shr_u(a, s.unsigned_abs()))
+    }
+}
+
+const fn checked_shiftr(a: int, s: int) -> Result<int> {
+    if s >= 0 {
+        Ok(checked_shr_u(a, s as uint))
+    } else {
+        checked_shl_u(a, s.unsigned_abs())
+    }
+}
+
+/// Integer bit positions a mode can write without introducing carries.
+pub(crate) const fn carry_free_mask(extent: int, stride: int) -> Option<uint> {
+    if extent <= 1 || stride == 0 {
+        return Some(0);
+    }
+    if stride < 0 {
+        return None;
+    }
+    let mut mask = 0;
+    let mut bit = 1u32;
+    while bit < extent as uint {
+        let Some(contribution) = (stride as uint).checked_mul(bit) else {
+            return None;
+        };
+        if contribution > int::MAX as uint {
+            return None;
+        }
+        // Two coordinate bits may both be set only if their sum is in bounds.
+        let mut previous = 1;
+        while previous < bit && bit + previous < extent as uint {
+            if contribution & ((stride as uint) * previous) != 0 {
+                return None;
+            }
+            previous <<= 1;
+        }
+        mask |= contribution;
+        bit <<= 1;
+    }
+    Some(mask)
+}
+
+/// Carry-less (polynomial over GF(2)) multiplication for non-negative `int` operands.
+pub(crate) const fn checked_clmul(a: int, b: int) -> Result<int> {
+    assert!(
+        a >= 0 && b >= 0,
+        "carry-less multiplication requires non-negative operands"
+    );
+    if a == 0 || b == 0 {
+        return Ok(0);
+    }
+    let deg_a = bit_length_non_neg(a) - 1;
+    let deg_b = bit_length_non_neg(b) - 1;
+    if deg_a + deg_b >= (uint::BITS as int - 1) {
+        return Err(NoodleCuteError::ArithmeticOverflow);
+    }
+    let mut res: uint = 0;
+    let mut c: uint = a as uint;
+    let mut v: uint = b as uint;
+    while v != 0 {
+        if (v & 1) != 0 {
+            res ^= c;
+        }
+        v >>= 1;
+        if v != 0 {
+            c <<= 1;
+        }
+    }
+    uint_to_int(res)
+}
+
+/// Carry-less (polynomial over GF(2)) Euclidean division for non-negative `a` and positive `d`.
+pub(crate) const fn checked_cldivmod(a: int, d: int) -> Result<(int, int)> {
+    assert!(a >= 0, "carry-less division requires non-negative dividend");
+    if d == 0 {
+        return Err(NoodleCuteError::DivisionByZero);
+    }
+    assert!(d > 0, "carry-less division requires positive divisor");
+    let deg_d = bit_length_non_neg(d) - 1;
+    let ud = d as uint;
+    let mut q: uint = 0;
+    let mut r: uint = a as uint;
+    while r != 0 {
+        let deg_r = (uint::BITS - r.leading_zeros()) as int - 1;
+        if deg_r < deg_d {
+            break;
+        }
+        let shift = (deg_r - deg_d) as uint;
+        q ^= 1u32 << shift;
+        r ^= ud << shift;
+    }
+    Ok((q as int, r as int))
+}
+
 const fn checked_op(a: int, b: int, op: ArithOp) -> Result<int> {
     match op {
         ArithOp::Add => a.checked_add(b).ok_or(NoodleCuteError::ArithmeticOverflow),
@@ -301,6 +440,11 @@ const fn checked_op(a: int, b: int, op: ArithOp) -> Result<int> {
         },
         ArithOp::Gcd => checked_gcd(a, b),
         ArithOp::Lcm => checked_lcm(a, b),
+        ArithOp::BitAnd => Ok(a & b),
+        ArithOp::BitOr => Ok(a | b),
+        ArithOp::BitXor => Ok(a ^ b),
+        ArithOp::ShiftL => checked_shiftl(a, b),
+        ArithOp::ShiftR => checked_shiftr(a, b),
     }
 }
 
@@ -311,8 +455,10 @@ const fn arith_dispatch(a: Option<int>, b: Option<int>, op: ArithOp) -> ArithDis
         // Division/remainder by static 0 always fails at compile time.
         (None, Some(0), Div | Rem | CeilDiv | FloorDiv | FloorRem) => ArithDispatch::Static,
         // Unconditional absorbing identities.
-        (Some(0), None, Mul | Lcm)
-        | (None, Some(0), Mul | Lcm)
+        (Some(0), None, Mul | Lcm | BitAnd | ShiftL | ShiftR)
+        | (None, Some(0), Mul | Lcm | BitAnd)
+        | (Some(-1), None, BitOr)
+        | (None, Some(-1), BitOr)
         | (None, Some(1), Rem | FloorRem)
         | (Some(1 | -1), None, Gcd)
         | (None, Some(1 | -1), Gcd) => ArithDispatch::Static,
@@ -331,9 +477,10 @@ const fn static_op_result(a: Option<int>, b: Option<int>, op: ArithOp) -> int {
         (None, Some(0), Div | Rem | CeilDiv | FloorDiv | FloorRem) => {
             Result::<int>::Err(NoodleCuteError::DivisionByZero).v()
         }
-        (Some(0), None, Mul | Lcm)
-        | (None, Some(0), Mul | Lcm)
+        (Some(0), None, Mul | Lcm | BitAnd | ShiftL | ShiftR)
+        | (None, Some(0), Mul | Lcm | BitAnd)
         | (None, Some(1), Rem | FloorRem) => 0,
+        (Some(-1), None, BitOr) | (None, Some(-1), BitOr) => -1,
         (Some(1 | -1), None, Gcd) | (None, Some(1 | -1), Gcd) => 1,
         _ => unreachable!(),
     }
@@ -439,6 +586,26 @@ pub const trait ArithGcd<A: Integer, B: Integer> = [const] ArithmeticAlias<A, B,
 /// Trait alias for least common multiple of two CuTe integer types.
 pub const trait ArithLcm<A: Integer, B: Integer> = [const] ArithmeticAlias<A, B, { ArithOp::Lcm }>;
 
+/// Trait alias for bitwise AND of two CuTe integer types.
+pub const trait ArithBitAnd<A: Integer, B: Integer> =
+    [const] ArithmeticAlias<A, B, { ArithOp::BitAnd }>;
+
+/// Trait alias for bitwise OR of two CuTe integer types.
+pub const trait ArithBitOr<A: Integer, B: Integer> =
+    [const] ArithmeticAlias<A, B, { ArithOp::BitOr }>;
+
+/// Trait alias for bitwise XOR of two CuTe integer types.
+pub const trait ArithBitXor<A: Integer, B: Integer> =
+    [const] ArithmeticAlias<A, B, { ArithOp::BitXor }>;
+
+/// Trait alias for signed left shift of two CuTe integer types.
+pub const trait ArithShiftL<A: Integer, B: Integer> =
+    [const] ArithmeticAlias<A, B, { ArithOp::ShiftL }>;
+
+/// Trait alias for signed right shift of two CuTe integer types.
+pub const trait ArithShiftR<A: Integer, B: Integer> =
+    [const] ArithmeticAlias<A, B, { ArithOp::ShiftR }>;
+
 /// Output type selected by the operation and static/dynamic status of `A` and `B`.
 pub type ArithOpResult<A, B, const OP: ArithOp> =
     <A as Arithmetic<B, OP, { ARITH_DISPATCH::<A, B, OP> }>>::Output;
@@ -472,6 +639,21 @@ pub type Gcd<A, B> = ArithOpResult<A, B, { ArithOp::Gcd }>;
 
 /// Output type of `lcm(A, B)`.
 pub type Lcm<A, B> = ArithOpResult<A, B, { ArithOp::Lcm }>;
+
+/// Output type of `bitand(A, B)`.
+pub type BitAndResult<A, B> = ArithOpResult<A, B, { ArithOp::BitAnd }>;
+
+/// Output type of `bitor(A, B)`.
+pub type BitOrResult<A, B> = ArithOpResult<A, B, { ArithOp::BitOr }>;
+
+/// Output type of `bitxor(A, B)`.
+pub type BitXorResult<A, B> = ArithOpResult<A, B, { ArithOp::BitXor }>;
+
+/// Output type of `shiftl(A, S)`.
+pub type ShiftLResult<A, S> = ArithOpResult<A, S, { ArithOp::ShiftL }>;
+
+/// Output type of `shiftr(A, S)`.
+pub type ShiftRResult<A, S> = ArithOpResult<A, S, { ArithOp::ShiftR }>;
 
 /// Adds two CuTe integers.
 ///
@@ -844,6 +1026,97 @@ where
     apply_op::<A, B, { ArithOp::Lcm }>(a, b)
 }
 
+/// Computes the bitwise AND `a & b`, preserving static `Int<0>` when either operand is `Int<0>`.
+pub const fn bitand<A, B>(a: A, b: B) -> BitAndResult<A, B>
+where
+    A: [const] Integer + [const] ArithBitAnd<A, B>,
+    B: [const] Integer,
+{
+    apply_op::<A, B, { ArithOp::BitAnd }>(a, b)
+}
+
+/// Computes the bitwise OR `a | b`, preserving static `Int<-1>` when either operand is `Int<-1>`.
+pub const fn bitor<A, B>(a: A, b: B) -> BitOrResult<A, B>
+where
+    A: [const] Integer + [const] ArithBitOr<A, B>,
+    B: [const] Integer,
+{
+    apply_op::<A, B, { ArithOp::BitOr }>(a, b)
+}
+
+/// Computes the bitwise XOR `a ^ b`.
+pub const fn bitxor<A, B>(a: A, b: B) -> BitXorResult<A, B>
+where
+    A: [const] Integer + [const] ArithBitXor<A, B>,
+    B: [const] Integer,
+{
+    apply_op::<A, B, { ArithOp::BitXor }>(a, b)
+}
+
+/// Shifts `a` left by `s`, or right by `-s` when `s` is negative.
+///
+/// Left shifts that lose significant bits fail at compile time for static operands and panic
+/// at runtime for dynamic operands. Static `Int<0>` always shifts to `Int<0>`.
+///
+/// # Examples
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl, const_ops, const_cmp)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::integer::{Int, shiftl};
+///
+/// assert_eq!(shiftl(Int::<0b1000>, Int::<2>), Int::<0b100000>);
+/// assert_eq!(shiftl(Int::<0b1000>, Int::<-2>), Int::<0b10>);
+/// ```
+///
+/// Static left-shift overflow is rejected at compile time:
+///
+/// ```compile_fail,E0080
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl, const_ops, const_cmp)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::integer::{Int, shiftl};
+/// let _ = shiftl(Int::<1>, Int::<31>);
+/// ```
+pub const fn shiftl<A, S>(a: A, s: S) -> ShiftLResult<A, S>
+where
+    A: [const] Integer + [const] ArithShiftL<A, S>,
+    S: [const] Integer,
+{
+    apply_op::<A, S, { ArithOp::ShiftL }>(a, s)
+}
+
+/// Shifts `a` right by `s`, or left by `-s` when `s` is negative.
+///
+/// Left shifts (when `s < 0`) that lose significant bits fail at compile time for static
+/// operands and panic at runtime for dynamic operands. Static `Int<0>` always shifts to `Int<0>`.
+///
+/// # Examples
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl, const_ops, const_cmp)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::integer::{Int, shiftr};
+///
+/// assert_eq!(shiftr(Int::<0b1000>, Int::<2>), Int::<0b10>);
+/// assert_eq!(shiftr(Int::<0b1000>, Int::<-2>), Int::<0b100000>);
+/// ```
+///
+/// Static negative right-shift overflow is rejected at compile time:
+///
+/// ```compile_fail,E0080
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl, const_ops, const_cmp)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::integer::{Int, shiftr};
+/// let _ = shiftr(Int::<1>, Int::<-31>);
+/// ```
+pub const fn shiftr<A, S>(a: A, s: S) -> ShiftRResult<A, S>
+where
+    A: [const] Integer + [const] ArithShiftR<A, S>,
+    S: [const] Integer,
+{
+    apply_op::<A, S, { ArithOp::ShiftR }>(a, s)
+}
+
 macro_rules! impl_op {
     ($Trait:ident $method:ident $Op:ident; [$($g:tt)*] $lhs:ty, $rhs:ty) => {
         const impl<$($g)*> core::ops::$Trait<$rhs> for $lhs
@@ -864,4 +1137,52 @@ macro_rules! impl_ops {
         impl_op!($Trait $method $Op; [const N: int] int, Int<N>);
     )+};
 }
-impl_ops!(Add add Add, Sub sub Sub, Mul mul Mul, Div div Div, Rem rem Rem);
+impl_ops!(
+    Add add Add,
+    Sub sub Sub,
+    Mul mul Mul,
+    Div div Div,
+    Rem rem Rem,
+    BitAnd bitand BitAnd,
+    BitOr bitor BitOr,
+    BitXor bitxor BitXor
+);
+
+/// Row-echelon basis for binary-polynomial offsets paired with their domain preimages.
+#[doc(hidden)]
+pub struct BinaryPreimages {
+    offsets: [int; 31],
+    indices: [int; 31],
+}
+impl BinaryPreimages {
+    pub(crate) const fn new() -> Self {
+        Self {
+            offsets: [0; 31],
+            indices: [0; 31],
+        }
+    }
+    pub(crate) const fn insert(&mut self, mut y: int, mut x: int) {
+        while y != 0 {
+            let k = (int::BITS - 1 - y.leading_zeros()) as usize;
+            if self.offsets[k] == 0 {
+                self.offsets[k] = y;
+                self.indices[k] = x;
+                return;
+            }
+            y ^= self.offsets[k];
+            x ^= self.indices[k];
+        }
+    }
+    pub(crate) const fn solve(&self, mut y: int) -> Option<int> {
+        let mut x = 0;
+        while y != 0 {
+            let k = (int::BITS - 1 - y.leading_zeros()) as usize;
+            if self.offsets[k] == 0 {
+                return None;
+            }
+            y ^= self.offsets[k];
+            x ^= self.indices[k];
+        }
+        Some(x)
+    }
+}

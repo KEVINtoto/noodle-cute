@@ -13,9 +13,10 @@
 //!   value access, compile-time inspection (`STATIC_VALUE`, `IS_STATIC`, `VALUE`),
 //!   and `const` comparisons.
 //! - **Submodules**:
-//!   - [`mod@ops`]: Binary arithmetic (`+`, `-`, `*`, `/`, `%`), `ceil_div`, unary negation
-//!     (`neg`, `-`), `abs`, `floor_divmod` / `floor_div` / `floor_rem`,
-//!     and number-theoretic helpers (`gcd`, `lcm`).
+//!   - [`mod@ops`]: Binary arithmetic (`+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`),
+//!     `ceil_div`, unary negation (`neg`, `-`), `abs`, `floor_divmod` / `floor_div` /
+//!     `floor_rem`, signed shifts (`shiftl`, `shiftr`), and number-theoretic helpers
+//!     (`gcd`, `lcm`).
 //!   - [`mod@cmp`]: `const` comparisons, three-valued static predicates, and `min` / `max`.
 //!
 //! # Arithmetic & Comparison Rules

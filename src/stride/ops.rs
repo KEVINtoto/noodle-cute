@@ -97,7 +97,7 @@ const impl<V, P, S> StrideMul<S> for ScaledBasis<V, P>
 where
     V: BasisCoeff,
     P: BasisPath,
-    S: Integer,
+    S: [const] BasisCoeff,
     Self: [const] Mul<S>,
     <Self as Mul<S>>::Output: Copy,
 {
@@ -107,7 +107,7 @@ where
     }
 }
 
-const impl<T: BasisTuple, S: Integer> StrideMul<S> for BasisCombination<T>
+const impl<T: BasisTuple, S: [const] BasisCoeff> StrideMul<S> for BasisCombination<T>
 where
     Self: [const] Mul<S>,
     <Self as Mul<S>>::Output: Copy,
@@ -465,7 +465,7 @@ where
     V: BasisCoeff,
     P: BasisPath,
     ScaledBasis<V, P>: [const] Leaf,
-    Factor: [const] Integer,
+    Factor: [const] BasisCoeff,
     ScaledBasis<V, P>: [const] StrideMul<Factor>,
     <ScaledBasis<V, P> as StrideMul<Factor>>::Output: [const] Item,
 {
@@ -479,7 +479,7 @@ const impl<T, Factor> TransformLeafFunctor<BasisCombination<T>> for ScaleBasisFu
 where
     T: BasisTuple,
     BasisCombination<T>: [const] Leaf,
-    Factor: [const] Integer,
+    Factor: [const] BasisCoeff,
     BasisCombination<T>: [const] StrideMul<Factor>,
     <BasisCombination<T> as StrideMul<Factor>>::Output: [const] Item,
 {

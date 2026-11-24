@@ -36,12 +36,12 @@
 use core::iter::FusedIterator;
 
 use crate::basis::{
-    BasisCoeff, BasisCombination, BasisPath, BasisTerm, BasisTuple, COEFF_IS_STATIC_ZERO, EQ_MODE,
-    EmitBasisTerm, Mode, ModeEnd, SplitModePrefix,
+    BasisCoeff, BasisCoeffAdd, BasisCoeffMul, BasisCombination, BasisPath, BasisTerm, BasisTuple,
+    COEFF_IS_STATIC_ZERO, EQ_MODE, EmitBasisTerm, Mode, ModeEnd, SplitModePrefix,
 };
 use crate::integer::{
-    ArithAdd, ArithFloorDivMod, ArithMul, FloorQuotient, FloorRemainder, INCREASE, Int, Integer,
-    Product, Sum, add, floor_divmod, ge, int, lt, mul,
+    ArithFloorDivMod, FloorQuotient, FloorRemainder, INCREASE, Int, Integer, floor_divmod, ge, int,
+    lt,
 };
 use crate::tuple::{FlatTuple, Item, Leaf, Nil, Til, Tuple, TupleProduct};
 
@@ -67,8 +67,8 @@ use super::{Shape, ShapeScalar};
 /// assert_eq!(crd.coord_to_index(&s), 7);
 /// ```
 pub const trait CoordToIndex<S: Shape>: Copy {
-    /// Linear index integer type.
-    type Output: [const] Integer;
+    /// Linear index scalar type (an [`Integer`] or algebraic [`BasisCoeff`] such as `F2`).
+    type Output: [const] BasisCoeff;
     /// Converts `self` into a 1D linear index within `shape`.
     fn coord_to_index(self, shape: &S) -> Self::Output;
 }
@@ -135,20 +135,19 @@ where
     SH: [const] Shape + [const] TupleProduct,
     STH: Shape,
     STT: Tuple + Shape,
-    <Til<TH, TT> as CoordToIndex<Til<STH, STT>>>::Output:
-        [const] ArithMul<<Til<TH, TT> as CoordToIndex<Til<STH, STT>>>::Output, SH::Output>,
-    H::Output: [const] ArithAdd<
-            H::Output,
-            Product<<Til<TH, TT> as CoordToIndex<Til<STH, STT>>>::Output, SH::Output>,
-        >,
+    <Til<TH, TT> as CoordToIndex<Til<STH, STT>>>::Output: [const] BasisCoeffMul<SH::Output>,
+    H::Output: [const] BasisCoeffAdd<
+        <<Til<TH, TT> as CoordToIndex<Til<STH, STT>>>::Output as BasisCoeffMul<SH::Output>>::Output,
+    >,
 {
-    type Output =
-        Sum<H::Output, Product<<Til<TH, TT> as CoordToIndex<Til<STH, STT>>>::Output, SH::Output>>;
+    type Output = <H::Output as BasisCoeffAdd<
+        <<Til<TH, TT> as CoordToIndex<Til<STH, STT>>>::Output as BasisCoeffMul<SH::Output>>::Output,
+    >>::Output;
     fn coord_to_index(self, shape: &Til<SH, Til<STH, STT>>) -> Self::Output {
         let head = self.0.coord_to_index(&shape.0);
         let tail = self.1.coord_to_index(&shape.1);
         let stride = shape.0.tuple_product();
-        add(head, mul(tail, stride))
+        head.coeff_add(tail.coeff_mul(stride))
     }
 }
 

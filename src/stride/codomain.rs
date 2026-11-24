@@ -29,14 +29,14 @@
 
 use crate::basis::{
     BasisCoeff, BasisCombination, BasisPath, BasisTerm, BasisTuple, COEFF_IS_STATIC_ZERO,
-    CombAsTuple, EQ_MODE, EmitBasisTerm, IntoBasisCombination, MergeAdd, Mode, ModeEnd,
-    SplitModePrefix,
+    CanonicalBasis, CombAsTuple, ComparePath, EQ_MODE, EmitBasisTerm, IntoBasisCombination,
+    MergeAdd, Mode, ModeEnd, PATH_ORDER, PathOrdering, SplitModePrefix,
 };
-use crate::integer::{INCREASE, IS_NON_NEG, Int, Integer, add, int, sub};
+use crate::integer::{ArithAdd, INCREASE, IS_NON_NEG, Int, Integer, Sum, add, int, sub};
 use crate::shape::{Shape, ValidShapeExtent};
 use crate::tuple::{Item, Leaf, Nil, Til, Tuple};
 
-use super::{InnerProduct, Stride};
+use super::{Stride, StrideMul};
 
 /// Tracks the hierarchical profile of a stride's codomain (output coordinate structure).
 ///
@@ -105,9 +105,10 @@ const ADD_ONE_OFFSET<const N: int>: int = {
     add(N, 1)
 };
 
-/// Maps a non-negative offset leaf scalar to its coshape extent (`offset + 1`).
+/// Maps a non-negative offset leaf scalar to its coshape extent
+/// (`offset + 1` for integers, `1 << bit_length(offset)` for `F2`).
 #[doc(hidden)]
-pub const trait OffsetExtent: [const] Integer {
+pub const trait OffsetExtent: Copy {
     type Output: [const] Shape;
     fn offset_extent(self) -> Self::Output;
 }
@@ -551,6 +552,483 @@ where
     }
 }
 
+/// Combines two scalar mode-maximum contributions for codomain bounding:
+/// ordinary addition for monotone [`Integer`] codomains, or bitwise OR for non-monotone `F2`
+/// codomains so bits never cancel.
+#[doc(hidden)]
+pub const trait CoshapeCoeffAccum<R>: BasisCoeff {
+    type Output: [const] BasisCoeff;
+    fn coshape_coeff_accum(self, rhs: R) -> Self::Output;
+}
+
+const impl<L, R> CoshapeCoeffAccum<R> for L
+where
+    L: [const] Integer + [const] ArithAdd<L, R>,
+    R: [const] Integer,
+    Sum<L, R>: [const] BasisCoeff,
+{
+    type Output = Sum<L, R>;
+    fn coshape_coeff_accum(self, rhs: R) -> Self::Output {
+        add(self, rhs)
+    }
+}
+
+/// Merge-combines two path-sorted `BasisTuple` chains using [`CoshapeCoeffAccum`].
+#[doc(hidden)]
+pub const trait MergeCoshapeAdd<
+    R: [const] BasisTuple,
+    const ORDER: PathOrdering = { PathOrdering::Dispatch },
+>: [const] BasisTuple
+{
+    type Output: [const] BasisTuple;
+    fn merge_coshape_add(self, rhs: R) -> Self::Output;
+}
+
+const impl MergeCoshapeAdd<Nil> for Nil {
+    type Output = Nil;
+    fn merge_coshape_add(self, _: Nil) -> Nil {
+        Nil
+    }
+}
+
+const impl<V, P, T> MergeCoshapeAdd<Nil> for Til<BasisTerm<V, P>, T>
+where
+    V: [const] BasisCoeff,
+    P: [const] BasisPath,
+    T: [const] MergeCoshapeAdd<Nil>,
+    <T as MergeCoshapeAdd<Nil>>::Output: [const] EmitBasisTerm<V, P, { COEFF_IS_STATIC_ZERO::<V> }>,
+{
+    type Output = <<T as MergeCoshapeAdd<Nil>>::Output as EmitBasisTerm<
+        V,
+        P,
+        { COEFF_IS_STATIC_ZERO::<V> },
+    >>::Output;
+    fn merge_coshape_add(self, _: Nil) -> Self::Output {
+        self.1.merge_coshape_add(Nil).emit(self.0.value)
+    }
+}
+
+const impl<V, P, T> MergeCoshapeAdd<Til<BasisTerm<V, P>, T>> for Nil
+where
+    V: [const] BasisCoeff,
+    P: [const] BasisPath,
+    T: [const] BasisTuple,
+    Nil: [const] MergeCoshapeAdd<T>,
+    <Nil as MergeCoshapeAdd<T>>::Output: [const] EmitBasisTerm<V, P, { COEFF_IS_STATIC_ZERO::<V> }>,
+{
+    type Output = <<Nil as MergeCoshapeAdd<T>>::Output as EmitBasisTerm<
+        V,
+        P,
+        { COEFF_IS_STATIC_ZERO::<V> },
+    >>::Output;
+    fn merge_coshape_add(self, rhs: Til<BasisTerm<V, P>, T>) -> Self::Output {
+        Nil.merge_coshape_add(rhs.1).emit(rhs.0.value)
+    }
+}
+
+const impl<VL, PL, TL, VR, PR, TR> MergeCoshapeAdd<Til<BasisTerm<VR, PR>, TR>>
+    for Til<BasisTerm<VL, PL>, TL>
+where
+    VL: [const] BasisCoeff,
+    PL: ComparePath<PR>,
+    TL: [const] BasisTuple,
+    VR: [const] BasisCoeff,
+    PR: [const] BasisPath,
+    TR: [const] BasisTuple,
+    Self: [const] MergeCoshapeAdd<Til<BasisTerm<VR, PR>, TR>, { PATH_ORDER::<PL, PR> }>,
+{
+    type Output =
+        <Self as MergeCoshapeAdd<Til<BasisTerm<VR, PR>, TR>, { PATH_ORDER::<PL, PR> }>>::Output;
+    fn merge_coshape_add(self, rhs: Til<BasisTerm<VR, PR>, TR>) -> Self::Output {
+        <Self as MergeCoshapeAdd<Til<BasisTerm<VR, PR>, TR>, { PATH_ORDER::<PL, PR> }>>::merge_coshape_add(
+            self, rhs,
+        )
+    }
+}
+
+const impl<VL, PL, TL, VR, PR, TR>
+    MergeCoshapeAdd<Til<BasisTerm<VR, PR>, TR>, { PathOrdering::Equal }>
+    for Til<BasisTerm<VL, PL>, TL>
+where
+    VL: [const] BasisCoeff + [const] CoshapeCoeffAccum<VR>,
+    PL: [const] BasisPath,
+    TL: [const] BasisTuple + [const] MergeCoshapeAdd<TR>,
+    VR: [const] BasisCoeff,
+    PR: [const] BasisPath,
+    TR: [const] BasisTuple,
+    <TL as MergeCoshapeAdd<TR>>::Output:
+        [const] EmitBasisTerm<VL::Output, PL, { COEFF_IS_STATIC_ZERO::<VL::Output> }>,
+{
+    type Output = <<TL as MergeCoshapeAdd<TR>>::Output as EmitBasisTerm<
+        VL::Output,
+        PL,
+        { COEFF_IS_STATIC_ZERO::<VL::Output> },
+    >>::Output;
+    fn merge_coshape_add(self, rhs: Til<BasisTerm<VR, PR>, TR>) -> Self::Output {
+        self.1
+            .merge_coshape_add(rhs.1)
+            .emit(self.0.value.coshape_coeff_accum(rhs.0.value))
+    }
+}
+
+const impl<VL, PL, TL, VR, PR, TR>
+    MergeCoshapeAdd<Til<BasisTerm<VR, PR>, TR>, { PathOrdering::Less }>
+    for Til<BasisTerm<VL, PL>, TL>
+where
+    VL: [const] BasisCoeff,
+    PL: [const] BasisPath,
+    TL: [const] BasisTuple + [const] MergeCoshapeAdd<Til<BasisTerm<VR, PR>, TR>>,
+    VR: [const] BasisCoeff,
+    PR: [const] BasisPath,
+    TR: [const] BasisTuple,
+    <TL as MergeCoshapeAdd<Til<BasisTerm<VR, PR>, TR>>>::Output:
+        [const] EmitBasisTerm<VL, PL, { COEFF_IS_STATIC_ZERO::<VL> }>,
+{
+    type Output = <<TL as MergeCoshapeAdd<Til<BasisTerm<VR, PR>, TR>>>::Output as EmitBasisTerm<
+        VL,
+        PL,
+        { COEFF_IS_STATIC_ZERO::<VL> },
+    >>::Output;
+    fn merge_coshape_add(self, rhs: Til<BasisTerm<VR, PR>, TR>) -> Self::Output {
+        self.1.merge_coshape_add(rhs).emit(self.0.value)
+    }
+}
+
+const impl<VL, PL, TL, VR, PR, TR>
+    MergeCoshapeAdd<Til<BasisTerm<VR, PR>, TR>, { PathOrdering::Greater }>
+    for Til<BasisTerm<VL, PL>, TL>
+where
+    VL: [const] BasisCoeff,
+    PL: [const] BasisPath,
+    TL: [const] BasisTuple,
+    VR: [const] BasisCoeff,
+    PR: [const] BasisPath,
+    TR: [const] BasisTuple,
+    Self: [const] MergeCoshapeAdd<TR>,
+    <Self as MergeCoshapeAdd<TR>>::Output:
+        [const] EmitBasisTerm<VR, PR, { COEFF_IS_STATIC_ZERO::<VR> }>,
+{
+    type Output = <<Self as MergeCoshapeAdd<TR>>::Output as EmitBasisTerm<
+        VR,
+        PR,
+        { COEFF_IS_STATIC_ZERO::<VR> },
+    >>::Output;
+    fn merge_coshape_add(self, rhs: Til<BasisTerm<VR, PR>, TR>) -> Self::Output {
+        self.merge_coshape_add(rhs.1).emit(rhs.0.value)
+    }
+}
+
+/// Combines two basis contributions for codomain bounding via [`MergeCoshapeAdd`].
+#[doc(hidden)]
+pub const trait CoshapeBasisAdd<R>: [const] IntoBasisCombination {
+    type Output: Copy;
+    fn coshape_basis_add(self, rhs: R) -> Self::Output;
+}
+
+const impl<L, R> CoshapeBasisAdd<R> for L
+where
+    L: [const] IntoBasisCombination,
+    R: [const] IntoBasisCombination,
+    L::Terms: [const] MergeCoshapeAdd<R::Terms>,
+    <L::Terms as MergeCoshapeAdd<R::Terms>>::Output: [const] CanonicalBasis,
+{
+    type Output = <<L::Terms as MergeCoshapeAdd<R::Terms>>::Output as CanonicalBasis>::Output;
+    fn coshape_basis_add(self, rhs: R) -> Self::Output {
+        self.into_basis_terms()
+            .merge_coshape_add(rhs.into_basis_terms())
+            .canonical_basis()
+    }
+}
+
+/// Dispatches `Integer` accumulated with `BasisCombination<Nil>` during `coshape`.
+#[doc(hidden)]
+pub const trait CoshapeScalarEmptyComb<const IS_ZERO: bool>: Integer {
+    type Output: Copy;
+    fn coshape_scalar_empty_comb(self, rhs: BasisCombination<Nil>) -> Self::Output;
+}
+
+const impl<A: Integer> CoshapeScalarEmptyComb<true> for A {
+    type Output = BasisCombination<Nil>;
+    fn coshape_scalar_empty_comb(self, rhs: BasisCombination<Nil>) -> Self::Output {
+        rhs
+    }
+}
+
+const impl<A: Integer> CoshapeScalarEmptyComb<false> for A {
+    type Output = A;
+    fn coshape_scalar_empty_comb(self, _: BasisCombination<Nil>) -> Self::Output {
+        self
+    }
+}
+
+/// Dispatches `BasisCombination<Nil>` accumulated with scalar `B` during `coshape`.
+#[doc(hidden)]
+pub const trait CoshapeEmptyCombScalar<B: Integer, const IS_ZERO: bool>: Copy {
+    type Output: Copy;
+    fn coshape_empty_comb_scalar(self, rhs: B) -> Self::Output;
+}
+
+const impl<B: Integer> CoshapeEmptyCombScalar<B, true> for BasisCombination<Nil> {
+    type Output = BasisCombination<Nil>;
+    fn coshape_empty_comb_scalar(self, _: B) -> Self::Output {
+        self
+    }
+}
+
+const impl<B: Integer> CoshapeEmptyCombScalar<B, false> for BasisCombination<Nil> {
+    type Output = B;
+    fn coshape_empty_comb_scalar(self, rhs: B) -> Self::Output {
+        rhs
+    }
+}
+
+/// Accumulates maximal mode contributions `(s_i - 1) * d_i` across leaves for [`Coshape`].
+#[doc(hidden)]
+pub const trait CoshapeAccumulate<R>: Copy {
+    type Output: Copy;
+    fn coshape_accumulate(self, rhs: R) -> Self::Output;
+}
+
+const impl CoshapeAccumulate<Nil> for Nil {
+    type Output = Nil;
+    fn coshape_accumulate(self, _: Nil) -> Nil {
+        Nil
+    }
+}
+
+const impl<B: Integer> CoshapeAccumulate<B> for Nil {
+    type Output = B;
+    fn coshape_accumulate(self, rhs: B) -> B {
+        rhs
+    }
+}
+
+const impl<V: BasisCoeff, P: Copy> CoshapeAccumulate<BasisTerm<V, P>> for Nil {
+    type Output = BasisTerm<V, P>;
+    fn coshape_accumulate(self, rhs: BasisTerm<V, P>) -> Self::Output {
+        rhs
+    }
+}
+
+const impl<T: BasisTuple> CoshapeAccumulate<BasisCombination<T>> for Nil {
+    type Output = BasisCombination<T>;
+    fn coshape_accumulate(self, rhs: BasisCombination<T>) -> Self::Output {
+        rhs
+    }
+}
+
+const impl<A: Integer> CoshapeAccumulate<Nil> for A {
+    type Output = A;
+    fn coshape_accumulate(self, _: Nil) -> A {
+        self
+    }
+}
+
+const impl<A, B> CoshapeAccumulate<B> for A
+where
+    A: [const] Integer + [const] ArithAdd<A, B>,
+    B: [const] Integer,
+{
+    type Output = Sum<A, B>;
+    fn coshape_accumulate(self, rhs: B) -> Self::Output {
+        add(self, rhs)
+    }
+}
+
+const impl<V: BasisCoeff, P: Copy> CoshapeAccumulate<BasisTerm<V, P>> for Int<0> {
+    type Output = BasisTerm<V, P>;
+    fn coshape_accumulate(self, rhs: BasisTerm<V, P>) -> Self::Output {
+        rhs
+    }
+}
+
+const impl<A> CoshapeAccumulate<BasisCombination<Nil>> for A
+where
+    A: [const] Integer
+        + [const] BasisCoeff
+        + [const] CoshapeScalarEmptyComb<{ COEFF_IS_STATIC_ZERO::<A> }>,
+{
+    type Output = <A as CoshapeScalarEmptyComb<{ COEFF_IS_STATIC_ZERO::<A> }>>::Output;
+    fn coshape_accumulate(self, rhs: BasisCombination<Nil>) -> Self::Output {
+        self.coshape_scalar_empty_comb(rhs)
+    }
+}
+
+const impl<H, T> CoshapeAccumulate<BasisCombination<Til<H, T>>> for Int<0>
+where
+    H: Copy,
+    T: BasisTuple,
+    Til<H, T>: BasisTuple,
+{
+    type Output = BasisCombination<Til<H, T>>;
+    fn coshape_accumulate(self, rhs: BasisCombination<Til<H, T>>) -> Self::Output {
+        rhs
+    }
+}
+
+const impl<V: BasisCoeff, P: Copy> CoshapeAccumulate<Nil> for BasisTerm<V, P> {
+    type Output = Self;
+    fn coshape_accumulate(self, _: Nil) -> Self::Output {
+        self
+    }
+}
+
+const impl<V: BasisCoeff, P: Copy> CoshapeAccumulate<Int<0>> for BasisTerm<V, P> {
+    type Output = Self;
+    fn coshape_accumulate(self, _: Int<0>) -> Self::Output {
+        self
+    }
+}
+
+const impl<VL, PL, VR, PR> CoshapeAccumulate<BasisTerm<VR, PR>> for BasisTerm<VL, PL>
+where
+    VL: BasisCoeff,
+    PL: Copy,
+    Self: [const] CoshapeBasisAdd<BasisTerm<VR, PR>>,
+{
+    type Output = <Self as CoshapeBasisAdd<BasisTerm<VR, PR>>>::Output;
+    fn coshape_accumulate(self, rhs: BasisTerm<VR, PR>) -> Self::Output {
+        self.coshape_basis_add(rhs)
+    }
+}
+
+const impl<VL, PL, T> CoshapeAccumulate<BasisCombination<T>> for BasisTerm<VL, PL>
+where
+    VL: BasisCoeff,
+    PL: Copy,
+    T: BasisTuple,
+    Self: [const] CoshapeBasisAdd<BasisCombination<T>>,
+{
+    type Output = <Self as CoshapeBasisAdd<BasisCombination<T>>>::Output;
+    fn coshape_accumulate(self, rhs: BasisCombination<T>) -> Self::Output {
+        self.coshape_basis_add(rhs)
+    }
+}
+
+const impl CoshapeAccumulate<Nil> for BasisCombination<Nil> {
+    type Output = Self;
+    fn coshape_accumulate(self, _: Nil) -> Self::Output {
+        self
+    }
+}
+
+const impl<B> CoshapeAccumulate<B> for BasisCombination<Nil>
+where
+    B: [const] Integer + [const] BasisCoeff,
+    Self: [const] CoshapeEmptyCombScalar<B, { COEFF_IS_STATIC_ZERO::<B> }>,
+{
+    type Output = <Self as CoshapeEmptyCombScalar<B, { COEFF_IS_STATIC_ZERO::<B> }>>::Output;
+    fn coshape_accumulate(self, rhs: B) -> Self::Output {
+        self.coshape_empty_comb_scalar(rhs)
+    }
+}
+
+const impl<V: BasisCoeff, P: Copy> CoshapeAccumulate<BasisTerm<V, P>> for BasisCombination<Nil> {
+    type Output = BasisTerm<V, P>;
+    fn coshape_accumulate(self, rhs: BasisTerm<V, P>) -> Self::Output {
+        rhs
+    }
+}
+
+const impl<TR: BasisTuple> CoshapeAccumulate<BasisCombination<TR>> for BasisCombination<Nil> {
+    type Output = BasisCombination<TR>;
+    fn coshape_accumulate(self, rhs: BasisCombination<TR>) -> Self::Output {
+        rhs
+    }
+}
+
+const impl<H, TL> CoshapeAccumulate<Nil> for BasisCombination<Til<H, TL>>
+where
+    H: Copy,
+    TL: BasisTuple,
+    Til<H, TL>: BasisTuple,
+{
+    type Output = Self;
+    fn coshape_accumulate(self, _: Nil) -> Self::Output {
+        self
+    }
+}
+
+const impl<H, TL> CoshapeAccumulate<Int<0>> for BasisCombination<Til<H, TL>>
+where
+    H: Copy,
+    TL: BasisTuple,
+    Til<H, TL>: BasisTuple,
+{
+    type Output = Self;
+    fn coshape_accumulate(self, _: Int<0>) -> Self::Output {
+        self
+    }
+}
+
+const impl<H, TL, VR, PR> CoshapeAccumulate<BasisTerm<VR, PR>> for BasisCombination<Til<H, TL>>
+where
+    H: Copy,
+    TL: BasisTuple,
+    Til<H, TL>: BasisTuple,
+    Self: [const] CoshapeBasisAdd<BasisTerm<VR, PR>>,
+{
+    type Output = <Self as CoshapeBasisAdd<BasisTerm<VR, PR>>>::Output;
+    fn coshape_accumulate(self, rhs: BasisTerm<VR, PR>) -> Self::Output {
+        self.coshape_basis_add(rhs)
+    }
+}
+
+const impl<H, TL, TR> CoshapeAccumulate<BasisCombination<TR>> for BasisCombination<Til<H, TL>>
+where
+    H: Copy,
+    TL: BasisTuple,
+    Til<H, TL>: BasisTuple,
+    TR: BasisTuple,
+    Self: [const] CoshapeBasisAdd<BasisCombination<TR>>,
+{
+    type Output = <Self as CoshapeBasisAdd<BasisCombination<TR>>>::Output;
+    fn coshape_accumulate(self, rhs: BasisCombination<TR>) -> Self::Output {
+        self.coshape_basis_add(rhs)
+    }
+}
+
+/// Folds maximal mode contributions `(s_i - 1) * d_i` via [`CoshapeAccumulate`].
+#[doc(hidden)]
+pub const trait CoshapeInnerProduct<D, Acc = Int<0>>: Copy {
+    type Output: Copy;
+    fn coshape_inner_product(self, stride: D, acc: Acc) -> Self::Output;
+}
+
+const impl<Acc: Copy> CoshapeInnerProduct<Nil, Acc> for Nil {
+    type Output = Acc;
+    fn coshape_inner_product(self, _: Nil, acc: Acc) -> Self::Output {
+        acc
+    }
+}
+
+const impl<S, D, Acc> CoshapeInnerProduct<D, Acc> for S
+where
+    S: [const] Integer,
+    D: [const] StrideMul<S>,
+    Acc: [const] CoshapeAccumulate<D::Output>,
+{
+    type Output = Acc::Output;
+    fn coshape_inner_product(self, stride: D, acc: Acc) -> Self::Output {
+        acc.coshape_accumulate(stride.stride_mul(self))
+    }
+}
+
+const impl<H, T, RH, RT, Acc> CoshapeInnerProduct<Til<RH, RT>, Acc> for Til<H, T>
+where
+    Acc: Copy,
+    H: [const] CoshapeInnerProduct<RH, Acc>,
+    T: Tuple + [const] CoshapeInnerProduct<RT, H::Output>,
+    RH: Copy,
+    RT: Copy,
+{
+    type Output = T::Output;
+    fn coshape_inner_product(self, stride: Til<RH, RT>, acc: Acc) -> Self::Output {
+        let acc1 = self.0.coshape_inner_product(stride.0, acc);
+        self.1.coshape_inner_product(stride.1, acc1)
+    }
+}
+
 /// Computes the codomain shape of a layout defined by `(shape, stride)`.
 ///
 /// Requires positive leaf extents in `shape` and non-negative maximum offsets
@@ -566,18 +1044,19 @@ const impl<S, D> Coshape<D> for S
 where
     S: [const] MaxCoord + [const] Shape,
     D: Stride<S> + [const] StrideSkeleton,
-    <S as MaxCoord>::Output: [const] InnerProduct<D>,
-    <<S as MaxCoord>::Output as InnerProduct<D>>::Output:
+    <S as MaxCoord>::Output: [const] CoshapeInnerProduct<D>,
+    <<S as MaxCoord>::Output as CoshapeInnerProduct<D>>::Output:
         [const] MaxOffsetToCoshape<<D as StrideSkeleton>::Terms>,
 {
-    type Output = <<<S as MaxCoord>::Output as InnerProduct<D>>::Output as MaxOffsetToCoshape<
-        <D as StrideSkeleton>::Terms,
-    >>::Output;
+    type Output =
+        <<<S as MaxCoord>::Output as CoshapeInnerProduct<D>>::Output as MaxOffsetToCoshape<
+            <D as StrideSkeleton>::Terms,
+        >>::Output;
 
     fn coshape(self, stride: D) -> Self::Output {
         let max_coord = self.max_coord();
         let skeleton = stride.skeleton_terms();
-        let max_offset = super::inner_product(max_coord, stride);
+        let max_offset = max_coord.coshape_inner_product(stride, Int::<0>);
         max_offset.max_offset_to_coshape(skeleton)
     }
 }

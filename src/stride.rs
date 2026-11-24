@@ -183,3 +183,27 @@ where
     T: [const] Tuple + [const] Stride<ST>,
 {
 }
+
+/// Classifies stride trees containing a binary-polynomial coefficient.
+#[doc(hidden)]
+pub trait ContainsF2 {
+    const HAS_F2: bool;
+    const HAS_INTEGER: bool = false;
+}
+impl<V: BasisCoeff + Leaf> ContainsF2 for V {
+    const HAS_INTEGER: bool = matches!(V::ALGEBRA, crate::basis::CoeffAlgebra::Integer);
+    const HAS_F2: bool = matches!(V::ALGEBRA, crate::basis::CoeffAlgebra::F2);
+}
+impl<V: BasisCoeff, P> ContainsF2 for ScaledBasis<V, P> {
+    const HAS_F2: bool = matches!(V::ALGEBRA, crate::basis::CoeffAlgebra::F2);
+}
+impl<T: ContainsF2 + crate::basis::BasisTuple> ContainsF2 for BasisCombination<T> {
+    const HAS_F2: bool = T::HAS_F2;
+}
+impl ContainsF2 for Nil {
+    const HAS_F2: bool = false;
+}
+impl<H: ContainsF2, T: ContainsF2> ContainsF2 for Til<H, T> {
+    const HAS_F2: bool = H::HAS_F2 || T::HAS_F2;
+    const HAS_INTEGER: bool = H::HAS_INTEGER || T::HAS_INTEGER;
+}

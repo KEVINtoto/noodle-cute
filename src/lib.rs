@@ -42,6 +42,9 @@
 //!   [`blocked_product`](algebra::blocked_product), [`raked_product`](algebra::raked_product),
 //!   [`greatest_common_domain`](algebra::greatest_common_domain()), and
 //!   [`layout_add`](algebra::layout_add()).
+//! - [`mod@swizzle`]: Binary-field stride scalar [`F2`](swizzle::F2) ($\mathbb{F}_2\[x\]$ XOR /
+//!   carry-less arithmetic passing through the layout algebra) and bit-field permutation
+//!   functor [`Swizzle`](swizzle::Swizzle) ([`f2!`], [`swizzle!`]).
 //!
 //! # Main Root Interfaces
 //!
@@ -97,6 +100,7 @@ pub mod layout;
 pub mod shape;
 pub mod slice;
 pub mod stride;
+pub mod swizzle;
 pub mod tuple;
 
 /// Errors that can occur during integer arithmetic and conversion.

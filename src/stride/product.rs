@@ -26,6 +26,7 @@
 //! - [`PrefixProduct`] skips the unused trailing multiplication `init * s_last`, preventing
 //!   spurious overflow when the total shape size exceeds `int::MAX` while all strides fit.
 
+use crate::basis::BasisCoeff;
 use crate::integer::{Int, Integer};
 use crate::shape::Shape;
 use crate::tuple::{Item, Leaf, Nil, Til, Tuple};
@@ -74,7 +75,7 @@ const impl<Acc: Copy> InnerProduct<Nil, Acc> for Nil {
 
 const impl<S, D, Acc> InnerProduct<D, Acc> for S
 where
-    S: [const] Integer,
+    S: [const] BasisCoeff,
     D: [const] StrideMul<S>,
     Acc: [const] Accumulate<D::Output>,
 {

@@ -91,10 +91,11 @@
 use core::marker::ConstParamTy;
 
 use crate::basis::{
-    BasisCoeff, BasisCombination, BasisPath, BasisTerm, BasisTuple, ComparePath, ModeEnd,
+    BasisCoeff, BasisCombination, BasisPath, BasisTerm, BasisTuple, CoeffAlgebra, ComparePath,
+    ModeEnd,
 };
-use crate::integer::ops::integer_product_eq;
-use crate::integer::{ArithMul, Int, Integer, Product, int, mul};
+use crate::integer::ops::{checked_clmul, integer_product_eq};
+use crate::integer::{ArithMul, Int, Product, int, mul, uint};
 use crate::layout::Layout;
 use crate::shape::{Shape, ShapeScalar};
 use crate::stride::{Stride, same_path};
@@ -116,7 +117,21 @@ const fn static_coeff_product_eq<S: ShapeScalar, L: BasisCoeff, R: BasisCoeff>()
     let (Some(s), Some(l), Some(r)) = (S::STATIC_VALUE, L::STATIC_VALUE, R::STATIC_VALUE) else {
         return false;
     };
-    integer_product_eq(l, s, r)
+    match (L::ALGEBRA, R::ALGEBRA) {
+        (CoeffAlgebra::Integer, CoeffAlgebra::Integer) => integer_product_eq(l, s, r),
+        // Over F2, linearity at (0, 1) and (s - 1, 1) holds iff l == r == 0, or s is a power
+        // of two and clmul(l, s) == r (avoiding 2 * s - 1 overflow).
+        (CoeffAlgebra::F2, CoeffAlgebra::F2) => {
+            (l == 0 && r == 0)
+                || (s > 0
+                    && (s as uint).is_power_of_two()
+                    && matches!(checked_clmul(l, s), Ok(p) if p == r))
+        }
+        (CoeffAlgebra::Integer, CoeffAlgebra::F2) | (CoeffAlgebra::F2, CoeffAlgebra::Integer) => {
+            l == 0 && r == 0
+        }
+        _ => false,
+    }
 }
 
 /// Term-by-term static check for whether `Self * S == Rhs` across path-sorted [`BasisTuple`]s.
@@ -167,11 +182,13 @@ pub const trait CoalesceStrideProductEq<S: ShapeScalar, NextD: Leaf>: Leaf {
     const PRODUCT_EQ: bool;
 }
 
-const impl<S: ShapeScalar, L: Integer, R: Integer> CoalesceStrideProductEq<S, R> for L {
+const impl<S: ShapeScalar, L: BasisCoeff + Leaf, R: BasisCoeff + Leaf> CoalesceStrideProductEq<S, R>
+    for L
+{
     const PRODUCT_EQ: bool = static_coeff_product_eq::<S, L, R>();
 }
 
-const impl<S: ShapeScalar, L: Integer, VR: BasisCoeff, PR: BasisPath>
+const impl<S: ShapeScalar, L: BasisCoeff + Leaf, VR: BasisCoeff, PR: BasisPath>
     CoalesceStrideProductEq<S, BasisTerm<VR, PR>> for L
 where
     ModeEnd: ComparePath<PR>,
@@ -179,11 +196,13 @@ where
     const PRODUCT_EQ: bool = same_path::<ModeEnd, PR>() && static_coeff_product_eq::<S, L, VR>();
 }
 
-const impl<S: ShapeScalar, L: Integer> CoalesceStrideProductEq<S, BasisCombination<Nil>> for L {
+const impl<S: ShapeScalar, L: BasisCoeff + Leaf> CoalesceStrideProductEq<S, BasisCombination<Nil>>
+    for L
+{
     const PRODUCT_EQ: bool = static_coeff_product_eq::<S, L, Int<0>>();
 }
 
-const impl<S: ShapeScalar, L: Integer, HR, TR>
+const impl<S: ShapeScalar, L: BasisCoeff + Leaf, HR, TR>
     CoalesceStrideProductEq<S, BasisCombination<Til<HR, TR>>> for L
 where
     Til<HR, TR>: BasisTuple,
@@ -191,8 +210,8 @@ where
     const PRODUCT_EQ: bool = false;
 }
 
-const impl<S: ShapeScalar, VL: BasisCoeff, PL: BasisPath, R: Integer> CoalesceStrideProductEq<S, R>
-    for BasisTerm<VL, PL>
+const impl<S: ShapeScalar, VL: BasisCoeff, PL: BasisPath, R: BasisCoeff + Leaf>
+    CoalesceStrideProductEq<S, R> for BasisTerm<VL, PL>
 where
     PL: ComparePath<ModeEnd>,
 {
@@ -224,17 +243,18 @@ where
     const PRODUCT_EQ: bool = false;
 }
 
-const impl<S: ShapeScalar, R: Integer> CoalesceStrideProductEq<S, R> for BasisCombination<Nil> {
+const impl<S: ShapeScalar, R: BasisCoeff + Leaf> CoalesceStrideProductEq<S, R>
+    for BasisCombination<Nil>
+{
     const PRODUCT_EQ: bool = static_coeff_product_eq::<S, Int<0>, R>();
 }
 
-const impl<S: ShapeScalar, HL, TL, R: Integer> CoalesceStrideProductEq<S, R>
+const impl<S: ShapeScalar, HL, TL, R: BasisCoeff + Leaf> CoalesceStrideProductEq<S, R>
     for BasisCombination<Til<HL, TL>>
 where
     Til<HL, TL>: BasisTuple,
 {
-    const PRODUCT_EQ: bool =
-        matches!(S::STATIC_VALUE, Some(0)) && matches!(R::STATIC_VALUE, Some(0));
+    const PRODUCT_EQ: bool = matches!(S::STATIC_VALUE, Some(0)) && R::IS_STATIC_ZERO;
 }
 
 const impl<S: ShapeScalar, VR: BasisCoeff, PR: BasisPath>
@@ -251,8 +271,7 @@ const impl<S: ShapeScalar, HL, TL, VR: BasisCoeff, PR: BasisPath>
 where
     Til<HL, TL>: BasisTuple,
 {
-    const PRODUCT_EQ: bool =
-        matches!(S::STATIC_VALUE, Some(0)) && matches!(VR::STATIC_VALUE, Some(0));
+    const PRODUCT_EQ: bool = matches!(S::STATIC_VALUE, Some(0)) && VR::IS_STATIC_ZERO;
 }
 
 const impl<S: ShapeScalar, TL: BasisTuple, TR: BasisTuple>
