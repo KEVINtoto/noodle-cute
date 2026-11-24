@@ -295,7 +295,9 @@ where
 /// Dispatches flattened `(shape, stride)` pairs to either the trivial `1:0` layout
 /// (`HAS_ZERO == false`) or the prefix-product [`NullspaceWalk`] (`HAS_ZERO == true`).
 #[doc(hidden)]
-pub const trait NullspaceDispatch<FD: HasZeroStride, const HAS_ZERO: bool>: FlatTuple {
+pub const trait NullspaceDispatch<FD: HasZeroStride, const HAS_ZERO: bool>:
+    FlatTuple
+{
     type Output: Copy;
     fn nullspace_dispatch(self, fd: FD) -> Self::Output;
 }
@@ -313,10 +315,8 @@ where
     FS: FlatTuple + [const] NullspaceWalk<FD, Int<1>>,
     FD: HasZeroStride,
 {
-    type Output = Layout<
-        <FS as NullspaceWalk<FD, Int<1>>>::Shape,
-        <FS as NullspaceWalk<FD, Int<1>>>::Stride,
-    >;
+    type Output =
+        Layout<<FS as NullspaceWalk<FD, Int<1>>>::Shape, <FS as NullspaceWalk<FD, Int<1>>>::Stride>;
 
     fn nullspace_dispatch(self, fd: FD) -> Self::Output {
         self.nullspace_walk(fd, Int::<1>)

@@ -336,14 +336,10 @@ where
     RDT: Tuple + Stride<RST>,
     Layout<LST, LDT>: [const] ZipModes<Layout<RST, RDT>>,
 {
-    type Shape = Til<
-        Til<LSH, Til<RSH, Nil>>,
-        <Layout<LST, LDT> as ZipModes<Layout<RST, RDT>>>::Shape,
-    >;
-    type Stride = Til<
-        Til<LDH, Til<RDH, Nil>>,
-        <Layout<LST, LDT> as ZipModes<Layout<RST, RDT>>>::Stride,
-    >;
+    type Shape =
+        Til<Til<LSH, Til<RSH, Nil>>, <Layout<LST, LDT> as ZipModes<Layout<RST, RDT>>>::Shape>;
+    type Stride =
+        Til<Til<LDH, Til<RDH, Nil>>, <Layout<LST, LDT> as ZipModes<Layout<RST, RDT>>>::Stride>;
 
     fn zip_modes(
         self,

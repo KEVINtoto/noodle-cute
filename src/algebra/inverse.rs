@@ -559,8 +559,7 @@ pub enum RightFoldAction {
 }
 
 const fn right_fold_action<S: ShapeScalar, D: Integer, CurrD: RightRunningExtent>()
-    -> RightFoldAction
-{
+-> RightFoldAction {
     if CurrD::IS_EXHAUSTED {
         return RightFoldAction::StaticSkip;
     }
@@ -634,8 +633,7 @@ where
     CurrD: RightRunningExtent,
     Self: [const] RightInverseFoldStep<CurrD, { RIGHT_FOLD_ACTION::<S, D, CurrD> }>,
 {
-    type Shape =
-        <Self as RightInverseFoldStep<CurrD, { RIGHT_FOLD_ACTION::<S, D, CurrD> }>>::Shape;
+    type Shape = <Self as RightInverseFoldStep<CurrD, { RIGHT_FOLD_ACTION::<S, D, CurrD> }>>::Shape;
     type Stride =
         <Self as RightInverseFoldStep<CurrD, { RIGHT_FOLD_ACTION::<S, D, CurrD> }>>::Stride;
 
@@ -861,12 +859,8 @@ pub enum LeftFoldAction {
     Invalid,
 }
 
-const fn left_fold_action<
-    S: ShapeScalar,
-    D: Integer,
-    PrevD: ShapeScalar,
-    PrevS: ShapeScalar,
->() -> LeftFoldAction {
+const fn left_fold_action<S: ShapeScalar, D: Integer, PrevD: ShapeScalar, PrevS: ShapeScalar>()
+-> LeftFoldAction {
     if matches!(S::STATIC_VALUE, Some(0))
         || matches!(PrevD::STATIC_VALUE, Some(0))
         || matches!(PrevS::STATIC_VALUE, Some(0))
@@ -982,12 +976,7 @@ where
     PrevD: ShapeScalar,
     PrevS: ShapeScalar,
     PrevP: ShapeScalar,
-    Self: [const] LeftInverseFoldStep<
-            PrevD,
-            PrevS,
-            PrevP,
-            { LEFT_FOLD_ACTION::<S, D, PrevD, PrevS> },
-        >,
+    Self: [const] LeftInverseFoldStep<PrevD, PrevS, PrevP, { LEFT_FOLD_ACTION::<S, D, PrevD, PrevS> }>,
 {
     type Shape = <Self as LeftInverseFoldStep<
         PrevD,
@@ -1226,10 +1215,8 @@ pub const trait InvertSortedAxis<const RIGHT: bool>: FlatTuple {
 const impl<M> InvertSortedAxis<true> for M
 where
     M: FlatTuple + [const] RightInverseFold<Int<1>>,
-    Layout<
-        <M as RightInverseFold<Int<1>>>::Shape,
-        <M as RightInverseFold<Int<1>>>::Stride,
-    >: [const] FinalizeRightAxis,
+    Layout<<M as RightInverseFold<Int<1>>>::Shape, <M as RightInverseFold<Int<1>>>::Stride>:
+        [const] FinalizeRightAxis,
 {
     type Shape = <Layout<
         <M as RightInverseFold<Int<1>>>::Shape,
@@ -1279,12 +1266,8 @@ pub const trait BuildInverse<const RIGHT: bool, FS: FlatTuple, FD: FlatTuple, FP
 {
     type Shape: Shape;
     type Stride: Stride<Self::Shape>;
-    fn build_inverse(
-        self,
-        flat_s: FS,
-        flat_d: FD,
-        flat_p: FP,
-    ) -> Layout<Self::Shape, Self::Stride>;
+    fn build_inverse(self, flat_s: FS, flat_d: FD, flat_p: FP)
+    -> Layout<Self::Shape, Self::Stride>;
 }
 
 const impl<const RIGHT: bool, FS: FlatTuple, FD: FlatTuple, FP: FlatTuple>
@@ -1456,12 +1439,7 @@ where
     CoalescedFlatP<S, D>: FlatTuple,
     Self: [const] Coprofile,
     <<Self as Coprofile>::Output as Item>::Profile: [const] MakeBasisLikeTopProfile,
-    LayoutBases<S, D>: [const] BuildInverse<
-            true,
-            CoalescedFlatS<S, D>,
-            CoalescedFlatD<S, D>,
-            CoalescedFlatP<S, D>,
-        >,
+    LayoutBases<S, D>: [const] BuildInverse<true, CoalescedFlatS<S, D>, CoalescedFlatD<S, D>, CoalescedFlatP<S, D>>,
 {
     type Output = BuiltInverseLayout<true, S, D>;
 

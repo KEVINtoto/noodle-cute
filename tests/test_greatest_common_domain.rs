@@ -15,18 +15,15 @@ use noodle_cute::algebra::greatest_common_domain::{
     GreatestCommonDomain, IntoGcdShape, greatest_common_domain,
 };
 use noodle_cute::algebra::logical_divide::LogicalDivide;
+use noodle_cute::int_tuple;
 use noodle_cute::integer::{Int, gcd};
 use noodle_cute::layout::{Layout, LayoutBase};
 use noodle_cute::shape::Shape;
 use noodle_cute::tuple::{Get, GetOutput, Nil, Til};
-use noodle_cute::int_tuple;
 
 // Universal post-condition checker mirroring `test/test_greatest_common_domain.py`
 
-fn assert_gcd_postcondition<A, B, SA, SB, SR, DR, DA, DB, QSA, QSB>(
-    a: A,
-    b: B,
-) -> Layout<SR, DR>
+fn assert_gcd_postcondition<A, B, SA, SB, SR, DR, DA, DB, QSA, QSB>(a: A, b: B) -> Layout<SR, DR>
 where
     A: IntoGcdShape<Shape = SA> + GreatestCommonDomain<B, Shape = SR, Stride = DR> + Debug,
     B: IntoGcdShape<Shape = SB> + GreatestCommonDomain<A> + Debug,
@@ -390,7 +387,9 @@ fn test_singleton_leaves_layout_strides_and_nested() {
         int_tuple![Int::<10>, Int::<6>, Int::<1>, Int::<3>],
     );
     let r4 = greatest_common_domain(
-        int_tuple![Int::<5>, Int::<1>, Int::<1>, Int::<3>, Int::<1>, Int::<3>, Int::<4>],
+        int_tuple![
+            Int::<5>, Int::<1>, Int::<1>, Int::<3>, Int::<1>, Int::<3>, Int::<4>
+        ],
         int_tuple![Int::<10>, Int::<6>, Int::<3>],
     );
     assert_eq!(r1, r2);
@@ -516,16 +515,11 @@ fn test_gcd_dynamic_and_mixed_shapes() {
     );
 
     // Static prefix preserved before dynamic suffix!
-    const MIXED_CONST: PairLayout<Int<4>, i32, Int<1>, i32> = greatest_common_domain(
-        int_tuple![Int::<4>, 12i32],
-        int_tuple![Int::<4>, 18i32],
-    );
+    const MIXED_CONST: PairLayout<Int<4>, i32, Int<1>, i32> =
+        greatest_common_domain(int_tuple![Int::<4>, 12i32], int_tuple![Int::<4>, 18i32]);
     assert_eq!(
         MIXED_CONST,
-        Layout::new(
-            int_tuple![Int::<4>, 6i32],
-            int_tuple![Int::<1>, 4i32],
-        )
+        Layout::new(int_tuple![Int::<4>, 6i32], int_tuple![Int::<1>, 4i32],)
     );
 
     // Mixed static/dynamic symmetry & size preservation on multi-mode dynamic inputs
@@ -620,10 +614,7 @@ fn test_gcd_dynamic_failures() {
     );
     assert!(
         std::panic::catch_unwind(|| {
-            greatest_common_domain(
-                int_tuple![65536i32, 5i32],
-                int_tuple![65537i32, 5i32],
-            )
+            greatest_common_domain(int_tuple![65536i32, 5i32], int_tuple![65537i32, 5i32])
         })
         .is_err()
     );

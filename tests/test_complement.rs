@@ -572,10 +572,7 @@ fn test_complement_extend_1d_and_multileaf() {
 fn test_complement_extend_coord_and_higher_rank() {
     // B = 4:E(0), extend = (8, 8) -> (2, 8):(4@0, 1@1)
     assert_eq!(
-        complement_with(
-            Layout::new(Int::<4>, e![0]),
-            int_tuple![Int::<8>, Int::<8>],
-        ),
+        complement_with(Layout::new(Int::<4>, e![0]), int_tuple![Int::<8>, Int::<8>],),
         Layout::new(
             int_tuple![Int::<2>, Int::<8>],
             tuple![Int::<4> * e![0], e![1]],
@@ -596,10 +593,7 @@ fn test_complement_extend_coord_and_higher_rank() {
 
     // B = 4:E(1), extend = (8, 8) -> (8, 2):(1@0, 4@1)
     assert_eq!(
-        complement_with(
-            Layout::new(Int::<4>, e![1]),
-            int_tuple![Int::<8>, Int::<8>],
-        ),
+        complement_with(Layout::new(Int::<4>, e![1]), int_tuple![Int::<8>, Int::<8>],),
         Layout::new(
             int_tuple![Int::<8>, Int::<2>],
             tuple![e![0], Int::<4> * e![1]],
@@ -623,10 +617,7 @@ fn test_complement_extend_coord_and_higher_rank() {
 
     // B = 4:E(0), extend = (4, 8) -> preserves standalone 1:4@0 on mode 0
     assert_eq!(
-        complement_with(
-            Layout::new(Int::<4>, e![0]),
-            int_tuple![Int::<4>, Int::<8>],
-        ),
+        complement_with(Layout::new(Int::<4>, e![0]), int_tuple![Int::<4>, Int::<8>],),
         Layout::new(
             int_tuple![Int::<1>, Int::<8>],
             tuple![Int::<4> * e![0], e![1]],
@@ -697,13 +688,8 @@ fn test_complement_dynamic_and_sympy_equivalents() {
         }
 
         // Layout(256, 1).complement_with((32, 4, 2, 2, N)) == Layout(2*N, 256)
-        let ext = Layout::new(Int::<256>, Int::<1>).complement_with(int_tuple![
-            Int::<32>,
-            Int::<4>,
-            Int::<2>,
-            Int::<2>,
-            n
-        ]);
+        let ext = Layout::new(Int::<256>, Int::<1>)
+            .complement_with(int_tuple![Int::<32>, Int::<4>, Int::<2>, Int::<2>, n]);
         assert_eq!(ext, Layout::new(2 * n, Int::<256>));
     }
 
@@ -732,10 +718,8 @@ fn test_complement_dynamic_and_sympy_equivalents() {
     }
 
     // Sorted dynamic strides succeed and pass postconditions
-    let r_dyn_sorted = assert_complement_weak(Layout::new(
-        int_tuple![4i32, 2i32],
-        int_tuple![1i32, 4i32],
-    ));
+    let r_dyn_sorted =
+        assert_complement_weak(Layout::new(int_tuple![4i32, 2i32], int_tuple![1i32, 4i32]));
     for i in 0..10i32 {
         assert_eq!(r_dyn_sorted(i), 8 * i);
     }
@@ -749,26 +733,19 @@ fn test_complement_dynamic_and_sympy_equivalents() {
     );
 
     // Dynamic sizeC paired with static Int<1> leaves in extend (`CeilStepAction::UnitShape`)
-    let r_unit_shape_ext = complement_with(
-        Layout::new(4i32, Int::<1>),
-        int_tuple![Int::<1>, Int::<20>],
-    );
+    let r_unit_shape_ext =
+        complement_with(Layout::new(4i32, Int::<1>), int_tuple![Int::<1>, Int::<20>]);
     assert_eq!(r_unit_shape_ext, Layout::new(5i32, 4i32));
 
     // Dynamic basis stride (including runtime 0 coefficient) obeys ordered & disjoint postconditions
-    let r_dyn_basis = assert_complement_weak(Layout::new(
-        Int::<4>,
-        BasisTerm::<i32, mode![1]>::new(0i32),
-    ));
+    let r_dyn_basis =
+        assert_complement_weak(Layout::new(Int::<4>, BasisTerm::<i32, mode![1]>::new(0i32)));
     assert!(basis_eq(r_dyn_basis(0i32), 0i32));
     assert!(basis_eq(r_dyn_basis(1i32), e![1]));
     assert!(basis_eq(r_dyn_basis(2i32), Int::<2> * e![1]));
 
     // Dynamic shape on basis axis extended to multi-mode target shape
-    let r_dyn_basis_ext = complement_with(
-        Layout::new(4i32, e![0]),
-        int_tuple![Int::<8>, Int::<8>],
-    );
+    let r_dyn_basis_ext = complement_with(Layout::new(4i32, e![0]), int_tuple![Int::<8>, Int::<8>]);
     assert_eq!(
         r_dyn_basis_ext,
         Layout::new(
@@ -791,11 +768,17 @@ fn test_complement_tilers_nil_and_const_eval() {
     assert_eq!(size_of_val(&EXT), 0);
     assert_eq!(
         FREE,
-        Layout::new(int_tuple![Int::<2>, Int::<1>], int_tuple![Int::<1>, Int::<8>])
+        Layout::new(
+            int_tuple![Int::<2>, Int::<1>],
+            int_tuple![Int::<1>, Int::<8>]
+        )
     );
     assert_eq!(
         EXT,
-        Layout::new(int_tuple![Int::<2>, Int::<3>], int_tuple![Int::<1>, Int::<8>])
+        Layout::new(
+            int_tuple![Int::<2>, Int::<3>],
+            int_tuple![Int::<1>, Int::<8>]
+        )
     );
 
     // Tiler inputs
@@ -830,7 +813,10 @@ fn test_complement_tilers_nil_and_const_eval() {
             int_tuple![(), Int::<4>, ()],
             int_tuple![(), Int::<2>, ()],
         )),
-        Layout::new(int_tuple![Int::<2>, Int::<1>], int_tuple![Int::<1>, Int::<8>])
+        Layout::new(
+            int_tuple![Int::<2>, Int::<1>],
+            int_tuple![Int::<1>, Int::<8>]
+        )
     );
 
     // Canonical zero BasisCombination<Nil> and static-zero BasisTerm
@@ -894,20 +880,14 @@ fn test_complement_dynamic_failures() {
     // Dynamic overlapping / non-injective strides
     assert!(
         std::panic::catch_unwind(|| {
-            complement(Layout::new(
-                int_tuple![4i32, 2i32],
-                int_tuple![1i32, 2i32],
-            ))
+            complement(Layout::new(int_tuple![4i32, 2i32], int_tuple![1i32, 2i32]))
         })
         .is_err()
     );
     // Dynamic unsorted strides fail `d >= curr_d`
     assert!(
         std::panic::catch_unwind(|| {
-            complement(Layout::new(
-                int_tuple![2i32, 4i32],
-                int_tuple![4i32, 1i32],
-            ))
+            complement(Layout::new(int_tuple![2i32, 4i32], int_tuple![4i32, 1i32]))
         })
         .is_err()
     );
@@ -926,9 +906,7 @@ fn test_complement_dynamic_failures() {
     assert!(
         std::panic::catch_unwind(|| complement(Layout::new(2_000_000_000i32, Int::<2>))).is_err()
     );
-    assert!(
-        std::panic::catch_unwind(|| complement(Layout::new(2i32, 2_000_000_000i32))).is_err()
-    );
+    assert!(std::panic::catch_unwind(|| complement(Layout::new(2i32, 2_000_000_000i32))).is_err());
 
     // `complement_with` failures:
     // Dynamic zero / negative extend
@@ -975,10 +953,7 @@ fn test_complement_dynamic_failures() {
 #[test]
 #[should_panic]
 fn test_complement_panics_on_dynamic_non_injective() {
-    let _ = complement(Layout::new(
-        int_tuple![4i32, 2i32],
-        int_tuple![1i32, 2i32],
-    ));
+    let _ = complement(Layout::new(int_tuple![4i32, 2i32], int_tuple![1i32, 2i32]));
 }
 
 #[test]

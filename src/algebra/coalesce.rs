@@ -191,8 +191,8 @@ where
     const PRODUCT_EQ: bool = false;
 }
 
-const impl<S: ShapeScalar, VL: BasisCoeff, PL: BasisPath, R: Integer>
-    CoalesceStrideProductEq<S, R> for BasisTerm<VL, PL>
+const impl<S: ShapeScalar, VL: BasisCoeff, PL: BasisPath, R: Integer> CoalesceStrideProductEq<S, R>
+    for BasisTerm<VL, PL>
 where
     PL: ComparePath<ModeEnd>,
 {
@@ -597,9 +597,7 @@ where
     Coalesced<Til<S1, TS>, Til<D1, TD>, EXTENDED>: [const] CoalescePrepend<
             S0,
             D0,
-            {
-                PREPEND_ACTION::<S0, D0, CoalescedFirstStride<Til<S1, TS>, Til<D1, TD>, EXTENDED>>
-            },
+            { PREPEND_ACTION::<S0, D0, CoalescedFirstStride<Til<S1, TS>, Til<D1, TD>, EXTENDED>> },
         >,
 {
     type Output = LayoutPrepended<S0, D0, Til<S1, TS>, Til<D1, TD>, EXTENDED>;
@@ -784,7 +782,10 @@ where
 
     fn drop_last_from_tail(self) -> Layout<Self::Shape, Self::Stride> {
         let tail = Layout::new(self.shape.1, self.stride.1).drop_last_from_tail();
-        Layout::new(Til(self.shape.0, tail.shape), Til(self.stride.0, tail.stride))
+        Layout::new(
+            Til(self.shape.0, tail.shape),
+            Til(self.stride.0, tail.stride),
+        )
     }
 }
 
@@ -868,7 +869,10 @@ where
 
     fn drop_trailing_unit(self) -> Layout<Self::Shape, Self::Stride> {
         let tail = Layout::new(self.shape.1, self.stride.1).drop_last_from_tail();
-        Layout::new(Til(self.shape.0, tail.shape), Til(self.stride.0, tail.stride))
+        Layout::new(
+            Til(self.shape.0, tail.shape),
+            Til(self.stride.0, tail.stride),
+        )
     }
 }
 

@@ -406,7 +406,10 @@ where
     type Stride = Til<C, Til<DT, Nil>>;
 
     fn prepend_complement_mode(self, gap: G, stride: C) -> Layout<Self::Shape, Self::Stride> {
-        Layout::new(Til(gap, Til(self.shape, Nil)), Til(stride, Til(self.stride, Nil)))
+        Layout::new(
+            Til(gap, Til(self.shape, Nil)),
+            Til(stride, Til(self.stride, Nil)),
+        )
     }
 }
 
@@ -503,7 +506,9 @@ const STATIC_NEXT_D<D: Integer, S: ShapeScalar>: int = mul(
 
 /// Executes one [`FoldAction`] step of [`ComplementFold`] against running stride `CurrD`.
 #[doc(hidden)]
-pub const trait ComplementFoldStep<CurrD: ShapeScalar, const ACTION: FoldAction>: FlatTuple {
+pub const trait ComplementFoldStep<CurrD: ShapeScalar, const ACTION: FoldAction>:
+    FlatTuple
+{
     type Shape: Shape;
     type Stride: Stride<Self::Shape>;
     fn fold_step(self, curr_d: CurrD) -> Layout<Self::Shape, Self::Stride>;
@@ -667,10 +672,7 @@ where
         }
         assert!(s > 0, "complement extent must be positive");
         assert!(d > 0, "complement stride must be positive");
-        assert!(
-            d >= c,
-            "complement requires non-overlapping sorted strides"
-        );
+        assert!(d >= c, "complement requires non-overlapping sorted strides");
         let gap = div(d, c);
         let next_d = mul(d, s);
         let tail = self.1.complement_fold(next_d);
@@ -704,12 +706,14 @@ where
     <<FS as FilterAxisModes<ModeEnd, FD>>::Output as SortModes>::Output:
         [const] ComplementFold<Int<1>>,
 {
-    type Shape = <<<FS as FilterAxisModes<ModeEnd, FD>>::Output as SortModes>::Output as ComplementFold<
-        Int<1>,
-    >>::Shape;
-    type Stride = <<<FS as FilterAxisModes<ModeEnd, FD>>::Output as SortModes>::Output as ComplementFold<
-        Int<1>,
-    >>::Stride;
+    type Shape =
+        <<<FS as FilterAxisModes<ModeEnd, FD>>::Output as SortModes>::Output as ComplementFold<
+            Int<1>,
+        >>::Shape;
+    type Stride =
+        <<<FS as FilterAxisModes<ModeEnd, FD>>::Output as SortModes>::Output as ComplementFold<
+            Int<1>,
+        >>::Stride;
 
     fn build_complement(self, flat_s: FS, flat_d: FD) -> Layout<Self::Shape, Self::Stride> {
         flat_s
@@ -825,7 +829,11 @@ where
 
     fn split_last_mode(self) -> (Self::PrefixShape, Self::PrefixStride, Self::LastStride) {
         let (tail_s, tail_d, last_d) = Layout::new(self.shape.1, self.stride.1).split_last_mode();
-        (Til(self.shape.0, tail_s), Til(self.stride.0, tail_d), last_d)
+        (
+            Til(self.shape.0, tail_s),
+            Til(self.stride.0, tail_d),
+            last_d,
+        )
     }
 }
 
@@ -886,7 +894,9 @@ const STATIC_CEIL_DIV<A: ShapeScalar, B: ShapeScalar>: int = ceil_div(
 
 /// Executes one [`CeilStepAction`] step of [`ExtendShapeLoop`] against remaining cover `SizeC`.
 #[doc(hidden)]
-pub const trait ExtendShapeStep<SizeC: ShapeScalar, const ACTION: CeilStepAction>: FlatTuple {
+pub const trait ExtendShapeStep<SizeC: ShapeScalar, const ACTION: CeilStepAction>:
+    FlatTuple
+{
     type Output: [const] Tuple + FlatTuple + Shape;
     fn extend_shape_step(self, size_c: SizeC) -> Self::Output;
 }
@@ -1003,8 +1013,9 @@ pub const trait ExtendAxis<Extend: Shape>: Copy {
 }
 
 type FlatNonEmptyExtend<E> = <<E as Flatten>::Output as NonEmptyFlatShape>::Output;
-type ExtendedTailShape<L, E> =
-    <FlatNonEmptyExtend<E> as ExtendShapeLoop<<<L as SplitLastMode>::LastStride as StrideScalar>::Value>>::Output;
+type ExtendedTailShape<L, E> = <FlatNonEmptyExtend<E> as ExtendShapeLoop<
+    <<L as SplitLastMode>::LastStride as StrideScalar>::Value,
+>>::Output;
 type ExtendedTailStride<L, E> =
     <ExtendedTailShape<L, E> as PrefixProduct<<L as SplitLastMode>::LastStride>>::Stride;
 type CombinedAxisShape<L, E> =

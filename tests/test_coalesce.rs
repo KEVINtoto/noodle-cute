@@ -506,8 +506,11 @@ fn test_coalesce_overflow_negative_and_drop_trailing_unit() {
         Layout::new(Int::<1>, Int::<4>)
     );
     assert_eq!(
-        Layout::new(int_tuple![Int::<2>, Int::<1>], int_tuple![Int::<1>, Int::<8>])
-            .drop_trailing_unit(),
+        Layout::new(
+            int_tuple![Int::<2>, Int::<1>],
+            int_tuple![Int::<1>, Int::<8>]
+        )
+        .drop_trailing_unit(),
         Layout::new(Int::<2>, Int::<1>)
     );
     assert_eq!(
@@ -516,7 +519,10 @@ fn test_coalesce_overflow_negative_and_drop_trailing_unit() {
             int_tuple![Int::<1>, Int::<4>, Int::<24>],
         )
         .drop_trailing_unit(),
-        Layout::new(int_tuple![Int::<2>, Int::<3>], int_tuple![Int::<1>, Int::<4>])
+        Layout::new(
+            int_tuple![Int::<2>, Int::<3>],
+            int_tuple![Int::<1>, Int::<4>]
+        )
     );
     assert_eq!(
         Layout::new(
@@ -559,10 +565,7 @@ fn test_coalesce_basis_combination_strides() {
     assert_eq!(mismatch.coalesce(), mismatch);
 
     // Trailing unit mode dropped after multi-term BasisCombination
-    let trailing_unit = Layout::new(
-        int_tuple![Int::<2>, Int::<1>],
-        tuple![e![0] + e![1], e![2]],
-    );
+    let trailing_unit = Layout::new(int_tuple![Int::<2>, Int::<1>], tuple![e![0] + e![1], e![2]]);
     assert_eq!(
         trailing_unit.coalesce(),
         Layout::new(Int::<2>, e![0] + e![1])

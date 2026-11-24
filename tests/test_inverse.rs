@@ -394,20 +394,32 @@ fn test_right_inverse_coord_suite() {
     // SM70 MMA 8x8x4 C TV inverse
     assert_eq!(
         assert_right_inverse_coord(Layout::new(
-            int_tuple![(Int::<2>, Int::<2>, Int::<2>), (Int::<2>, Int::<2>, Int::<2>)],
+            int_tuple![
+                (Int::<2>, Int::<2>, Int::<2>),
+                (Int::<2>, Int::<2>, Int::<2>)
+            ],
             tuple![
                 (e![0], Int::<2> * e![1], Int::<4> * e![0]),
                 (e![1], Int::<2> * e![0], Int::<4> * e![1]),
             ],
         )),
         Layout::new(
-            int_tuple![(Int::<2>, Int::<2>, Int::<2>), (Int::<2>, Int::<2>, Int::<2>)],
-            int_tuple![(Int::<1>, Int::<16>, Int::<4>), (Int::<8>, Int::<2>, Int::<32>)],
+            int_tuple![
+                (Int::<2>, Int::<2>, Int::<2>),
+                (Int::<2>, Int::<2>, Int::<2>)
+            ],
+            int_tuple![
+                (Int::<1>, Int::<16>, Int::<4>),
+                (Int::<8>, Int::<2>, Int::<32>)
+            ],
         )
     );
     assert_eq!(
         assert_right_inverse_coord(Layout::new(
-            int_tuple![(Int::<2>, Int::<2>, Int::<2>), (Int::<2>, Int::<2>, Int::<2>)],
+            int_tuple![
+                (Int::<2>, Int::<2>, Int::<2>),
+                (Int::<2>, Int::<2>, Int::<2>)
+            ],
             tuple![
                 (e![0], Int::<2> * e![1], Int::<5> * e![0]),
                 (e![1], Int::<2> * e![0], Int::<5> * e![1]),
@@ -420,7 +432,10 @@ fn test_right_inverse_coord_suite() {
     );
     assert_eq!(
         assert_right_inverse_coord(Layout::new(
-            int_tuple![(Int::<2>, Int::<2>, Int::<2>), (Int::<2>, Int::<2>, Int::<2>)],
+            int_tuple![
+                (Int::<2>, Int::<2>, Int::<2>),
+                (Int::<2>, Int::<2>, Int::<2>)
+            ],
             tuple![
                 (e![0], Int::<2> * e![1], Int::<5> * e![0]),
                 (e![1], Int::<2> * e![0], Int::<4> * e![1]),
@@ -491,17 +506,11 @@ fn test_right_inverse_dynamic_and_sympy_equivalents() {
         assert_eq!(r_n4.size(), 4 * n);
 
         // Layout((N, M), (1, N)) -> full size N*M right inverse
-        let r_nm = assert_right_inverse_1d(Layout::new(
-            int_tuple![n, m],
-            int_tuple![Int::<1>, n],
-        ));
+        let r_nm = assert_right_inverse_1d(Layout::new(int_tuple![n, m], int_tuple![Int::<1>, n]));
         assert_eq!(r_nm.size(), n * m);
 
         // Layout((N, M), (M, 1)) -> full size N*M transposed right inverse
-        let r_mn = assert_right_inverse_1d(Layout::new(
-            int_tuple![n, m],
-            int_tuple![m, Int::<1>],
-        ));
+        let r_mn = assert_right_inverse_1d(Layout::new(int_tuple![n, m], int_tuple![m, Int::<1>]));
         assert_eq!(r_mn.size(), n * m);
 
         // Layout(N, X): full inverse if X == 1, trivial 1:0 otherwise
@@ -509,10 +518,8 @@ fn test_right_inverse_dynamic_and_sympy_equivalents() {
         assert_eq!(r_nx.size(), if x == 1 { n } else { 1 });
 
         // Layout((N, M), (1, 2*N)) -> stops at gap, covers first N elements
-        let r_gap = assert_right_inverse_1d(Layout::new(
-            int_tuple![n, m],
-            int_tuple![Int::<1>, 2 * n],
-        ));
+        let r_gap =
+            assert_right_inverse_1d(Layout::new(int_tuple![n, m], int_tuple![Int::<1>, 2 * n]));
         assert_eq!(r_gap.size(), n);
 
         // Layout((N, 2), (1, 1)) -> non-injective when N >= 2, full size 2 when N == 1
@@ -529,38 +536,27 @@ fn test_right_inverse_dynamic_and_sympy_equivalents() {
         );
 
         // Layout((N, M), (0, N)): size M when N == 1, size 1 otherwise
-        let r_zero_n = assert_right_inverse_1d(Layout::new(
-            int_tuple![n, m],
-            int_tuple![Int::<0>, n],
-        ));
+        let r_zero_n =
+            assert_right_inverse_1d(Layout::new(int_tuple![n, m], int_tuple![Int::<0>, n]));
         assert_eq!(r_zero_n.size(), if n == 1 { m } else { 1 });
     }
 
     // Dynamic strides: sorted succeeds fully, unsorted still produces a valid right inverse
-    let r_dyn_sorted = assert_right_inverse_1d(Layout::new(
-        int_tuple![4i32, 8i32],
-        int_tuple![1i32, 4i32],
-    ));
+    let r_dyn_sorted =
+        assert_right_inverse_1d(Layout::new(int_tuple![4i32, 8i32], int_tuple![1i32, 4i32]));
     assert_eq!(r_dyn_sorted.size(), 32);
 
-    let r_dyn_unsorted = assert_right_inverse_1d(Layout::new(
-        int_tuple![4i32, 8i32],
-        int_tuple![8i32, 1i32],
-    ));
+    let r_dyn_unsorted =
+        assert_right_inverse_1d(Layout::new(int_tuple![4i32, 8i32], int_tuple![8i32, 1i32]));
     assert_eq!(r_dyn_unsorted.size(), 8);
 
     // Dynamic negative / zero strides
-    assert_eq!(
-        assert_right_inverse_1d(Layout::new(4i32, -2i32)).size(),
-        1
-    );
+    assert_eq!(assert_right_inverse_1d(Layout::new(4i32, -2i32)).size(), 1);
     assert_eq!(assert_right_inverse_1d(Layout::new(4i32, 0i32)).size(), 1);
 
     // Dynamic basis stride (including runtime 0)
-    let r_dyn_basis_zero = assert_right_inverse_coord(Layout::new(
-        Int::<4>,
-        BasisTerm::<i32, mode![1]>::new(0i32),
-    ));
+    let r_dyn_basis_zero =
+        assert_right_inverse_coord(Layout::new(Int::<4>, BasisTerm::<i32, mode![1]>::new(0i32)));
     assert_eq!(r_dyn_basis_zero.size(), 1);
 }
 
@@ -767,13 +763,19 @@ fn test_left_inverse_1d_suite() {
     assert_eq!(
         assert_left_inverse_1d(Layout::new(
             int_tuple![
-                ((((Int::<2>, Int::<4>), Int::<1>), (Int::<2>, Int::<2>)), Int::<4>),
+                (
+                    (((Int::<2>, Int::<4>), Int::<1>), (Int::<2>, Int::<2>)),
+                    Int::<4>
+                ),
                 Int::<1>,
                 (Int::<2>, Int::<2>),
                 Int::<2>
             ],
             int_tuple![
-                ((((Int::<262144>, Int::<4>), Int::<0>), (Int::<0>, Int::<1>)), Int::<8388608>),
+                (
+                    (((Int::<262144>, Int::<4>), Int::<0>), (Int::<0>, Int::<1>)),
+                    Int::<8388608>
+                ),
                 Int::<0>,
                 (Int::<2>, Int::<16>),
                 Int::<32>
@@ -854,41 +856,68 @@ fn test_left_inverse_coord_suite() {
     // SM70 MMA 8x8x4 C TV inverse
     assert_eq!(
         assert_left_inverse_coord(Layout::new(
-            int_tuple![(Int::<2>, Int::<2>, Int::<2>), (Int::<2>, Int::<2>, Int::<2>)],
+            int_tuple![
+                (Int::<2>, Int::<2>, Int::<2>),
+                (Int::<2>, Int::<2>, Int::<2>)
+            ],
             tuple![
                 (e![0], Int::<2> * e![1], Int::<4> * e![0]),
                 (e![1], Int::<2> * e![0], Int::<4> * e![1]),
             ],
         )),
         Layout::new(
-            int_tuple![(Int::<2>, Int::<2>, Int::<2>), (Int::<2>, Int::<2>, Int::<2>)],
-            int_tuple![(Int::<1>, Int::<16>, Int::<4>), (Int::<8>, Int::<2>, Int::<32>)],
+            int_tuple![
+                (Int::<2>, Int::<2>, Int::<2>),
+                (Int::<2>, Int::<2>, Int::<2>)
+            ],
+            int_tuple![
+                (Int::<1>, Int::<16>, Int::<4>),
+                (Int::<8>, Int::<2>, Int::<32>)
+            ],
         )
     );
     assert_eq!(
         assert_left_inverse_coord(Layout::new(
-            int_tuple![(Int::<2>, Int::<2>, Int::<2>), (Int::<2>, Int::<2>, Int::<2>)],
+            int_tuple![
+                (Int::<2>, Int::<2>, Int::<2>),
+                (Int::<2>, Int::<2>, Int::<2>)
+            ],
             tuple![
                 (e![0], Int::<2> * e![1], Int::<6> * e![0]),
                 (e![1], Int::<2> * e![0], Int::<6> * e![1]),
             ],
         )),
         Layout::new(
-            int_tuple![(Int::<2>, Int::<3>, Int::<2>), (Int::<2>, Int::<3>, Int::<2>)],
-            int_tuple![(Int::<1>, Int::<16>, Int::<4>), (Int::<8>, Int::<2>, Int::<32>)],
+            int_tuple![
+                (Int::<2>, Int::<3>, Int::<2>),
+                (Int::<2>, Int::<3>, Int::<2>)
+            ],
+            int_tuple![
+                (Int::<1>, Int::<16>, Int::<4>),
+                (Int::<8>, Int::<2>, Int::<32>)
+            ],
         )
     );
     assert_eq!(
         assert_left_inverse_coord(Layout::new(
-            int_tuple![(Int::<2>, Int::<2>, Int::<2>), (Int::<2>, Int::<2>, Int::<2>)],
+            int_tuple![
+                (Int::<2>, Int::<2>, Int::<2>),
+                (Int::<2>, Int::<2>, Int::<2>)
+            ],
             tuple![
                 (e![0], Int::<2> * e![1], Int::<6> * e![0]),
                 (e![1], Int::<2> * e![0], Int::<4> * e![1]),
             ],
         )),
         Layout::new(
-            int_tuple![(Int::<2>, Int::<3>, Int::<2>), (Int::<2>, Int::<2>, Int::<2>)],
-            int_tuple![(Int::<1>, Int::<16>, Int::<4>), (Int::<8>, Int::<2>, Int::<32>)],
+            int_tuple![
+                (Int::<2>, Int::<3>, Int::<2>),
+                (Int::<2>, Int::<2>, Int::<2>)
+            ],
+            int_tuple![
+                (Int::<1>, Int::<16>, Int::<4>),
+                (Int::<8>, Int::<2>, Int::<32>)
+            ],
         )
     );
 
@@ -950,16 +979,10 @@ fn test_left_inverse_dynamic_and_sympy_equivalents() {
         ));
 
         // Layout((N, M), (1, N))
-        assert_left_inverse_1d(Layout::new(
-            int_tuple![n, m],
-            int_tuple![Int::<1>, n],
-        ));
+        assert_left_inverse_1d(Layout::new(int_tuple![n, m], int_tuple![Int::<1>, n]));
 
         // Layout((N, M), (M, 1))
-        assert_left_inverse_1d(Layout::new(
-            int_tuple![n, m],
-            int_tuple![m, Int::<1>],
-        ));
+        assert_left_inverse_1d(Layout::new(int_tuple![n, m], int_tuple![m, Int::<1>]));
 
         // Layout(N, X)
         let r_nx = assert_left_inverse_1d(Layout::new(n, x));
@@ -971,10 +994,8 @@ fn test_left_inverse_dynamic_and_sympy_equivalents() {
         }
 
         // Layout((N, M), (1, 2*N))
-        let r_2n = assert_left_inverse_1d(Layout::new(
-            int_tuple![n, m],
-            int_tuple![Int::<1>, 2 * n],
-        ));
+        let r_2n =
+            assert_left_inverse_1d(Layout::new(int_tuple![n, m], int_tuple![Int::<1>, 2 * n]));
         if m > 1 {
             assert_eq!(
                 r_2n,
@@ -989,10 +1010,8 @@ fn test_left_inverse_dynamic_and_sympy_equivalents() {
         );
 
         // Layout((N, M), (0, N))
-        let r_zero_n = assert_left_inverse_1d(Layout::new(
-            int_tuple![n, m],
-            int_tuple![Int::<0>, n],
-        ));
+        let r_zero_n =
+            assert_left_inverse_1d(Layout::new(int_tuple![n, m], int_tuple![Int::<0>, n]));
         if m > 1 {
             assert_eq!(
                 r_zero_n,
@@ -1046,18 +1065,9 @@ fn test_left_inverse_dynamic_and_sympy_equivalents() {
     );
 
     // Dynamic stride 0 and size 1 skipped cleanly at runtime
-    assert_left_inverse_1d(Layout::new(
-        int_tuple![4i32, 8i32],
-        int_tuple![0i32, 2i32],
-    ));
-    assert_left_inverse_1d(Layout::new(
-        int_tuple![1i32, 4i32],
-        int_tuple![-2i32, 1i32],
-    ));
-    assert_left_inverse_coord(Layout::new(
-        Int::<4>,
-        BasisTerm::<i32, mode![1]>::new(0i32),
-    ));
+    assert_left_inverse_1d(Layout::new(int_tuple![4i32, 8i32], int_tuple![0i32, 2i32]));
+    assert_left_inverse_1d(Layout::new(int_tuple![1i32, 4i32], int_tuple![-2i32, 1i32]));
+    assert_left_inverse_coord(Layout::new(Int::<4>, BasisTerm::<i32, mode![1]>::new(0i32)));
 }
 
 #[test]
@@ -1212,17 +1222,11 @@ fn test_inverse_tilers_nil_const_eval_and_int_range() {
             int_tuple![Int::<2>, Int::<2>],
             int_tuple![Int::<1_000_000_000>, Int::<2_000_000_000>],
         ));
-    const BIG_CHAIN_GAPPED: TripleLayout<
-        Int<500_000_000>,
-        Int<4>,
-        Int<2>,
-        Int<0>,
-        Int<1>,
-        Int<2>,
-    > = left_inverse(Layout::new(
-        int_tuple![Int::<2>, Int::<2>],
-        int_tuple![Int::<500_000_000>, Int::<2_000_000_000>],
-    ));
+    const BIG_CHAIN_GAPPED: TripleLayout<Int<500_000_000>, Int<4>, Int<2>, Int<0>, Int<1>, Int<2>> =
+        left_inverse(Layout::new(
+            int_tuple![Int::<2>, Int::<2>],
+            int_tuple![Int::<500_000_000>, Int::<2_000_000_000>],
+        ));
     assert_eq!(size_of_val(&BIG_CHAIN_COALESCED), 0);
     assert_eq!(size_of_val(&BIG_CHAIN_GAPPED), 0);
 }
@@ -1310,19 +1314,13 @@ fn test_inverse_dynamic_failures() {
     // 2. Non-injective / overlapping strides
     assert!(
         std::panic::catch_unwind(|| {
-            left_inverse(Layout::new(
-                int_tuple![63i32, 2i32],
-                int_tuple![1i32, 1i32],
-            ))
+            left_inverse(Layout::new(int_tuple![63i32, 2i32], int_tuple![1i32, 1i32]))
         })
         .is_err()
     );
     assert!(
         std::panic::catch_unwind(|| {
-            left_inverse(Layout::new(
-                int_tuple![2i32, 3i32],
-                int_tuple![2i32, 1i32],
-            ))
+            left_inverse(Layout::new(int_tuple![2i32, 3i32], int_tuple![2i32, 1i32]))
         })
         .is_err()
     );
@@ -1348,19 +1346,13 @@ fn test_inverse_dynamic_failures() {
     // 3. Coprime / non-divisible ordered chain violation
     assert!(
         std::panic::catch_unwind(|| {
-            left_inverse(Layout::new(
-                int_tuple![2i32, 2i32],
-                int_tuple![2i32, 3i32],
-            ))
+            left_inverse(Layout::new(int_tuple![2i32, 2i32], int_tuple![2i32, 3i32]))
         })
         .is_err()
     );
     assert!(
         std::panic::catch_unwind(|| {
-            left_inverse(Layout::new(
-                int_tuple![4i32, 3i32],
-                int_tuple![2i32, 5i32],
-            ))
+            left_inverse(Layout::new(int_tuple![4i32, 3i32], int_tuple![2i32, 5i32]))
         })
         .is_err()
     );
@@ -1384,8 +1376,5 @@ fn test_right_inverse_panics_on_dynamic_zero_extent() {
 #[test]
 #[should_panic]
 fn test_left_inverse_panics_on_dynamic_non_injective() {
-    let _ = left_inverse(Layout::new(
-        int_tuple![4i32, 2i32],
-        int_tuple![1i32, 2i32],
-    ));
+    let _ = left_inverse(Layout::new(int_tuple![4i32, 2i32], int_tuple![1i32, 2i32]));
 }

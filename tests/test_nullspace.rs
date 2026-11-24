@@ -251,7 +251,10 @@ fn test_nullspace_coord_suite() {
     // SM70 MMA 8x8x4 C TV inverse variants
     assert_eq!(
         assert_nullspace_coord(Layout::new(
-            int_tuple![(Int::<2>, Int::<2>, Int::<2>), (Int::<2>, Int::<2>, Int::<2>)],
+            int_tuple![
+                (Int::<2>, Int::<2>, Int::<2>),
+                (Int::<2>, Int::<2>, Int::<2>)
+            ],
             tuple![
                 (e![0], Int::<2> * e![1], Int::<4> * e![0]),
                 (e![1], Int::<2> * e![0], Int::<4> * e![1]),
@@ -261,7 +264,10 @@ fn test_nullspace_coord_suite() {
     );
     assert_eq!(
         assert_nullspace_coord(Layout::new(
-            int_tuple![(Int::<2>, Int::<2>, Int::<2>), (Int::<2>, Int::<2>, Int::<2>)],
+            int_tuple![
+                (Int::<2>, Int::<2>, Int::<2>),
+                (Int::<2>, Int::<2>, Int::<2>)
+            ],
             tuple![
                 (e![0], Int::<2> * e![1], Int::<5> * e![0]),
                 (e![1], Int::<0>, Int::<5> * e![1]),
@@ -271,7 +277,10 @@ fn test_nullspace_coord_suite() {
     );
     assert_eq!(
         assert_nullspace_coord(Layout::new(
-            int_tuple![(Int::<2>, Int::<2>, Int::<2>), (Int::<2>, Int::<2>, Int::<2>)],
+            int_tuple![
+                (Int::<2>, Int::<2>, Int::<2>),
+                (Int::<2>, Int::<2>, Int::<2>)
+            ],
             tuple![
                 (e![0], Int::<0>, Int::<5> * e![0]),
                 (e![1], Int::<2> * e![0], Int::<4> * e![1]),
@@ -434,9 +443,6 @@ fn test_nullspace_panics_on_dynamic_prefix_overflow() {
 #[test]
 #[should_panic]
 fn test_nullspace_panics_on_negative_dynamic_extent() {
-    let negative = Layout::new(
-        int_tuple![-3i32, 4i32],
-        int_tuple![Int::<1>, Int::<0>],
-    );
+    let negative = Layout::new(int_tuple![-3i32, 4i32], int_tuple![Int::<1>, Int::<0>]);
     let _ = nullspace(negative);
 }

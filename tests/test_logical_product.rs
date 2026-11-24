@@ -1067,20 +1067,14 @@ fn test_blocked_and_raked_product() {
         blocked_product(tuple![Int::<2>, Int::<5>], grid),
         Layout::new(
             int_tuple![(Int::<2>, Int::<3>), (Int::<5>, Int::<4>)],
-            tuple![
-                (e!(0), Int::<5> * e!(1)),
-                (e!(1), Int::<15> * e!(1))
-            ],
+            tuple![(e!(0), Int::<5> * e!(1)), (e!(1), Int::<15> * e!(1))],
         )
     );
     assert_eq!(
         raked_product(tuple![Int::<2>, Int::<5>], grid),
         Layout::new(
             int_tuple![(Int::<3>, Int::<2>), (Int::<4>, Int::<5>)],
-            tuple![
-                (Int::<5> * e!(1), e!(0)),
-                (Int::<15> * e!(1), e!(1))
-            ],
+            tuple![(Int::<5> * e!(1), e!(0)), (Int::<15> * e!(1), e!(1))],
         )
     );
 }
@@ -1131,10 +1125,7 @@ fn test_logical_product_dynamic_and_panics() {
     // Dynamic success via free functions and Layout methods
     let dyn_a = Layout::new(3i32, Int::<1>);
     let dyn_b = Layout::new(4i32, 2i32);
-    let expected = Layout::new(
-        int_tuple![3i32, 4i32],
-        int_tuple![Int::<1>, 6i32],
-    );
+    let expected = Layout::new(int_tuple![3i32, 4i32], int_tuple![Int::<1>, 6i32]);
     assert_eq!(logical_product(dyn_a, dyn_b), expected);
     assert_eq!(dyn_a.logical_product(dyn_b), expected);
 
@@ -1148,14 +1139,8 @@ fn test_logical_product_dynamic_and_panics() {
     assert_eq!(logical_product(dyn_gap, b_static), expected_gap);
 
     // Dynamic blocked_product and raked_product
-    let dyn_tile = Layout::new(
-        int_tuple![Int::<2>, 5i32],
-        int_tuple![Int::<1>, Int::<2>],
-    );
-    let dyn_grid = Layout::new(
-        int_tuple![3i32, 4i32],
-        int_tuple![1i32, 3i32],
-    );
+    let dyn_tile = Layout::new(int_tuple![Int::<2>, 5i32], int_tuple![Int::<1>, Int::<2>]);
+    let dyn_grid = Layout::new(int_tuple![3i32, 4i32], int_tuple![1i32, 3i32]);
     let expected_bp = Layout::new(
         int_tuple![(Int::<2>, 3i32), (5i32, 4i32)],
         int_tuple![(Int::<1>, 10i32), (Int::<2>, 30i32)],
@@ -1170,10 +1155,7 @@ fn test_logical_product_dynamic_and_panics() {
     assert_eq!(dyn_tile.raked_product(dyn_grid), expected_rp);
 
     // Mode-targeted variant
-    let mode_a = Layout::new(
-        int_tuple![3i32, 5i32],
-        int_tuple![Int::<1>, Int::<20>],
-    );
+    let mode_a = Layout::new(int_tuple![3i32, 5i32], int_tuple![Int::<1>, Int::<20>]);
     assert_eq!(
         logical_product_at::<mode![0], _, _>(mode_a, dyn_b),
         mode_a.logical_product_at::<mode![0], _>(dyn_b)
@@ -1223,35 +1205,29 @@ fn test_logical_product_dynamic_and_panics() {
     // 3. Stride multiplication overflow in composition(complement(A), B)
     assert!(
         std::panic::catch_unwind(|| {
-            logical_product(
-                Layout::new(Int::<3>, Int::<1>),
-                Layout::new(4i32, int::MAX),
-            )
+            logical_product(Layout::new(Int::<3>, Int::<1>), Layout::new(4i32, int::MAX))
         })
         .is_err()
     );
     assert!(
         std::panic::catch_unwind(|| {
-            blocked_product(
-                Layout::new(Int::<3>, Int::<1>),
-                Layout::new(4i32, int::MAX),
-            )
+            blocked_product(Layout::new(Int::<3>, Int::<1>), Layout::new(4i32, int::MAX))
         })
         .is_err()
     );
     assert!(
         std::panic::catch_unwind(|| {
-            raked_product(
-                Layout::new(Int::<3>, Int::<1>),
-                Layout::new(4i32, int::MAX),
-            )
+            raked_product(Layout::new(Int::<3>, Int::<1>), Layout::new(4i32, int::MAX))
         })
         .is_err()
     );
     assert!(
         std::panic::catch_unwind(|| {
             logical_product_at::<mode![0], _, _>(
-                Layout::new(int_tuple![Int::<3>, Int::<5>], int_tuple![Int::<1>, Int::<20>]),
+                Layout::new(
+                    int_tuple![Int::<3>, Int::<5>],
+                    int_tuple![Int::<1>, Int::<20>],
+                ),
                 Layout::new(4i32, int::MAX),
             )
         })
@@ -1341,17 +1317,11 @@ fn test_logical_product_panics_on_dynamic_complement_failure() {
 #[test]
 #[should_panic]
 fn test_blocked_product_panics_on_dynamic_overflow() {
-    let _ = blocked_product(
-        Layout::new(Int::<3>, Int::<1>),
-        Layout::new(4i32, int::MAX),
-    );
+    let _ = blocked_product(Layout::new(Int::<3>, Int::<1>), Layout::new(4i32, int::MAX));
 }
 
 #[test]
 #[should_panic]
 fn test_raked_product_panics_on_dynamic_overflow() {
-    let _ = raked_product(
-        Layout::new(Int::<3>, Int::<1>),
-        Layout::new(4i32, int::MAX),
-    );
+    let _ = raked_product(Layout::new(Int::<3>, Int::<1>), Layout::new(4i32, int::MAX));
 }

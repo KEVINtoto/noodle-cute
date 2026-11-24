@@ -308,10 +308,8 @@ where
     (): [const] ValidShapeExtent<{ IS_NON_NEG::<{ DIVIDE_OUT_TRIM_S::<S0, M> }> }>,
     <D0 as StrideMul<M>>::Output: Stride<Int<{ DIVIDE_OUT_TRIM_S::<S0, M> }>>,
 {
-    type Output = Layout<
-        Til<Int<{ DIVIDE_OUT_TRIM_S::<S0, M> }>, TS>,
-        Til<<D0 as StrideMul<M>>::Output, TD>,
-    >;
+    type Output =
+        Layout<Til<Int<{ DIVIDE_OUT_TRIM_S::<S0, M> }>, TS>, Til<<D0 as StrideMul<M>>::Output, TD>>;
 
     fn divide_out_step(_: S0, head_d: D0, tail: Layout<TS, TD>, factor: M) -> Self::Output {
         Layout::new(
@@ -397,14 +395,7 @@ where
     D1: StrideScalar + Stride<S1>,
     TS: Tuple + Shape,
     TD: Tuple + Stride<TS>,
-    Layout<Til<S0, Til<S1, TS>>, Til<D0, Til<D1, TD>>>: [const] KeepModeStep<
-            S0,
-            D0,
-            Til<S1, TS>,
-            Til<D1, TD>,
-            Rem,
-            { KEEP_MODE_ACTION::<S0, Rem> },
-        >,
+    Layout<Til<S0, Til<S1, TS>>, Til<D0, Til<D1, TD>>>: [const] KeepModeStep<S0, D0, Til<S1, TS>, Til<D1, TD>, Rem, { KEEP_MODE_ACTION::<S0, Rem> }>,
 {
     type Output = <Layout<Til<S0, Til<S1, TS>>, Til<D0, Til<D1, TD>>> as KeepModeStep<
         S0,
@@ -772,7 +763,10 @@ where
     BST: Tuple + Shape,
     BDT: Tuple + Stride<BST>,
     Self: [const] Composition<Layout<BS0, BD0>, Output = Layout<HeadOutS, HeadOutD>>,
-    Self: [const] Composition<Layout<Til<BS1, BST>, Til<BD1, BDT>>, Output = Layout<TailOutS, TailOutD>>,
+    Self: [const] Composition<
+            Layout<Til<BS1, BST>, Til<BD1, BDT>>,
+            Output = Layout<TailOutS, TailOutD>,
+        >,
     HeadOutS: Shape,
     HeadOutD: Stride<HeadOutS>,
     TailOutS: Tuple + Shape,
@@ -844,7 +838,10 @@ where
     type Output = <Layout<NormS, NormD> as AtomCompose<Layout<SB, DB::Value>>>::Output;
 
     fn composition(self, b: Layout<SB, DB>) -> Self::Output {
-        assert!(b.shape.value() >= 0, "composition RHS extent must be non-negative");
+        assert!(
+            b.shape.value() >= 0,
+            "composition RHS extent must be non-negative"
+        );
         let a_coprof = self.coalesce_z();
         let sub_a = a_coprof.project_path();
         let norm_a = sub_a.coalesce_z();

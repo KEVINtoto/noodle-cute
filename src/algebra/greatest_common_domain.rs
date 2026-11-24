@@ -253,10 +253,14 @@ const impl<const LEN: usize> IntTupleOfLen<false, LEN> for ()
 where
     (): [const] IntTupleOfLen<{ IS_ZERO_USIZE::<{ DEC_USIZE::<LEN> }> }, { DEC_USIZE::<LEN> }>,
 {
-    type Tuple = Til<
-        int,
-        <() as IntTupleOfLen<{ IS_ZERO_USIZE::<{ DEC_USIZE::<LEN> }> }, { DEC_USIZE::<LEN> }>>::Tuple,
-    >;
+    type Tuple =
+        Til<
+            int,
+            <() as IntTupleOfLen<
+                { IS_ZERO_USIZE::<{ DEC_USIZE::<LEN> }> },
+                { DEC_USIZE::<LEN> },
+            >>::Tuple,
+        >;
 
     fn from_array_at<const K: usize>(arr: &[int; K], idx: usize) -> Self::Tuple {
         Til(
@@ -555,12 +559,8 @@ const fn static_lcm_or_one<PA: ShapeScalar, PB: ShapeScalar>() -> int {
     }
 }
 
-const fn static_gcd_parts<
-    PA: ShapeScalar,
-    PB: ShapeScalar,
-    AH: ShapeScalar,
-    BH: ShapeScalar,
->() -> (int, int, int, int) {
+const fn static_gcd_parts<PA: ShapeScalar, PB: ShapeScalar, AH: ShapeScalar, BH: ShapeScalar>()
+-> (int, int, int, int) {
     let (Some(p_a), Some(p_b), Some(a), Some(b)) = (
         PA::STATIC_VALUE,
         PB::STATIC_VALUE,

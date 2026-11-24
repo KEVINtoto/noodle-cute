@@ -332,7 +332,10 @@ fn test_zipped_divide_mode() {
 
     let r = zipped_divide_at::<mode![0], _, _>(a, tiler);
     assert_eq!(r.get::<0>().rank(), 2);
-    assert!(compatible(&tiler_to_layout(tiler).shape(), &r.get::<0>().get::<0>().shape()));
+    assert!(compatible(
+        &tiler_to_layout(tiler).shape(),
+        &r.get::<0>().get::<0>().shape()
+    ));
 }
 
 #[test]
@@ -344,7 +347,10 @@ fn test_logical_divide_types() {
 
     assert_eq!(
         logical_divide(Int::<6>, Layout::new(Int::<2>, Int::<1>)),
-        logical_divide(Layout::new(Int::<6>, Int::<1>), Layout::new(Int::<2>, Int::<1>))
+        logical_divide(
+            Layout::new(Int::<6>, Int::<1>),
+            Layout::new(Int::<2>, Int::<1>)
+        )
     );
     assert_eq!(
         logical_divide(tuple![Int::<6>, Int::<4>], Layout::new(Int::<2>, Int::<1>)),
@@ -356,7 +362,10 @@ fn test_logical_divide_types() {
 
     assert_eq!(
         logical_divide(Nil, Layout::new(Int::<2>, Int::<1>)),
-        Layout::new(int_tuple![Int::<2>, Int::<1>], int_tuple![Int::<1>, Int::<2>])
+        Layout::new(
+            int_tuple![Int::<2>, Int::<1>],
+            int_tuple![Int::<1>, Int::<2>]
+        )
     );
     assert_eq!(
         logical_divide(Nil, tuple![Int::<3>, Int::<5>]),
@@ -375,7 +384,10 @@ fn test_logical_divide_types() {
     );
     assert_eq!(
         zipped_divide(Nil, Layout::new(Int::<2>, Int::<1>)),
-        Layout::new(int_tuple![Int::<2>, Int::<1>], int_tuple![Int::<1>, Int::<2>])
+        Layout::new(
+            int_tuple![Int::<2>, Int::<1>],
+            int_tuple![Int::<1>, Int::<2>]
+        )
     );
     assert_eq!(
         zipped_divide(Nil, tuple![Int::<3>, Int::<5>]),
@@ -393,7 +405,10 @@ fn test_logical_divide_types() {
         )
     );
     assert_eq!(
-        logical_divide(Layout::from_shape(Int::<24>), Layout::new(Int::<4>, Int::<2>)),
+        logical_divide(
+            Layout::from_shape(Int::<24>),
+            Layout::new(Int::<4>, Int::<2>)
+        ),
         Layout::new(
             int_tuple![Int::<4>, (Int::<2>, Int::<3>)],
             int_tuple![Int::<2>, (Int::<1>, Int::<8>)],
@@ -425,7 +440,10 @@ fn test_logical_divide_arg_matrix() {
     assert_eq!(logical_divide(Nil, Nil), Nil);
     assert_eq!(
         logical_divide(Nil, Int::<2>),
-        Layout::new(int_tuple![Int::<2>, Int::<1>], int_tuple![Int::<1>, Int::<2>])
+        Layout::new(
+            int_tuple![Int::<2>, Int::<1>],
+            int_tuple![Int::<1>, Int::<2>]
+        )
     );
     assert_eq!(
         logical_divide(Nil, tuple![Int::<2>, Int::<2>]),
@@ -436,7 +454,10 @@ fn test_logical_divide_arg_matrix() {
     );
     assert_eq!(
         logical_divide(Nil, Layout::new(Int::<2>, Int::<1>)),
-        Layout::new(int_tuple![Int::<2>, Int::<1>], int_tuple![Int::<1>, Int::<2>])
+        Layout::new(
+            int_tuple![Int::<2>, Int::<1>],
+            int_tuple![Int::<1>, Int::<2>]
+        )
     );
     assert_eq!(
         logical_divide(
@@ -456,14 +477,23 @@ fn test_logical_divide_arg_matrix() {
     );
 
     // A = Int<24>
-    assert_eq!(logical_divide(Int::<24>, Nil), Layout::new(Int::<24>, Int::<1>));
+    assert_eq!(
+        logical_divide(Int::<24>, Nil),
+        Layout::new(Int::<24>, Int::<1>)
+    );
     assert_eq!(
         logical_divide(Int::<24>, Int::<2>),
-        Layout::new(int_tuple![Int::<2>, Int::<12>], int_tuple![Int::<1>, Int::<2>])
+        Layout::new(
+            int_tuple![Int::<2>, Int::<12>],
+            int_tuple![Int::<1>, Int::<2>]
+        )
     );
     assert_eq!(
         logical_divide(Int::<24>, Layout::new(Int::<2>, Int::<1>)),
-        Layout::new(int_tuple![Int::<2>, Int::<12>], int_tuple![Int::<1>, Int::<2>])
+        Layout::new(
+            int_tuple![Int::<2>, Int::<12>],
+            int_tuple![Int::<1>, Int::<2>]
+        )
     );
 
     // A = (6, 4)
@@ -752,12 +782,8 @@ fn test_logical_divide_is_composition_with_complement() {
 #[test]
 fn test_logical_divide_const_eval() {
     type PairLayout<S0, S1, D0, D1> = Layout<Til<S0, Til<S1, Nil>>, Til<D0, Til<D1, Nil>>>;
-    type DividedLayout = PairLayout<
-        Int<4>,
-        Til<Int<2>, Til<Int<3>, Nil>>,
-        Int<2>,
-        Til<Int<1>, Til<Int<8>, Nil>>,
-    >;
+    type DividedLayout =
+        PairLayout<Int<4>, Til<Int<2>, Til<Int<3>, Nil>>, Int<2>, Til<Int<1>, Til<Int<8>, Nil>>>;
 
     const A: Layout<Int<24>, Int<1>> = Layout::new(Int::<24>, Int::<1>);
     const B: Layout<Int<4>, Int<2>> = Layout::new(Int::<4>, Int::<2>);
@@ -765,8 +791,10 @@ fn test_logical_divide_const_eval() {
     const ZD: DividedLayout = zipped_divide(A, B);
     assert_eq!(LD, ZD);
 
-    const PAIR: PairLayout<Int<6>, Int<4>, Int<4>, Int<1>> =
-        Layout::new(int_tuple![Int::<6>, Int::<4>], int_tuple![Int::<4>, Int::<1>]);
+    const PAIR: PairLayout<Int<6>, Int<4>, Int<4>, Int<1>> = Layout::new(
+        int_tuple![Int::<6>, Int::<4>],
+        int_tuple![Int::<4>, Int::<1>],
+    );
     const {
         assert!(
             logical_divide_at::<mode![0], _, _>(PAIR, Layout::new(Int::<2>, Int::<1>))

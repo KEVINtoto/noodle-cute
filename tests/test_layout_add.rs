@@ -220,19 +220,22 @@ where
 #[test]
 fn test_singleton_and_zero_stride_broadcast() {
     // Size-1 layouts evaluate to 0 regardless of stride
-    let r = assert_layout_add_int(Layout::new(Int::<1>, Int::<0>), Layout::new(Int::<1>, Int::<0>));
+    let r = assert_layout_add_int(
+        Layout::new(Int::<1>, Int::<0>),
+        Layout::new(Int::<1>, Int::<0>),
+    );
     assert_eq!(r.size(), 1);
     assert_eq!(r, Layout::new(Int::<1>, Int::<0>));
 
-    let r = assert_layout_add_int(Layout::new(Int::<1>, Int::<5>), Layout::new(Int::<1>, Int::<7>));
+    let r = assert_layout_add_int(
+        Layout::new(Int::<1>, Int::<5>),
+        Layout::new(Int::<1>, Int::<7>),
+    );
     assert_eq!(r.size(), 1);
     assert_eq!(r, Layout::new(Int::<1>, Int::<0>));
 
     // Singleton with F2 and Basis strides
-    let r_f2 = assert_layout_add_basis(
-        Layout::new(Int::<1>, f2(7)),
-        Layout::new(Int::<1>, f2(3)),
-    );
+    let r_f2 = assert_layout_add_basis(Layout::new(Int::<1>, f2(7)), Layout::new(Int::<1>, f2(3)));
     assert_eq!(r_f2.size(), 1);
 
     let r_at = assert_layout_add_basis(
@@ -243,11 +246,17 @@ fn test_singleton_and_zero_stride_broadcast() {
 
     // Zero-stride broadcast identity
     assert_eq!(
-        assert_layout_add_int(Layout::new(Int::<5>, Int::<0>), Layout::new(Int::<5>, Int::<1>)),
+        assert_layout_add_int(
+            Layout::new(Int::<5>, Int::<0>),
+            Layout::new(Int::<5>, Int::<1>)
+        ),
         Layout::new(Int::<5>, Int::<1>)
     );
     assert_eq!(
-        assert_layout_add_int(Layout::new(Int::<5>, Int::<0>), Layout::new(Int::<5>, Int::<0>)),
+        assert_layout_add_int(
+            Layout::new(Int::<5>, Int::<0>),
+            Layout::new(Int::<5>, Int::<0>)
+        ),
         Layout::new(Int::<5>, Int::<0>)
     );
 }
@@ -264,26 +273,50 @@ fn test_int_strides_suite() {
     );
     assert_eq!(
         assert_layout_add_int(
-            Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<1>, Int::<4>]),
-            Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<1>, Int::<4>]),
+            Layout::new(
+                int_tuple![Int::<4>, Int::<3>],
+                int_tuple![Int::<1>, Int::<4>]
+            ),
+            Layout::new(
+                int_tuple![Int::<4>, Int::<3>],
+                int_tuple![Int::<1>, Int::<4>]
+            ),
         ),
         Layout::new(Int::<12>, Int::<2>)
     );
     assert_eq!(
         assert_layout_add_int(
-            Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<3>, Int::<1>]),
-            Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<3>, Int::<1>]),
+            Layout::new(
+                int_tuple![Int::<4>, Int::<3>],
+                int_tuple![Int::<3>, Int::<1>]
+            ),
+            Layout::new(
+                int_tuple![Int::<4>, Int::<3>],
+                int_tuple![Int::<3>, Int::<1>]
+            ),
         ),
-        Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<6>, Int::<2>])
+        Layout::new(
+            int_tuple![Int::<4>, Int::<3>],
+            int_tuple![Int::<6>, Int::<2>]
+        )
     );
 
     // Same shape, diff stride
     assert_eq!(
         assert_layout_add_int(
-            Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<1>, Int::<4>]),
-            Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<3>, Int::<1>]),
+            Layout::new(
+                int_tuple![Int::<4>, Int::<3>],
+                int_tuple![Int::<1>, Int::<4>]
+            ),
+            Layout::new(
+                int_tuple![Int::<4>, Int::<3>],
+                int_tuple![Int::<3>, Int::<1>]
+            ),
         ),
-        Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<4>, Int::<5>])
+        Layout::new(
+            int_tuple![Int::<4>, Int::<3>],
+            int_tuple![Int::<4>, Int::<5>]
+        )
     );
     assert_eq!(
         assert_layout_add_int(
@@ -310,7 +343,10 @@ fn test_int_strides_suite() {
     assert_eq!(
         assert_layout_add_int(
             Layout::new(int_tuple![Int::<6>], int_tuple![Int::<1>]),
-            Layout::new(int_tuple![Int::<3>, Int::<2>], int_tuple![Int::<1>, Int::<3>]),
+            Layout::new(
+                int_tuple![Int::<3>, Int::<2>],
+                int_tuple![Int::<1>, Int::<3>]
+            ),
         ),
         Layout::new(Int::<6>, Int::<2>)
     );
@@ -319,16 +355,28 @@ fn test_int_strides_suite() {
     assert_eq!(
         assert_layout_add_int(
             Layout::new(int_tuple![Int::<6>], int_tuple![Int::<1>]),
-            Layout::new(int_tuple![Int::<3>, Int::<2>], int_tuple![Int::<2>, Int::<1>]),
+            Layout::new(
+                int_tuple![Int::<3>, Int::<2>],
+                int_tuple![Int::<2>, Int::<1>]
+            ),
         ),
-        Layout::new(int_tuple![Int::<3>, Int::<2>], int_tuple![Int::<3>, Int::<4>])
+        Layout::new(
+            int_tuple![Int::<3>, Int::<2>],
+            int_tuple![Int::<3>, Int::<4>]
+        )
     );
     assert_eq!(
         assert_layout_add_int(
             Layout::new(Int::<12>, Int::<2>),
-            Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<3>, Int::<1>]),
+            Layout::new(
+                int_tuple![Int::<4>, Int::<3>],
+                int_tuple![Int::<3>, Int::<1>]
+            ),
         ),
-        Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<5>, Int::<9>])
+        Layout::new(
+            int_tuple![Int::<4>, Int::<3>],
+            int_tuple![Int::<5>, Int::<9>]
+        )
     );
 
     // Nested shapes
@@ -352,25 +400,46 @@ fn test_int_strides_suite() {
     // Zero stride in one mode
     assert_eq!(
         assert_layout_add_int(
-            Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<1>, Int::<0>]),
-            Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<3>, Int::<1>]),
+            Layout::new(
+                int_tuple![Int::<4>, Int::<3>],
+                int_tuple![Int::<1>, Int::<0>]
+            ),
+            Layout::new(
+                int_tuple![Int::<4>, Int::<3>],
+                int_tuple![Int::<3>, Int::<1>]
+            ),
         ),
-        Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<4>, Int::<1>])
+        Layout::new(
+            int_tuple![Int::<4>, Int::<3>],
+            int_tuple![Int::<4>, Int::<1>]
+        )
     );
 
     // Cancellation & coalescing after addition: (4,3):(3,1) + (4,3):(-2,3) -> (4,3):(1,4) -> 12:1
     assert_eq!(
         assert_layout_add_int(
-            Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<3>, Int::<1>]),
-            Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<-2>, Int::<3>]),
+            Layout::new(
+                int_tuple![Int::<4>, Int::<3>],
+                int_tuple![Int::<3>, Int::<1>]
+            ),
+            Layout::new(
+                int_tuple![Int::<4>, Int::<3>],
+                int_tuple![Int::<-2>, Int::<3>]
+            ),
         ),
         Layout::new(Int::<12>, Int::<1>)
     );
     // Exact cancellation to zero coalesces multi-mode to 12:0
     assert_eq!(
         assert_layout_add_int(
-            Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<3>, Int::<1>]),
-            Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<-3>, Int::<-1>]),
+            Layout::new(
+                int_tuple![Int::<4>, Int::<3>],
+                int_tuple![Int::<3>, Int::<1>]
+            ),
+            Layout::new(
+                int_tuple![Int::<4>, Int::<3>],
+                int_tuple![Int::<-3>, Int::<-1>]
+            ),
         ),
         Layout::new(Int::<12>, Int::<0>)
     );
@@ -387,10 +456,7 @@ fn test_int_strides_suite() {
 #[test]
 fn test_basis_strides_suite() {
     // Disjoint basis paths: E(0) + E(1)
-    let r = assert_layout_add_basis(
-        Layout::new(Int::<8>, e![0]),
-        Layout::new(Int::<8>, e![1]),
-    );
+    let r = assert_layout_add_basis(Layout::new(Int::<8>, e![0]), Layout::new(Int::<8>, e![1]));
     assert_eq!(r, Layout::new(Int::<8>, e![0] + e![1]));
     for i in 0..8i32 {
         assert!(basis_eq(r(i), basis_tuple![i, i]));
@@ -484,7 +550,10 @@ fn test_f2_strides_and_algebraic_properties() {
     // F2(0) identity and universal Int<0> identity
     let a = Layout::new(Int::<8>, f2(7));
     assert_eq!(assert_layout_add_basis(a, Layout::new(Int::<8>, f2(0))), a);
-    assert_eq!(assert_layout_add_basis(a, Layout::new(Int::<8>, Int::<0>)), a);
+    assert_eq!(
+        assert_layout_add_basis(a, Layout::new(Int::<8>, Int::<0>)),
+        a
+    );
 
     // Multi-mode F2 strides
     assert_eq!(
@@ -544,14 +613,23 @@ fn test_f2_strides_and_algebraic_properties() {
 
 #[test]
 fn test_layout_add_by_mode_profile() {
-    let a = Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<1>, Int::<4>]);
-    let b = Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<3>, Int::<1>]);
+    let a = Layout::new(
+        int_tuple![Int::<4>, Int::<3>],
+        int_tuple![Int::<1>, Int::<4>],
+    );
+    let b = Layout::new(
+        int_tuple![Int::<4>, Int::<3>],
+        int_tuple![Int::<3>, Int::<1>],
+    );
 
     // By-mode keeps axes
     let r = layout_add_with_profile(a, b, int_tuple![1, 1]);
     assert_eq!(
         r,
-        Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<4>, Int::<5>])
+        Layout::new(
+            int_tuple![Int::<4>, Int::<3>],
+            int_tuple![Int::<4>, Int::<5>]
+        )
     );
     assert_congruent(&a.shape(), &r.shape());
 
@@ -560,7 +638,10 @@ fn test_layout_add_by_mode_profile() {
     let whole = layout_add(a, a);
     assert_eq!(
         by_mode,
-        Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<2>, Int::<8>])
+        Layout::new(
+            int_tuple![Int::<4>, Int::<3>],
+            int_tuple![Int::<2>, Int::<8>]
+        )
     );
     assert_eq!(whole, Layout::new(Int::<12>, Int::<2>));
     assert_congruent(&a.shape(), &by_mode.shape());
@@ -575,8 +656,14 @@ fn test_layout_add_by_mode_profile() {
         layout_add_with_profile(a, b, int_tuple![1, 1]),
         layout_add_with_profile(b, a, int_tuple![1, 1])
     );
-    let p_a = Layout::new(int_tuple![Int::<5>, Int::<3>], int_tuple![Int::<3>, Int::<1>]);
-    let p_b = Layout::new(int_tuple![Int::<5>, Int::<3>], int_tuple![Int::<1>, Int::<5>]);
+    let p_a = Layout::new(
+        int_tuple![Int::<5>, Int::<3>],
+        int_tuple![Int::<3>, Int::<1>],
+    );
+    let p_b = Layout::new(
+        int_tuple![Int::<5>, Int::<3>],
+        int_tuple![Int::<1>, Int::<5>],
+    );
     let p_r = layout_add_with_profile(p_a, p_b, int_tuple![1, 1]);
     for i in 0..5i32 {
         for j in 0..3i32 {
@@ -636,14 +723,26 @@ fn test_const_eval_associativity_and_dynamic() {
 
     // Const evaluation & zero-sized static output
     const SUM_CONST: PairLayout<Int<4>, Int<3>, Int<4>, Int<5>> = layout_add(
-        Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<1>, Int::<4>]),
-        Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<3>, Int::<1>]),
+        Layout::new(
+            int_tuple![Int::<4>, Int::<3>],
+            int_tuple![Int::<1>, Int::<4>],
+        ),
+        Layout::new(
+            int_tuple![Int::<4>, Int::<3>],
+            int_tuple![Int::<3>, Int::<1>],
+        ),
     );
     assert_eq!(size_of_val(&SUM_CONST), 0);
 
     // Associativity across int layouts of size 12
-    let a = Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<1>, Int::<4>]);
-    let b = Layout::new(int_tuple![Int::<4>, Int::<3>], int_tuple![Int::<3>, Int::<1>]);
+    let a = Layout::new(
+        int_tuple![Int::<4>, Int::<3>],
+        int_tuple![Int::<1>, Int::<4>],
+    );
+    let b = Layout::new(
+        int_tuple![Int::<4>, Int::<3>],
+        int_tuple![Int::<3>, Int::<1>],
+    );
     let c = Layout::new(
         int_tuple![(Int::<2>, Int::<2>), Int::<3>],
         int_tuple![(Int::<2>, Int::<1>), Int::<4>],
@@ -737,10 +836,7 @@ fn test_layout_add_dynamic_failures() {
     // Dynamic stride addition overflow
     assert!(
         std::panic::catch_unwind(|| {
-            layout_add(
-                Layout::new(Int::<4>, int::MAX),
-                Layout::new(Int::<4>, 1i32),
-            )
+            layout_add(Layout::new(Int::<4>, int::MAX), Layout::new(Int::<4>, 1i32))
         })
         .is_err()
     );
