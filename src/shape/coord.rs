@@ -34,6 +34,7 @@
 //!   in `shape` yields `false` under [`in_bounds`].
 
 use core::iter::FusedIterator;
+use core::ops::RangeFull;
 
 use crate::basis::{
     BasisCoeff, BasisCoeffAdd, BasisCoeffMul, BasisCombination, BasisPath, BasisTerm, BasisTuple,
@@ -43,7 +44,7 @@ use crate::integer::{
     ArithFloorDivMod, FloorQuotient, FloorRemainder, INCREASE, Int, Integer, floor_divmod, ge, int,
     lt,
 };
-use crate::tuple::{FlatTuple, Item, Leaf, Nil, Til, Tuple, TupleProduct};
+use crate::tuple::{FlatTuple, Item, Leaf, Nil, RepeatLike, Til, Tuple, TupleProduct, repeat_like};
 
 use super::{Shape, ShapeScalar};
 
@@ -234,6 +235,17 @@ const impl<S: [const] ShapeScalar, I: [const] Integer> IndexToCoord<S> for I {
     fn index_to_coord(self, shape: &S) -> Self::Output {
         let _ = shape.size();
         self
+    }
+}
+
+const impl<S> IndexToCoord<S> for RangeFull
+where
+    S: [const] Shape + [const] RepeatLike<Int<0>>,
+{
+    type Output = <S as RepeatLike<Int<0>>>::Output;
+    fn index_to_coord(self, shape: &S) -> Self::Output {
+        let _ = shape.has_zero();
+        repeat_like(Int::<0>, shape)
     }
 }
 

@@ -228,9 +228,9 @@ fn test_f2_basis_shape_and_stride_integration() {
 
     // 2. shape: idx2crd / crd2idx / in_bounds for F2
     let s48 = int_tuple![Int::<4>, Int::<8>];
-    const C48: noodle_cute::tuple::TupleContainer<
+    const C48: noodle_cute::tuple::Til<
         StaticF2<0b10>,
-        noodle_cute::tuple::TupleContainer<StaticF2<0b101>, noodle_cute::tuple::Nil>,
+        noodle_cute::tuple::Til<StaticF2<0b101>, noodle_cute::tuple::Nil>,
     > = idx2crd(f2(Int::<0b10110>), &int_tuple![Int::<4>, Int::<8>]);
     assert_eq!(C48, tuple![f2(Int::<0b10>), f2(Int::<0b101>)]);
     assert_eq!(crd2idx(C48, &s48), f2(Int::<0b10110>));
@@ -472,10 +472,8 @@ fn test_f2_layout_and_core_algebra() {
 #[test]
 fn test_f2_right_and_left_inverse() {
     // 1. Self-inverse 8x8 swizzle: right_inverse((8, 8):(F1, F9)) == (8, 8):(F1, F9)
-    type Pair<A, B> = noodle_cute::tuple::TupleContainer<
-        A,
-        noodle_cute::tuple::TupleContainer<B, noodle_cute::tuple::Nil>,
-    >;
+    type Pair<A, B> =
+        noodle_cute::tuple::Til<A, noodle_cute::tuple::Til<B, noodle_cute::tuple::Nil>>;
     type Sw88Layout = Layout<Pair<Int<8>, Int<8>>, Pair<StaticF2<1>, StaticF2<9>>>;
     const SW88: Sw88Layout = Layout::new(
         int_tuple![Int::<8>, Int::<8>],

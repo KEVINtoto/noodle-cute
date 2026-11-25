@@ -17,19 +17,14 @@ use noodle_cute::integer::{Int, Integer, eq as int_eq, int};
 use noodle_cute::layout::{Coprofile, Layout, tiler_to_layout};
 use noodle_cute::shape::{IndexToCoord, Shape};
 use noodle_cute::stride::{InnerProduct, Stride};
-use noodle_cute::tuple::{Item, Nil, TupleContainer, WeaklyCongruent};
+use noodle_cute::tuple::{Item, Nil, Til, WeaklyCongruent};
 use noodle_cute::{e, int_tuple, make_layout, mode, tuple};
 
 // Post-condition checkers mirroring `test_inverse_right.py` & `test_inverse_left.py`
 
-type PairLayout<S0, S1, D0, D1> = Layout<
-    TupleContainer<S0, TupleContainer<S1, Nil>>,
-    TupleContainer<D0, TupleContainer<D1, Nil>>,
->;
-type TripleLayout<S0, S1, S2, D0, D1, D2> = Layout<
-    TupleContainer<S0, TupleContainer<S1, TupleContainer<S2, Nil>>>,
-    TupleContainer<D0, TupleContainer<D1, TupleContainer<D2, Nil>>>,
->;
+type PairLayout<S0, S1, D0, D1> = Layout<Til<S0, Til<S1, Nil>>, Til<D0, Til<D1, Nil>>>;
+type TripleLayout<S0, S1, S2, D0, D1, D2> =
+    Layout<Til<S0, Til<S1, Til<S2, Nil>>>, Til<D0, Til<D1, Til<D2, Nil>>>>;
 
 fn assert_weak_congruent<A: WeaklyCongruent<B>, B: Item>(_: &A, _: &B) {}
 

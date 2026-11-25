@@ -71,9 +71,9 @@ use crate::tuple::{Get, Item, Lift, Nil, ReplaceAt, Til, Tuple, Wrap, lift};
 use super::complement::{Complement, ComplementWith};
 use super::composition::Composition;
 
-/// Splits layout `self` by tiler `B`: $A \oslash B = A \circ (B, B^*)$.
+/// Splits layout or tensor `self` by tiler `B`: $A \oslash B = A \circ (B, B^*)$.
 pub const trait LogicalDivide<B>: Copy {
-    /// Resulting divided [`Layout`] (or [`Nil`] when both `self` and `B` are [`Nil`]).
+    /// Resulting divided [`Layout`], [`Tensor`](crate::tensor::Tensor), or [`Nil`].
     type Output: Copy;
 
     /// Computes logical division, panicking on dynamic failure or overflow.
@@ -82,7 +82,7 @@ pub const trait LogicalDivide<B>: Copy {
 
 /// Promotes tiler `B` via [`tiler_to_layout`] before dividing, regrouping modes as `(Tile, Grid)`.
 pub const trait ZippedDivide<B>: Copy {
-    /// Resulting `(Tile, Grid)` layout (or [`Nil`]).
+    /// Resulting `(Tile, Grid)` layout, tensor, or [`Nil`].
     type Output: Copy;
 
     /// Computes zipped division, panicking on dynamic failure or overflow.
@@ -91,7 +91,7 @@ pub const trait ZippedDivide<B>: Copy {
 
 /// Applies [`LogicalDivide`] only to the sub-mode selected by type-level `Path` ([`Mode`] / [`ModeEnd`]).
 pub const trait LogicalDivideAt<B, Path>: Copy {
-    /// Resulting layout with only `Path` divided and all sibling modes preserved.
+    /// Resulting layout or tensor with only `Path` divided and all sibling modes preserved.
     type Output: Copy;
 
     /// Mode-targeted logical division.
@@ -100,7 +100,7 @@ pub const trait LogicalDivideAt<B, Path>: Copy {
 
 /// Applies [`ZippedDivide`] only to the sub-mode selected by type-level `Path` ([`Mode`] / [`ModeEnd`]).
 pub const trait ZippedDivideAt<B, Path>: Copy {
-    /// Resulting layout with `Path` zipped-divided and all sibling modes preserved.
+    /// Resulting layout or tensor with `Path` zipped-divided and all sibling modes preserved.
     type Output: Copy;
 
     /// Mode-targeted zipped division.

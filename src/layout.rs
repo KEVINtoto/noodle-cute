@@ -54,10 +54,12 @@ use crate::integer::{Int, int};
 use crate::shape::{IndexToCoord, Shape};
 use crate::slice::Slice;
 use crate::stride::{
-    Coshape, InnerProduct, PrefixProduct, Stride, inner_product, prefix_product,
+    Coshape, InnerProduct, LinearBounds, PrefixProduct, Stride, inner_product, prefix_product,
     prefix_product_with, same_path,
 };
-use crate::tuple::{Flatten, Get, GetOutput, Item, LeafProfile, Nil, SliceRange, Til, Wrap};
+use crate::tuple::{
+    Flatten, Get, GetOutput, Item, LeafProfile, Nil, SliceBy, SliceRange, Til, Wrap, slice_by,
+};
 
 pub mod order;
 pub mod recast;
@@ -184,6 +186,60 @@ const impl<H: Copy, T: Copy> IsLayout for Til<H, T> {
     const IS_LAYOUT: bool = false;
 }
 
+const impl IsLayout for core::ops::RangeFull {
+    const IS_LAYOUT: bool = false;
+}
+
+/// Evaluates a coordinate (possibly containing `..` wildcards) to a codomain offset
+/// and slices the layout to the modes left unnamed by `..`.
+///
+/// Mirrors PyCuTe's `Layout._offset_and_slice(crd)`: when `C` contains no `..`
+/// wildcards, `SlicedShape` and `SlicedStride` are both [`Nil`] (rank 0).
+pub const trait OffsetAndSlice<C> {
+    /// Evaluated codomain offset type.
+    type Offset: Copy;
+    /// Shape of the residual sliced layout ([`Nil`] for complete coordinates).
+    type SlicedShape: [const] Shape;
+    /// Stride of the residual sliced layout ([`Nil`] for complete coordinates).
+    type SlicedStride: Stride<Self::SlicedShape>;
+
+    /// Evaluates `coord` and returns `(offset, sliced_layout)`.
+    fn offset_and_slice(
+        &self,
+        coord: C,
+    ) -> (Self::Offset, Layout<Self::SlicedShape, Self::SlicedStride>);
+}
+
+/// Output `(offset, sliced_layout)` pair produced by [`OffsetAndSlice`].
+pub type OffsetAndSliceOutput<L, C> = (
+    <L as OffsetAndSlice<C>>::Offset,
+    Layout<<L as OffsetAndSlice<C>>::SlicedShape, <L as OffsetAndSlice<C>>::SlicedStride>,
+);
+
+const impl<S, D, C> OffsetAndSlice<C> for Layout<S, D>
+where
+    S: [const] Shape,
+    D: [const] Stride<S>,
+    C: Copy + [const] IndexToCoord<S> + [const] SliceBy<S> + [const] SliceBy<D>,
+    <C as IndexToCoord<S>>::Output: [const] InnerProduct<D>,
+    <C as SliceBy<S>>::Output: [const] Shape,
+    <C as SliceBy<D>>::Output: Stride<<C as SliceBy<S>>::Output>,
+{
+    type Offset = <<C as IndexToCoord<S>>::Output as InnerProduct<D>>::Output;
+    type SlicedShape = <C as SliceBy<S>>::Output;
+    type SlicedStride = <C as SliceBy<D>>::Output;
+
+    fn offset_and_slice(
+        &self,
+        coord: C,
+    ) -> (Self::Offset, Layout<Self::SlicedShape, Self::SlicedStride>) {
+        let offset = self.call(coord);
+        let sliced_shape = slice_by(&coord, &self.shape);
+        let sliced_stride = slice_by(&coord, &self.stride);
+        (offset, Layout::new(sliced_shape, sliced_stride))
+    }
+}
+
 impl<S, D> Layout<S, D> {
     /// Creates a new layout directly from a congruent `(shape, stride)` pair.
     pub const fn new(shape: S, stride: D) -> Self
@@ -280,6 +336,16 @@ impl<S, D> Layout<S, D> {
         self.shape.coshape(self.stride)
     }
 
+    /// Computes the exact closed `[min_offset, max_offset]` interval reachable by all
+    /// in-bounds coordinates of a linear-strided layout, or `None` when the domain is empty.
+    pub const fn linear_bounds(&self) -> Option<(int, int)>
+    where
+        S: [const] LinearBounds<D>,
+        D: Stride<S>,
+    {
+        self.shape.linear_bounds(self.stride)
+    }
+
     /// Computes the total size of the codomain (`size(coshape(self))`).
     pub const fn cosize(&self) -> int
     where
@@ -310,6 +376,15 @@ impl<S, D> Layout<S, D> {
         <C as IndexToCoord<S>>::Output: [const] InnerProduct<D>,
     {
         inner_product(crate::shape::idx2crd(coord, &self.shape), self.stride)
+    }
+
+    /// Evaluates `coord` (which may contain `..` wildcards) to a codomain offset and
+    /// returns `(offset, sliced_layout)` retaining the modes marked with `..`.
+    pub const fn offset_and_slice<C>(&self, coord: C) -> OffsetAndSliceOutput<Self, C>
+    where
+        Self: [const] OffsetAndSlice<C>,
+    {
+        OffsetAndSlice::offset_and_slice(self, coord)
     }
 
     /// Copies the sublayout at top-level mode `I` (supporting negative indices).

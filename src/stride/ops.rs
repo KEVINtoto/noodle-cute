@@ -17,16 +17,16 @@
 //! use noodle_cute::basis::{Mode, ScaledBasis};
 //! use noodle_cute::integer::Int;
 //! use noodle_cute::stride::{Accumulate, ScaleStride, StrideMul};
-//! use noodle_cute::tuple::{Nil, TupleContainer};
+//! use noodle_cute::tuple::{Nil, Til};
 //!
 //! assert_eq!(Int::<3>.stride_mul(Int::<4>), Int::<12>);
 //! let b0 = ScaledBasis::<Int<1>, Mode<0>>::new(Int::<1>);
 //! assert_eq!(Int::<0>.accumulate(b0), b0);
 //! assert_eq!(
-//!     TupleContainer::new(Int::<2>, TupleContainer::new(Int::<3>, Nil)).scale_stride(b0),
-//!     TupleContainer::new(
+//!     Til::new(Int::<2>, Til::new(Int::<3>, Nil)).scale_stride(b0),
+//!     Til::new(
 //!         ScaledBasis::<Int<2>, Mode<0>>::new(Int::<2>),
-//!         TupleContainer::new(ScaledBasis::<Int<3>, Mode<0>>::new(Int::<3>), Nil),
+//!         Til::new(ScaledBasis::<Int<3>, Mode<0>>::new(Int::<3>), Nil),
 //!     )
 //! );
 //! ```
@@ -499,18 +499,18 @@ where
 /// use noodle_cute::basis::{Mode, ScaledBasis};
 /// use noodle_cute::integer::Int;
 /// use noodle_cute::stride::ScaleStride;
-/// use noodle_cute::tuple::{Nil, TupleContainer};
+/// use noodle_cute::tuple::{Nil, Til};
 ///
-/// let s = TupleContainer::new(
+/// let s = Til::new(
 ///     ScaledBasis::<Int<2>, Mode<0>>::new(Int::<2>),
-///     TupleContainer::new(ScaledBasis::<Int<3>, Mode<1>>::new(Int::<3>), Nil),
+///     Til::new(ScaledBasis::<Int<3>, Mode<1>>::new(Int::<3>), Nil),
 /// );
 /// let scaled = s.scale_stride(Int::<4>);
 /// assert_eq!(
 ///     scaled,
-///     TupleContainer::new(
+///     Til::new(
 ///         ScaledBasis::<Int<8>, Mode<0>>::new(Int::<8>),
-///         TupleContainer::new(ScaledBasis::<Int<12>, Mode<1>>::new(Int::<12>), Nil),
+///         Til::new(ScaledBasis::<Int<12>, Mode<1>>::new(Int::<12>), Nil),
 ///     )
 /// );
 /// ```

@@ -487,11 +487,11 @@ where
 /// use noodle_cute::int_tuple;
 /// use noodle_cute::integer::Int;
 /// use noodle_cute::layout::Layout;
-/// use noodle_cute::tuple::{Nil, TupleContainer};
+/// use noodle_cute::tuple::{Nil, Til};
 ///
 /// const L: Layout<
-///     TupleContainer<Int<2>, TupleContainer<Int<4>, Nil>>,
-///     TupleContainer<Int<1>, TupleContainer<Int<2>, Nil>>,
+///     Til<Int<2>, Til<Int<4>, Nil>>,
+///     Til<Int<1>, Til<Int<2>, Nil>>,
 /// > = Layout::new(
 ///     int_tuple![Int::<2>, Int::<4>],
 ///     int_tuple![Int::<1>, Int::<2>],
@@ -655,24 +655,71 @@ impl<S, D> Layout<S, D> {
     }
 }
 
-/// Flattens and coalesces `layout` over its coordinate domain (dropping trailing unit modes).
-pub const fn coalesce<S, D>(layout: Layout<S, D>) -> Coalesced<S::Output, D::Output, false>
-where
-    S: [const] Flatten,
-    D: [const] Flatten,
-    Layout<S::Output, D::Output>: [const] Coalesce,
-{
-    layout.coalesce()
+/// High-level coalescing interface implemented for [`Layout`] (flattening before folding)
+/// and [`Tensor`](crate::tensor::Tensor) (coalescing the tensor's layout while keeping its accessor).
+pub const trait CoalesceTarget<const EXTENDED: bool = false>: Copy {
+    /// Resulting coalesced layout or tensor type.
+    type Output: Copy;
+    /// Flattens and coalesces `self`.
+    fn coalesce_target(self) -> Self::Output;
 }
 
-/// Flattens and coalesces `layout` over its extended domain (preserving the rightmost unit mode).
-pub const fn coalesce_extended<S, D>(layout: Layout<S, D>) -> Coalesced<S::Output, D::Output, true>
+const impl<S, D, const EXTENDED: bool> CoalesceTarget<EXTENDED> for Layout<S, D>
 where
     S: [const] Flatten,
     D: [const] Flatten,
-    Layout<S::Output, D::Output>: [const] Coalesce<true>,
+    Layout<S::Output, D::Output>: [const] Coalesce<EXTENDED>,
 {
-    layout.coalesce_extended()
+    type Output = Coalesced<S::Output, D::Output, EXTENDED>;
+    fn coalesce_target(self) -> Self::Output {
+        Coalesce::<EXTENDED>::coalesce(Layout {
+            shape: self.shape.flatten(),
+            stride: self.stride.flatten(),
+        })
+    }
+}
+
+/// Flattens and coalesces `value` (a [`Layout`] or [`Tensor`](crate::tensor::Tensor))
+/// over its coordinate domain (dropping trailing unit modes).
+///
+/// Note: accepts a single type parameter `T` so both [`Layout`] and
+/// [`Tensor`](crate::tensor::Tensor) share one free function (matching [`composition`](super::composition())
+/// and [`logical_divide`](super::logical_divide())); callers previously writing
+/// `coalesce::<S, D>(layout)` can write `coalesce(layout)` or `coalesce::<Layout<S, D>>(layout)`.
+pub const fn coalesce<T>(value: T) -> T::Output
+where
+    T: [const] CoalesceTarget<false>,
+{
+    value.coalesce_target()
+}
+
+/// Flattens and coalesces `value` (a [`Layout`] or [`Tensor`](crate::tensor::Tensor))
+/// over its extended domain (preserving the rightmost unit mode).
+///
+/// See [`coalesce()`] for the single type-parameter convention.
+pub const fn coalesce_extended<T>(value: T) -> T::Output
+where
+    T: [const] CoalesceTarget<true>,
+{
+    value.coalesce_target()
+}
+
+/// Profile-guided coalescing (`coalesce(obj, profile)`) over the coordinate domain
+/// (dropping trailing unit modes within each `LeafProfile` subtree).
+pub const fn coalesce_with_profile<P, T>(value: T) -> T::Output
+where
+    T: [const] CoalesceProfile<P>,
+{
+    value.coalesce_with_profile()
+}
+
+/// Profile-guided extended-domain coalescing (`coalesce_z`) for a [`Layout`] or
+/// [`Tensor`](crate::tensor::Tensor).
+pub const fn coalesce_z<P, T>(value: T) -> T::Output
+where
+    T: [const] CoalesceExtended<P>,
+{
+    value.coalesce_z()
 }
 
 const SHAPE_IS_STATIC_ONE<S: ShapeScalar>: bool = matches!(S::STATIC_VALUE, Some(1));
@@ -968,5 +1015,93 @@ where
         let head = Layout::new(self.shape.0, self.stride.0).coalesce_z();
         let tail = Layout::new(self.shape.1, self.stride.1).coalesce_z();
         Layout::new(Til(head.shape, tail.shape), Til(head.stride, tail.stride))
+    }
+}
+
+/// Profile-guided standard coalescing (`coalesce(obj, profile)`).
+///
+/// Coalesces each leaf subtree under `P` using [`Coalesce<false>`] (dropping trailing unit modes)
+/// while preserving outer mode boundaries defined by [`TupleProfile`] and leaving [`NilProfile`]
+/// subtrees untouched.
+pub const trait CoalesceProfile<P = LeafProfile>: Copy {
+    /// Resulting profile-preserving coalesced layout or tensor type.
+    type Output: Copy;
+    /// Coalesces `self` under profile `P`.
+    fn coalesce_with_profile(self) -> Self::Output;
+}
+
+const impl<S: Shape, D: Stride<S>> CoalesceProfile<NilProfile> for Layout<S, D> {
+    type Output = Self;
+    fn coalesce_with_profile(self) -> Self::Output {
+        self
+    }
+}
+
+const impl<S, D> CoalesceProfile for Layout<S, D>
+where
+    Self: Copy,
+    S: [const] Flatten,
+    D: [const] Flatten,
+    Layout<S::Output, D::Output>: [const] Coalesce<false>,
+{
+    type Output = <Layout<S::Output, D::Output> as Coalesce<false>>::Output;
+    fn coalesce_with_profile(self) -> Self::Output {
+        self.coalesce()
+    }
+}
+
+macro_rules! impl_scalar_coalesce_profile_tuple {
+    ([$($g:tt)*] $S:ty) => {
+        const impl<$($g)* D, PH, NewS, NewD> CoalesceProfile<TupleProfile<PH, NilProfile>>
+            for Layout<$S, D>
+        where
+            $S: Shape,
+            D: Stride<$S>,
+            Layout<$S, D>: [const] CoalesceProfile<PH, Output = Layout<NewS, NewD>>,
+            NewS: Shape,
+            NewD: Stride<NewS>,
+        {
+            type Output = Layout<Til<NewS, Nil>, Til<NewD, Nil>>;
+            fn coalesce_with_profile(self) -> Self::Output {
+                let head = <Self as CoalesceProfile<PH>>::coalesce_with_profile(self);
+                Layout::new(Til(head.shape, Nil), Til(head.stride, Nil))
+            }
+        }
+    };
+}
+
+impl_scalar_coalesce_profile_tuple!([] int);
+impl_scalar_coalesce_profile_tuple!([const N: int,] Int<N>);
+
+const impl<HS, TS, HD, TD, PH, PT, NewHS, NewTS, NewHD, NewTD> CoalesceProfile<TupleProfile<PH, PT>>
+    for Layout<Til<HS, TS>, Til<HD, TD>>
+where
+    HS: Shape,
+    TS: Tuple + Shape,
+    HD: Stride<HS>,
+    TD: Tuple + Stride<TS>,
+    Layout<HS, HD>: [const] CoalesceProfile<PH, Output = Layout<NewHS, NewHD>>,
+    Layout<TS, TD>: [const] CoalesceProfile<PT, Output = Layout<NewTS, NewTD>>,
+    NewHS: Shape,
+    NewTS: Tuple + Shape,
+    NewHD: Stride<NewHS>,
+    NewTD: Tuple + Stride<NewTS>,
+{
+    type Output = Layout<Til<NewHS, NewTS>, Til<NewHD, NewTD>>;
+    fn coalesce_with_profile(self) -> Self::Output {
+        let head = Layout::new(self.shape.0, self.stride.0).coalesce_with_profile();
+        let tail = Layout::new(self.shape.1, self.stride.1).coalesce_with_profile();
+        Layout::new(Til(head.shape, tail.shape), Til(head.stride, tail.stride))
+    }
+}
+
+impl<S, D> Layout<S, D> {
+    /// Coalesces `self` mode-by-mode according to profile `P` (dropping trailing unit modes
+    /// inside each `LeafProfile` subtree).
+    pub const fn coalesce_with_profile<P>(self) -> <Self as CoalesceProfile<P>>::Output
+    where
+        Self: [const] CoalesceProfile<P>,
+    {
+        CoalesceProfile::<P>::coalesce_with_profile(self)
     }
 }

@@ -5,9 +5,9 @@
 //!
 //! - **Mode paths**: [`Mode`] and [`ModeEnd`], built with [`mode!`](crate::mode!).
 //! - **Single-mode indexing**: [`Get`], [`GetOutput`], [`NORMALIZED_INDEX`],
-//!   [`TupleContainer::get`](super::TupleContainer::get), and [`walk_mode!`](crate::walk_mode!).
+//!   [`Til::get`](super::Til::get), and [`walk_mode!`](crate::walk_mode!).
 //! - **Multi-mode selection**: [`Select`] and [`select`].
-//! - **Top-level slicing**: [`SliceRange`], [`slice_range`], [`TupleContainer::slice`](super::TupleContainer::slice),
+//! - **Top-level slicing**: [`SliceRange`], [`slice_range`], [`Til::slice`](super::Til::slice),
 //!   [`resolve_tuple_slice`], and [`SLICE_COUNT`].
 //!
 //! # Usage
@@ -38,7 +38,7 @@ use core::marker::PhantomData;
 use crate::integer::{DECREASE, IS_NON_NEG, IS_ONE, IS_ZERO, NOT_ZERO, abs, add, int, mul, sub};
 use crate::slice::{ResolvedSlice, Slice};
 
-use super::{Item, Nil, Til, Tuple, Wrap};
+use super::{Append, Item, Leaf, Nil, Til, Tuple, Wrap};
 
 /// Type-level mode index path node constructed by [`mode!`](crate::mode).
 ///
@@ -62,9 +62,9 @@ pub struct ModeEnd;
 /// ```
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
 /// # #![allow(incomplete_features)]
-/// use noodle_cute::tuple::{NORMALIZED_INDEX, Nil, TupleContainer};
+/// use noodle_cute::tuple::{NORMALIZED_INDEX, Nil, Til};
 ///
-/// type Pair = TupleContainer<i32, TupleContainer<i32, Nil>>;
+/// type Pair = Til<i32, Til<i32, Nil>>;
 /// assert_eq!(NORMALIZED_INDEX::<0, Pair>, 0);
 /// assert_eq!(NORMALIZED_INDEX::<-1, Pair>, 1);
 /// assert_eq!(NORMALIZED_INDEX::<-2, Pair>, 0);
@@ -75,8 +75,8 @@ pub struct ModeEnd;
 /// ```compile_fail,E0080
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
 /// # #![allow(incomplete_features)]
-/// use noodle_cute::tuple::{NORMALIZED_INDEX, Nil, TupleContainer};
-/// const INVALID: i32 = NORMALIZED_INDEX::<-2, TupleContainer<i32, Nil>>;
+/// use noodle_cute::tuple::{NORMALIZED_INDEX, Nil, Til};
+/// const INVALID: i32 = NORMALIZED_INDEX::<-2, Til<i32, Nil>>;
 /// ```
 pub const NORMALIZED_INDEX<const I: int, T: Item>: int = {
     if IS_NON_NEG::<I> {
@@ -118,14 +118,14 @@ where
     }
 }
 
-/// Selects mode `I` of a [`TupleContainer`](super::TupleContainer) by copying the selected item.
+/// Selects mode `I` of a [`Til`] by copying the selected item.
 ///
 /// Valid indices range from `-RANK` through `RANK - 1`. Negative indices count
 /// backwards from the end. Selection preserves the concrete item type and any
 /// nested structure. An invalid index fails at compile time through index
 /// normalization or trait resolution.
 ///
-/// The trait method supports const evaluation. [`TupleContainer::get`](super::TupleContainer::get)
+/// The trait method supports const evaluation. [`Til::get`](super::Til::get)
 /// provides an inherent convenience method for both `const` and run-time calls.
 ///
 /// # Examples
@@ -134,21 +134,21 @@ where
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl, const_ops, const_cmp)]
 /// # #![allow(incomplete_features)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Get, Nil, TupleContainer};
+/// use noodle_cute::tuple::{Get, Nil, Til};
 ///
-/// let t = TupleContainer::new(
+/// let t = Til::new(
 ///     10i32,
-///     TupleContainer::new(
-///         TupleContainer::new(20i32, TupleContainer::new(30i32, Nil)),
-///         TupleContainer::new(40i32, Nil),
+///     Til::new(
+///         Til::new(20i32, Til::new(30i32, Nil)),
+///         Til::new(40i32, Nil),
 ///     ),
 /// );
 /// assert_eq!(Get::<0>::get(&t), 10);
 /// assert_eq!(Get::<-1>::get(&t), 40);
 /// assert_eq!(Get::<-3>::get(&t), 10);
-/// assert_eq!(Get::<1>::get(&t), TupleContainer::new(20i32, TupleContainer::new(30i32, Nil)));
+/// assert_eq!(Get::<1>::get(&t), Til::new(20i32, Til::new(30i32, Nil)));
 /// const LAST: Int<2> =
-///     Get::<-1>::get(&TupleContainer::new(Int::<1>, TupleContainer::new(Int::<2>, Nil)));
+///     Get::<-1>::get(&Til::new(Int::<1>, Til::new(Int::<2>, Nil)));
 /// assert_eq!(LAST, Int::<2>);
 /// ```
 ///
@@ -159,8 +159,8 @@ where
 /// ```compile_fail,E0277
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
 /// # #![allow(incomplete_features)]
-/// use noodle_cute::tuple::{Nil, TupleContainer};
-/// let _ = TupleContainer::new(10i32, TupleContainer::new(20i32, Nil)).get::<2>();
+/// use noodle_cute::tuple::{Nil, Til};
+/// let _ = Til::new(10i32, Til::new(20i32, Nil)).get::<2>();
 /// ```
 ///
 /// An index below `-RANK` fails the normalization assertion.
@@ -168,8 +168,8 @@ where
 /// ```compile_fail,E0080
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
 /// # #![allow(incomplete_features)]
-/// use noodle_cute::tuple::{Nil, TupleContainer};
-/// let _ = TupleContainer::new(10i32, TupleContainer::new(20i32, Nil)).get::<-3>();
+/// use noodle_cute::tuple::{Nil, Til};
+/// let _ = Til::new(10i32, Til::new(20i32, Nil)).get::<-3>();
 /// ```
 pub const trait Get<const I: int>: [const] Item {
     /// The concrete type of the item at mode `I`.
@@ -205,10 +205,10 @@ where
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
 /// # #![allow(incomplete_features)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{GetOutput, Nil, TupleContainer};
+/// use noodle_cute::tuple::{GetOutput, Nil, Til};
 ///
-/// type Pair = TupleContainer<Int<3>, TupleContainer<Int<4>, Nil>>;
-/// let pair = TupleContainer::new(Int::<3>, TupleContainer::new(Int::<4>, Nil));
+/// type Pair = Til<Int<3>, Til<Int<4>, Nil>>;
+/// let pair = Til::new(Int::<3>, Til::new(Int::<4>, Nil));
 /// let last: GetOutput<Pair, -1> = pair.get::<-1>();
 /// let _: Int<4> = last;
 /// ```
@@ -610,4 +610,178 @@ impl<H: Item, T: Tuple> Til<H, T> {
     {
         self.slice_range()
     }
+}
+
+/// Evaluates whether leaf `L` is a slicing wildcard (`..`).
+#[doc(hidden)]
+pub const IS_SLICE_WILDCARD<L: Item>: bool = L::IS_WILDCARD;
+
+/// Leaf filter step backing [`SliceBy`]: `KEEP = true` retains `target` in a singleton tuple,
+/// while `KEEP = false` drops it to [`Nil`].
+#[doc(hidden)]
+pub const trait SliceByLeaf<B: [const] Item, const KEEP: bool>: [const] Leaf {
+    type Output: [const] Tuple;
+    fn slice_by_leaf(&self, target: &B) -> Self::Output;
+}
+
+const impl<L: [const] Leaf, B: [const] Item> SliceByLeaf<B, true> for L {
+    type Output = Til<B, Nil>;
+    fn slice_by_leaf(&self, target: &B) -> Self::Output {
+        Til(*target, Nil)
+    }
+}
+
+const impl<L: [const] Leaf, B: [const] Item> SliceByLeaf<B, false> for L {
+    type Output = Nil;
+    fn slice_by_leaf(&self, _: &B) -> Self::Output {
+        Nil
+    }
+}
+
+/// Collects the subtrees of `B` whose counterpart in `Self` is a slicing wildcard (`..`).
+///
+/// Mirrors PyCuTe's `slice_(coord, B)`: walks `Self` as the driver (requiring
+/// [`WeaklyCongruent<B>`](super::WeaklyCongruent)), retaining each subtree of `B` aligned
+/// with a `..` ([`core::ops::RangeFull`]) leaf in a flat output [`Tuple`].
+///
+/// # Examples
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::tuple;
+/// use noodle_cute::tuple::{Nil, slice_by};
+///
+/// let target = tuple!((2i32, 3i32), (5i32, 7i32, 9i32));
+/// assert_eq!(slice_by(&tuple!(.., 1i32), &target), tuple!((2i32, 3i32)));
+/// assert_eq!(slice_by(&tuple!(.., ..), &tuple!(2i32, 3i32)), tuple!(2i32, 3i32));
+/// assert_eq!(slice_by(&tuple!(1i32, 2i32), &tuple!(5i32, 7i32)), Nil);
+/// ```
+pub const trait SliceBy<B: [const] Item>: [const] Item {
+    /// Flat [`Tuple`] containing the retained subtrees of `B` in walk order.
+    type Output: [const] Tuple;
+    /// Collects subtrees of `target` corresponding to `..` leaves in `self`.
+    fn slice_by(&self, target: &B) -> Self::Output;
+}
+
+const impl SliceBy<Nil> for Nil {
+    type Output = Nil;
+    fn slice_by(&self, _: &Nil) -> Self::Output {
+        Nil
+    }
+}
+
+const impl<L, B> SliceBy<B> for L
+where
+    L: [const] Leaf + [const] SliceByLeaf<B, { IS_SLICE_WILDCARD::<L> }>,
+    B: [const] Item,
+{
+    type Output = <L as SliceByLeaf<B, { IS_SLICE_WILDCARD::<L> }>>::Output;
+    fn slice_by(&self, target: &B) -> Self::Output {
+        self.slice_by_leaf(target)
+    }
+}
+
+const impl<H, T, BH, BT> SliceBy<Til<BH, BT>> for Til<H, T>
+where
+    H: [const] SliceBy<BH>,
+    T: [const] Tuple + [const] SliceBy<BT>,
+    BH: [const] Item,
+    BT: [const] Tuple,
+    H::Output: [const] Append<T::Output>,
+{
+    type Output = <H::Output as Append<T::Output>>::Output;
+    fn slice_by(&self, target: &Til<BH, BT>) -> Self::Output {
+        self.0
+            .slice_by(&target.0)
+            .append(self.1.slice_by(&target.1))
+    }
+}
+
+/// Collects the subtrees of `target` whose counterpart in `coord` is `..` (PyCuTe `slice_`).
+pub const fn slice_by<C: [const] SliceBy<B>, B: [const] Item>(coord: &C, target: &B) -> C::Output {
+    coord.slice_by(target)
+}
+
+/// Leaf filter step backing [`DiceBy`]: `DROP = true` drops `target` to [`Nil`],
+/// while `DROP = false` retains `target` in a singleton tuple.
+#[doc(hidden)]
+pub const trait DiceByLeaf<B: [const] Item, const DROP: bool>: [const] Leaf {
+    type Output: [const] Tuple;
+    fn dice_by_leaf(&self, target: &B) -> Self::Output;
+}
+
+const impl<L: [const] Leaf, B: [const] Item> DiceByLeaf<B, true> for L {
+    type Output = Nil;
+    fn dice_by_leaf(&self, _: &B) -> Self::Output {
+        Nil
+    }
+}
+
+const impl<L: [const] Leaf, B: [const] Item> DiceByLeaf<B, false> for L {
+    type Output = Til<B, Nil>;
+    fn dice_by_leaf(&self, target: &B) -> Self::Output {
+        Til(*target, Nil)
+    }
+}
+
+/// Collects the subtrees of `B` whose counterpart in `Self` is NOT a slicing wildcard (`..`).
+///
+/// Mirrors PyCuTe's `dice_(coord, B)`: the complement of [`SliceBy`].
+///
+/// # Examples
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::tuple;
+/// use noodle_cute::tuple::{Nil, dice_by};
+///
+/// let target = tuple!((2i32, 3i32), (5i32, 7i32, 9i32));
+/// assert_eq!(dice_by(&tuple!(.., 1i32), &target), tuple!((5i32, 7i32, 9i32)));
+/// assert_eq!(dice_by(&tuple!(.., ..), &tuple!(2i32, 3i32)), Nil);
+/// assert_eq!(dice_by(&tuple!(1i32, 2i32), &tuple!(5i32, 7i32)), tuple!(5i32, 7i32));
+/// ```
+pub const trait DiceBy<B: [const] Item>: [const] Item {
+    /// Flat [`Tuple`] containing the non-wildcard subtrees of `B` in walk order.
+    type Output: [const] Tuple;
+    /// Collects subtrees of `target` corresponding to non-wildcard leaves in `self`.
+    fn dice_by(&self, target: &B) -> Self::Output;
+}
+
+const impl DiceBy<Nil> for Nil {
+    type Output = Nil;
+    fn dice_by(&self, _: &Nil) -> Self::Output {
+        Nil
+    }
+}
+
+const impl<L, B> DiceBy<B> for L
+where
+    L: [const] Leaf + [const] DiceByLeaf<B, { IS_SLICE_WILDCARD::<L> }>,
+    B: [const] Item,
+{
+    type Output = <L as DiceByLeaf<B, { IS_SLICE_WILDCARD::<L> }>>::Output;
+    fn dice_by(&self, target: &B) -> Self::Output {
+        self.dice_by_leaf(target)
+    }
+}
+
+const impl<H, T, BH, BT> DiceBy<Til<BH, BT>> for Til<H, T>
+where
+    H: [const] DiceBy<BH>,
+    T: [const] Tuple + [const] DiceBy<BT>,
+    BH: [const] Item,
+    BT: [const] Tuple,
+    H::Output: [const] Append<T::Output>,
+{
+    type Output = <H::Output as Append<T::Output>>::Output;
+    fn dice_by(&self, target: &Til<BH, BT>) -> Self::Output {
+        self.0.dice_by(&target.0).append(self.1.dice_by(&target.1))
+    }
+}
+
+/// Collects the subtrees of `target` whose counterpart in `coord` is not `..` (PyCuTe `dice_`).
+pub const fn dice_by<C: [const] DiceBy<B>, B: [const] Item>(coord: &C, target: &B) -> C::Output {
+    coord.dice_by(target)
 }

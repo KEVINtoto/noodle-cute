@@ -160,7 +160,7 @@ const impl StrideScalar for BasisCombination<Nil> {
 /// use noodle_cute::integer::Int;
 /// use noodle_cute::shape::Shape;
 /// use noodle_cute::stride::Stride;
-/// use noodle_cute::tuple::{Nil, TupleContainer};
+/// use noodle_cute::tuple::{Nil, Til};
 ///
 /// fn check_stride<S: Shape, D: Stride<S>>(_: &S, _: &D) {}
 ///
@@ -168,8 +168,8 @@ const impl StrideScalar for BasisCombination<Nil> {
 /// check_stride(&4i32, &1i32);
 /// check_stride(&4i32, &ScaledBasis::<Int<1>, Mode<0>>::new(Int::<1>));
 /// check_stride(
-///     &TupleContainer::new(Int::<2>, TupleContainer::new(3i32, Nil)),
-///     &TupleContainer::new(1i32, TupleContainer::new(2i32, Nil)),
+///     &Til::new(Int::<2>, Til::new(3i32, Nil)),
+///     &Til::new(1i32, Til::new(2i32, Nil)),
 /// );
 /// ```
 pub const trait Stride<S: Shape>: [const] Item<Profile = S::Profile> {}

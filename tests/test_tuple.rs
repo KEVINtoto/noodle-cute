@@ -66,19 +66,13 @@ fn test_item_properties_display_and_equality() {
     }
 
     // Structural queries across flat, mixed, all-static, nested, and deep hierarchies
-    type Flat3 = TupleContainer<int, TupleContainer<int, TupleContainer<int, Nil>>>;
-    type AllStatic = TupleContainer<
-        Int<1>,
-        TupleContainer<TupleContainer<Int<2>, TupleContainer<Nil, Nil>>, Nil>,
-    >;
-    type Mixed = TupleContainer<Int<1>, TupleContainer<int, Nil>>;
-    type Nested = TupleContainer<
-        int,
-        TupleContainer<TupleContainer<int, TupleContainer<int, Nil>>, TupleContainer<int, Nil>>,
-    >;
-    type DeepInner = TupleContainer<int, TupleContainer<int, Nil>>;
-    type DeepRight = TupleContainer<int, TupleContainer<DeepInner, Nil>>;
-    type Deep = TupleContainer<DeepInner, TupleContainer<DeepRight, Nil>>;
+    type Flat3 = Til<int, Til<int, Til<int, Nil>>>;
+    type AllStatic = Til<Int<1>, Til<Til<Int<2>, Til<Nil, Nil>>, Nil>>;
+    type Mixed = Til<Int<1>, Til<int, Nil>>;
+    type Nested = Til<int, Til<Til<int, Til<int, Nil>>, Til<int, Nil>>>;
+    type DeepInner = Til<int, Til<int, Nil>>;
+    type DeepRight = Til<int, Til<DeepInner, Nil>>;
+    type Deep = Til<DeepInner, Til<DeepRight, Nil>>;
 
     const {
         assert!(Flat3::RANK == 3 && Flat3::DEPTH == 1 && Flat3::LEAVES == 3);
@@ -108,8 +102,8 @@ fn test_item_properties_display_and_equality() {
     assert_eq!(format!("{}", tuple!(())), "((),)");
 
     // All-static hierarchy, ZST layout, and heterogeneous const PartialEq
-    type Pair23 = TupleContainer<Int<2>, TupleContainer<Int<3>, Nil>>;
-    type StaticTree = TupleContainer<Int<1>, TupleContainer<Pair23, Nil>>;
+    type Pair23 = Til<Int<2>, Til<Int<3>, Nil>>;
+    type StaticTree = Til<Int<1>, Til<Pair23, Nil>>;
     const STATIC_T: StaticTree = tuple!(Int::<1>, (Int::<2>, Int::<3>));
     assert_eq!(core::mem::size_of_val(&STATIC_T), 0);
     const {
@@ -141,7 +135,7 @@ fn test_item_properties_display_and_equality() {
     fn require_general<T: Tuple>(_: T) {}
 
     const EMPTY: Nil = require_integer_tuple(int_tuple![]);
-    const NESTED: TupleContainer<Int<1>, TupleContainer<TupleContainer<int, Nil>, Nil>> =
+    const NESTED: Til<Int<1>, Til<Til<int, Nil>, Nil>> =
         require_integer_tuple(tuple![Int::<1>, (2i32)]);
     assert_eq!(EMPTY, tuple![]);
     assert_eq!(NESTED, int_tuple![Int::<1>, (2i32)]);
@@ -345,14 +339,14 @@ fn test_congruence_relations() {
 fn test_indexing_get_mode_queries_and_select() {
     // NORMALIZED_INDEX boundaries
     const {
-        type Pair = TupleContainer<int, TupleContainer<int, Nil>>;
+        type Pair = Til<int, Til<int, Nil>>;
         assert!(NORMALIZED_INDEX::<0, Pair> == 0);
         assert!(NORMALIZED_INDEX::<1, Pair> == 1);
         assert!(NORMALIZED_INDEX::<2, Pair> == 2);
         assert!(NORMALIZED_INDEX::<-1, Pair> == 1);
         assert!(NORMALIZED_INDEX::<-2, Pair> == 0);
 
-        type Three = TupleContainer<Int<1>, TupleContainer<Int<2>, TupleContainer<Int<3>, Nil>>>;
+        type Three = Til<Int<1>, Til<Int<2>, Til<Int<3>, Nil>>>;
         assert!(NORMALIZED_INDEX::<0, Three> == 0);
         assert!(NORMALIZED_INDEX::<2, Three> == 2);
         assert!(NORMALIZED_INDEX::<3, Three> == 3);
@@ -397,8 +391,8 @@ fn test_indexing_get_mode_queries_and_select() {
 
     // GetOutput static type checking
     let static_tuple = int_tuple![Int::<3>, (Int::<4>, Int::<5>)];
-    type Pair45 = TupleContainer<Int<4>, TupleContainer<Int<5>, Nil>>;
-    type StaticTuple = TupleContainer<Int<3>, TupleContainer<Pair45, Nil>>;
+    type Pair45 = Til<Int<4>, Til<Int<5>, Nil>>;
+    type StaticTuple = Til<Int<3>, Til<Pair45, Nil>>;
     let s0: GetOutput<StaticTuple, 0> = static_tuple.get::<0>();
     assert_eq!(s0, Int::<3>);
     let s1: GetOutput<StaticTuple, 1> = static_tuple.get::<1>();
@@ -440,7 +434,7 @@ fn test_indexing_get_mode_queries_and_select() {
     );
 
     // Select (const and runtime: reordering, repetition, negative indices, empty selection)
-    const SEL: TupleContainer<Int<30>, TupleContainer<Int<10>, Nil>> =
+    const SEL: Til<Int<30>, Til<Int<10>, Nil>> =
         select::<mode![-1, 0], _>(&int_tuple![Int::<10>, Int::<20>, Int::<30>]);
     assert_eq!(SEL, int_tuple![Int::<30>, Int::<10>]);
 
@@ -743,8 +737,7 @@ fn test_restructure_wrap_unwrap_append_prepend_flatten_unflatten_repeat() {
     }
 
     // Flatten / Unflatten / unflatten_like / RepeatLike (including deep left/right trees & PyCuTe round-trips)
-    const FLAT: TupleContainer<Int<1>, TupleContainer<int, Nil>> =
-        int_tuple![(Int::<1>, (2i32))].flatten();
+    const FLAT: Til<Int<1>, Til<int, Nil>> = int_tuple![(Int::<1>, (2i32))].flatten();
     assert_eq!(FLAT, int_tuple![Int::<1>, 2i32]);
     assert_eq!(Nil.flatten(), Nil);
     assert_eq!(42i32.flatten(), int_tuple![42i32]);
@@ -767,8 +760,8 @@ fn test_restructure_wrap_unwrap_append_prepend_flatten_unflatten_repeat() {
     assert_eq!(flat, tuple!(Int::<1>, 2i32, Int::<3>, 4i32, Int::<5>));
     assert_eq!(unflatten_like(&flat, &nested), nested);
 
-    type GuideProfile = <TupleContainer<int, TupleContainer<Nil, Nil>> as Item>::Profile;
-    const UNFLATTENED: TupleContainer<Int<7>, TupleContainer<Nil, Nil>> =
+    type GuideProfile = <Til<int, Til<Nil, Nil>> as Item>::Profile;
+    const UNFLATTENED: Til<Int<7>, Til<Nil, Nil>> =
         unflatten::<GuideProfile, _>(&int_tuple![Int::<7>]);
     assert_eq!(UNFLATTENED, tuple![Int::<7>, Nil]);
 
@@ -806,7 +799,7 @@ fn test_restructure_wrap_unwrap_append_prepend_flatten_unflatten_repeat() {
 #[test]
 fn test_restructure_replace_and_lift_round_trips() {
     // ReplaceAt / Replace (const and runtime)
-    const R_SCALAR: TupleContainer<Int<9>, Nil> = replace::<mode![0], _, _>(&Int::<5>, Int::<9>);
+    const R_SCALAR: Til<Int<9>, Nil> = replace::<mode![0], _, _>(&Int::<5>, Int::<9>);
     const R_EMPTY: Int<9> = replace::<mode![], _, _>(&Int::<5>, Int::<9>);
     assert_eq!(R_SCALAR, tuple![Int::<9>]);
     assert_eq!(R_EMPTY, Int::<9>);
@@ -1058,7 +1051,7 @@ fn test_transform_leaf_preserves_nesting_and_visits_depth_first() {
         int_tuple![Int::<1>, (2i32, Int::<3>), 4i32].transform(&Offset(10)),
         int_tuple![11i32, (12i32, 13i32), 14i32],
     );
-    type Mapped = TupleContainer<int, TupleContainer<TupleContainer<int, Nil>, Nil>>;
+    type Mapped = Til<int, Til<Til<int, Nil>, Nil>>;
     const MAPPED: Mapped = int_tuple![Int::<1>, (2i32)].transform(&Offset(3));
     assert_eq!(MAPPED, int_tuple![4i32, (5i32)]);
 
@@ -1215,10 +1208,8 @@ fn test_multi_tree_traversal_zip_transform_apply_fold_all_and_any() {
     let left = int_tuple![Int::<1>, (2i32, 3i32)];
     let right = int_tuple![4i32, (Int::<5>, 6i32)];
     let zipped = left.zip_leaves(right);
-    type Zipped = TupleContainer<
-        ZipLeaf<(Int<1>, int)>,
-        TupleContainer<ZipLeaf<(int, Int<5>)>, TupleContainer<ZipLeaf<(int, int)>, Nil>>,
-    >;
+    type Zipped =
+        Til<ZipLeaf<(Int<1>, int)>, Til<ZipLeaf<(int, Int<5>)>, Til<ZipLeaf<(int, int)>, Nil>>>;
     let _: Zipped = zipped;
     assert_eq!(
         zipped,
@@ -1239,7 +1230,7 @@ fn test_multi_tree_traversal_zip_transform_apply_fold_all_and_any() {
         tuple![ZipLeaf((1, 3)), ZipLeaf((2, int_tuple![4, 5]))]
     );
 
-    const C_ZIP: TupleContainer<ZipLeaf<(Int<1>, Int<2>)>, Nil> = zip_leaves(&Int::<1>, Int::<2>);
+    const C_ZIP: Til<ZipLeaf<(Int<1>, Int<2>)>, Nil> = zip_leaves(&Int::<1>, Int::<2>);
     assert!(C_ZIP.is_static());
     assert_eq!(C_ZIP.0.into_inner(), (Int::<1>, Int::<2>));
 

@@ -3,6 +3,7 @@
 use core::cmp::Ordering;
 use core::ops::{Add, Mul, Sub};
 
+use crate::NoodleCuteResult;
 use crate::algebra::composition::AtomCompose;
 use crate::algebra::nullspace::NullspaceStrideLeaf;
 use crate::basis::ops::{BasisAdd, BasisMul, BasisSub};
@@ -14,7 +15,7 @@ use crate::basis::{
 use crate::integer::ops::{bit_length_non_neg, checked_clmul};
 use crate::integer::{
     ArithMul, BOTH_STATIC, IS_NON_NEG, Int, Integer, Product, cmp, eq, int, lt, mul, shiftl,
-    static_cmp, static_cmp_of, static_eq, static_eq_of, static_true,
+    static_cmp, static_cmp_of, static_eq, static_eq_of, static_true, sub,
 };
 use crate::layout::order::OrderKey;
 use crate::layout::recast::{MakeStaticRecastStride, RecastStrideScalar};
@@ -24,8 +25,9 @@ use crate::shape::{
     CoordToIndex, InBounds, IndexToCoord, LeavesInBounds, Shape, ShapeScalar, ValidShapeExtent,
 };
 use crate::stride::{
-    Accumulate, CoshapeAccumulate, CoshapeCoeffAccum, InnerProduct, OffsetExtent,
-    ScaleBasisFunctor, Stride, StrideMul, StrideScalar, StrideSkeleton,
+    Accumulate, CoshapeAccumulate, CoshapeCoeffAccum, InnerProduct, LinearBoundsAcc,
+    LinearBoundsWalk, OffsetExtent, ScaleBasisFunctor, Stride, StrideMul, StrideScalar,
+    StrideSkeleton,
 };
 use crate::tuple::{Item, Leaf, LeafProfile, Nil, Til, TransformLeafFunctor, Tuple};
 
@@ -753,11 +755,19 @@ where
     }
 }
 
-// StrideSkeleton, OffsetExtent (1 << bit_length), CoshapeCoeffAccum (bitwise OR), CoshapeAccumulate
+// StrideSkeleton, LinearBoundsWalk, OffsetExtent (1 << bit_length), CoshapeCoeffAccum (bitwise OR), CoshapeAccumulate
 const impl<V: [const] F2Scalar> StrideSkeleton for F2<V> {
     type Terms = Nil;
     fn skeleton_terms(self) -> Nil {
         Nil
+    }
+}
+
+const impl<S: [const] ShapeScalar, V: [const] F2Scalar> LinearBoundsWalk<S> for F2<V> {
+    fn walk_linear_bounds(self, shape: S, acc: LinearBoundsAcc) -> LinearBoundsAcc {
+        let max_c = sub(shape.value(), 1);
+        let span = checked_clmul(max_c, self.value()).v();
+        acc.push_f2_span(span)
     }
 }
 

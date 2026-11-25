@@ -8,7 +8,7 @@
 //!   arithmetic.
 //! - [`mod@slice`]: `const`-capable Python-style slice specifications ([`Slice`](slice::Slice),
 //!   [`Bound`](slice::Bound)) and dimension resolution ([`slice!`], [`slices!`]).
-//! - [`mod@tuple`]: Hierarchical tuples ([`TupleContainer`](tuple::TupleContainer),
+//! - [`mod@tuple`]: Hierarchical tuples ([`Til`](tuple::Til),
 //!   [`Nil`](tuple::Nil)), structural congruence, mode indexing/slicing, restructuring,
 //!   synchronized multi-tree leaf traversal, and product reductions
 //!   ([`tuple!`], [`int_tuple!`], [`mode!`], [`walk_mode!`]).
@@ -45,6 +45,13 @@
 //! - [`mod@swizzle`]: Binary-field stride scalar [`F2`](swizzle::F2) ($\mathbb{F}_2\[x\]$ XOR /
 //!   carry-less arithmetic passing through the layout algebra) and bit-field permutation
 //!   functor [`Swizzle`](swizzle::Swizzle) ([`f2!`], [`swizzle!`]).
+//! - [`tensor`]: CuTe [`Tensor`](tensor::Tensor) pairing an [`Accessor`](tensor::Accessor)
+//!   with a [`Layout`](layout::Layout), pure `no_std` accessors
+//!   ([`SliceAccessor`](tensor::SliceAccessor), [`CellAccessor`](tensor::CellAccessor),
+//!   [`Ptr`](tensor::Ptr), [`ImplicitAccessor`](tensor::ImplicitAccessor), and
+//!   [`TransformAccessor`](tensor::TransformAccessor)), coordinate indexing/slicing,
+//!   layout-algebra pass-through, [`identity_tensor`](tensor::identity_tensor),
+//!   [`make_tensor`](tensor::make_tensor), and [`local_tile`](tensor::local_tile).
 //!
 //! # Main Root Interfaces
 //!
@@ -101,6 +108,7 @@ pub mod shape;
 pub mod slice;
 pub mod stride;
 pub mod swizzle;
+pub mod tensor;
 pub mod tuple;
 
 /// Errors that can occur during integer arithmetic and conversion.
