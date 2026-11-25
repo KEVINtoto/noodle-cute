@@ -118,7 +118,7 @@ where
     }
 }
 
-/// Selects mode `I` of a [`Til`](super::Til) by copying the selected item.
+/// Selects mode `I` of a [`Til`] by copying the selected item.
 ///
 /// Valid indices range from `-RANK` through `RANK - 1`. Negative indices count
 /// backwards from the end. Selection preserves the concrete item type and any

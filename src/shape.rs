@@ -3,7 +3,7 @@
 //! In CuTe, a **shape** represents the domain of a multi-dimensional tensor. It is either
 //! a non-negative scalar integer extent (dynamic [`int`] or static [`Int<N>`] with `N >= 0`),
 //! the empty shape [`Nil`], or a nested cons-cell tuple of shapes
-//! ([`Til`](crate::tuple::Til)).
+//! ([`Til`]).
 //!
 //! # Core Concepts & Submodules
 //!

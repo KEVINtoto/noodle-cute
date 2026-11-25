@@ -48,7 +48,7 @@ use super::{FlatTuple, Item, Leaf, LeafProfile, Nil, Til, Tuple};
 /// A mapping from one leaf type to an [`Item`] for [`TransformLeaf`].
 ///
 /// Implement this trait for every input leaf type the functor handles. The
-/// output can be an integer, custom item, [`Nil`], or a nested [`Til`](super::Til).
+/// output can be an integer, custom item, [`Nil`], or a nested [`Til`].
 /// A const implementation enables const evaluation of the mapping.
 ///
 /// # Examples
@@ -386,7 +386,7 @@ pub const trait MakeNodeFunctor<Children> {
     fn make(&self, children: Children) -> Self::Output;
 }
 
-/// Default [`MakeNodeFunctor`] reconstructing [`Nil`] and [`Til`](super::Til) nodes unchanged.
+/// Default [`MakeNodeFunctor`] reconstructing [`Nil`] and [`Til`] nodes unchanged.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct MakeTuple;
 
@@ -502,7 +502,7 @@ where
     t.transform_apply(make, f, peers)
 }
 
-/// Synchronized leaf transformation preserving enclosing [`Til`](super::Til) structure via [`MakeTuple`].
+/// Synchronized leaf transformation preserving enclosing [`Til`] structure via [`MakeTuple`].
 pub const trait ZipTransformLeaf<F, Peers = ()>: [const] Item {
     /// Mapped [`Item`] retaining matching tuple structure.
     type Output: [const] Item;

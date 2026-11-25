@@ -47,7 +47,7 @@ use super::{
 /// Wraps scalar leaves in a singleton tuple and preserves built-in tuple containers.
 ///
 /// A leaf becomes `Til::new(self, Nil)`. [`Nil`] and
-/// [`Til`](super::Til) return copies of themselves. Custom leaf
+/// [`Til`] return copies of themselves. Custom leaf
 /// types automatically inherit the [`Leaf`] implementation.
 ///
 /// # Examples
@@ -222,7 +222,7 @@ where
 /// Inserts `rhs` as the new head mode of a [`Tuple`].
 ///
 /// [`Nil`] becomes the singleton tuple `Til::new(rhs, Nil)`, and a
-/// [`Til`](super::Til) becomes `Til::new(rhs, *self)`
+/// [`Til`] becomes `Til::new(rhs, *self)`
 /// in $O(1)$, preserving its existing modes as the tail.
 ///
 /// # Examples
@@ -517,7 +517,7 @@ where
     }
 }
 
-/// Replaces top-level mode `I` of a [`Til`](super::Til) with `x`.
+/// Replaces top-level mode `I` of a [`Til`] with `x`.
 pub const trait ReplaceAt<X: [const] Item, const I: int>: [const] Item {
     /// Resulting tuple after replacing mode `I` with `X`.
     type Output: [const] Tuple;
