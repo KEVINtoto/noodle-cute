@@ -8,8 +8,12 @@
 //!
 //! - [`make_basis_like`] / [`MakeBasisLikeOutput`]: Builds a tuple of unit basis vectors
 //!   congruent to a guide item's structural profile.
+//! - [`make_top_basis_like`] / [`MakeTopBasisLikeOutput`]: Builds a flat tuple with one
+//!   top-level unit basis vector (`e![i]`) per top-level mode of a guide item.
 //! - [`from_tuple`] (also [`BasisCombination::new`] and [`basis_tuple!`](crate::basis_tuple!)):
 //!   Converts a hierarchical tuple into a canonical sparse basis element.
+//! - [`IntoBasisCoord`] / [`into_basis_coord`]: Normalizes a scalar, basis element, or
+//!   hierarchical tuple coordinate into its sparse basis / scalar form.
 //! - [`AsTuple`] / [`as_tuple`]: Materializes a sparse basis element (or nested tuple
 //!   containing basis elements) back into dense nested tuples.
 //!
@@ -148,6 +152,93 @@ where
     <T::Profile as MakeBasisLikeTopProfile>::make_basis_top()
 }
 
+/// Walks top-level profile modes starting at index `IDX`, assigning one flat `Basis<Mode<IDX>>`
+/// per mode without descending into nested heads.
+#[doc(hidden)]
+pub const trait MakeTopBasisTail<const IDX: int> {
+    type Output: [const] Tuple;
+    fn make_top_basis_tail() -> Self::Output;
+}
+
+const impl<const IDX: int> MakeTopBasisTail<IDX> for NilProfile {
+    type Output = Nil;
+    fn make_top_basis_tail() -> Self::Output {
+        Nil
+    }
+}
+
+const impl<const IDX: int, H, T> MakeTopBasisTail<IDX> for TupleProfile<H, T>
+where
+    Mode<IDX, ModeEnd>: [const] BasisPath,
+    T: [const] MakeTopBasisTail<{ INCREASE::<IDX> }>,
+{
+    type Output = Til<Basis<Mode<IDX, ModeEnd>>, T::Output>;
+    fn make_top_basis_tail() -> Self::Output {
+        Til(Basis::<Mode<IDX, ModeEnd>>::UNIT, T::make_top_basis_tail())
+    }
+}
+
+/// Top-level profile dispatcher for [`make_top_basis_like`]: `NilProfile` -> `Nil`,
+/// `LeafProfile` -> `Int<1>`, and `TupleProfile` -> flat `(e![0], e![1], ...)`.
+#[doc(hidden)]
+pub const trait MakeTopBasisLikeProfile {
+    type Output: [const] Item;
+    fn make_top_basis() -> Self::Output;
+}
+
+const impl MakeTopBasisLikeProfile for NilProfile {
+    type Output = Nil;
+    fn make_top_basis() -> Self::Output {
+        Nil
+    }
+}
+
+const impl MakeTopBasisLikeProfile for LeafProfile {
+    type Output = Int<1>;
+    fn make_top_basis() -> Self::Output {
+        Int
+    }
+}
+
+const impl<H, T> MakeTopBasisLikeProfile for TupleProfile<H, T>
+where
+    Self: [const] MakeTopBasisTail<0>,
+{
+    type Output = <Self as MakeTopBasisTail<0>>::Output;
+    fn make_top_basis() -> Self::Output {
+        Self::make_top_basis_tail()
+    }
+}
+
+/// Output type produced by [`make_top_basis_like`] for item `T`.
+pub type MakeTopBasisLikeOutput<T> = <<T as Item>::Profile as MakeTopBasisLikeProfile>::Output;
+
+/// Builds a flat tuple assigning one top-level unit basis vector `e![i]` to each
+/// top-level mode of `guide` (without descending into nested sub-modes).
+///
+/// Paired with [`Layout::from_shape_with`](crate::layout::Layout::from_shape_with), this
+/// distributes each top-level basis across nested sub-modes via exclusive prefix products,
+/// matching PyCuTe's `Layout(shape, tuple(E(i) for i in range(rank(shape))))`.
+///
+/// # Examples
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl, const_ops, const_cmp)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::{basis::make_top_basis_like, e, int_tuple, integer::Int, tuple};
+///
+/// assert_eq!(
+///     make_top_basis_like(int_tuple![Int::<1>, Int::<4>, (Int::<2>, Int::<2>)]),
+///     tuple![e![0], e![1], e![2]]
+/// );
+/// ```
+pub const fn make_top_basis_like<T: Item>(_: T) -> MakeTopBasisLikeOutput<T>
+where
+    T::Profile: [const] MakeTopBasisLikeProfile,
+{
+    <T::Profile as MakeTopBasisLikeProfile>::make_top_basis()
+}
+
 /// Prepends outer mode index `M` onto every term's path in a `BasisTuple`.
 #[doc(hidden)]
 pub const trait PrependModeToTerms<const M: int>: [const] BasisTuple {
@@ -265,6 +356,66 @@ where
     T::Terms: [const] CanonicalBasis,
 {
     BasisCombination::<Nil>::new(t)
+}
+
+/// Normalizes a scalar, basis element, or hierarchical tuple coordinate into its
+/// sparse basis / scalar representation (mirroring PyCuTe's `ArithTuple(coord)`).
+pub const trait IntoBasisCoord: Copy {
+    /// Normalized sparse basis or scalar coordinate type.
+    type Output: Copy;
+
+    /// Converts `self` into its sparse basis / scalar form.
+    fn into_basis_coord(self) -> Self::Output;
+}
+
+const impl IntoBasisCoord for Nil {
+    type Output = Nil;
+
+    fn into_basis_coord(self) -> Nil {
+        Nil
+    }
+}
+
+const impl<I: [const] Integer> IntoBasisCoord for I {
+    type Output = I;
+
+    fn into_basis_coord(self) -> I {
+        self
+    }
+}
+
+const impl<V: [const] BasisCoeff, P: [const] BasisPath> IntoBasisCoord for BasisTerm<V, P> {
+    type Output = Self;
+
+    fn into_basis_coord(self) -> Self {
+        self
+    }
+}
+
+const impl<T: [const] BasisTuple> IntoBasisCoord for BasisCombination<T> {
+    type Output = Self;
+
+    fn into_basis_coord(self) -> Self {
+        self
+    }
+}
+
+const impl<H, T> IntoBasisCoord for Til<H, T>
+where
+    Self: [const] CollectBasisTerms<0>,
+    <Self as CollectBasisTerms<0>>::Terms: [const] CanonicalBasis,
+{
+    type Output = <<Self as CollectBasisTerms<0>>::Terms as CanonicalBasis>::Output;
+
+    fn into_basis_coord(self) -> Self::Output {
+        from_tuple(self)
+    }
+}
+
+/// Normalizes a scalar, basis element, or hierarchical tuple coordinate into its
+/// sparse basis / scalar form.
+pub const fn into_basis_coord<C: [const] IntoBasisCoord>(coord: C) -> C::Output {
+    coord.into_basis_coord()
 }
 
 /// Splits the contiguous prefix of terms with leading mode `MODE` (stripping that outer mode),

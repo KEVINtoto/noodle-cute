@@ -1,6 +1,6 @@
-//! Accessors: pure `#![no_std]` memory and functional backends for CuTe [`Tensor`](super::Tensor)s.
+//! Accessors: pure `#![no_std]` memory and functional backends for CuTe [`Tensor`]s.
 //!
-//! A [`Layout`](crate::layout::Layout) maps a coordinate to a codomain offset; an accessor
+//! A [`Layout`] maps a coordinate to a codomain offset; an accessor
 //! maps that offset to a value (or shifts itself to a sub-view at that offset). Keeping
 //! storage and indexing orthogonal allows the same tensor API and layout algebra to address
 //! borrowed slices, mutable cell buffers, raw pointers, coordinate origins, and lazily
@@ -23,6 +23,9 @@
 //!     [`identity_tensor`](super::identity_tensor)).
 //!   - [`TransformAccessor`]: Read-only wrapper applying a transform `F` on every load while
 //!     propagating offsets to the inner accessor.
+//!   - [`OutOfBoundsAccessor`]: Read-only coordinate-indexed wrapper around a
+//!     [`Tensor`] that returns a fill value whenever the accumulated coordinate
+//!     falls outside the tensor's shape.
 //!
 //! # Usage
 //!
@@ -63,11 +66,17 @@ use core::cell::Cell;
 use core::fmt::{self, Debug, Display, Formatter};
 use core::ops::Add;
 
-use crate::basis::{BasisCombination, IntoColexTerms, MergeEq, basis_eq};
+use crate::basis::{
+    BasisCombination, IntoBasisCoord, IntoColexTerms, MergeEq, basis_eq, into_basis_coord,
+};
 use crate::integer::{Int, Integer, add, int};
-use crate::stride::Accumulate;
+use crate::layout::Layout;
+use crate::shape::{InBounds, Shape, in_bounds};
+use crate::stride::{Accumulate, Stride};
 use crate::swizzle::{F2, F2Scalar};
 use crate::tuple::Nil;
+
+use super::{Tensor, TensorIndex};
 
 /// Marker base trait for all CuTe accessor types.
 ///
@@ -983,6 +992,200 @@ impl<A: Display, F: Debug> Display for TransformAccessor<A, F> {
             f,
             "TransformAccessor({}, {:?})",
             self.accessor, self.transform
+        )
+    }
+}
+
+// ------------------------------------------------------------------
+// OutOfBoundsAccessor<T, Fill, Origin>
+// ------------------------------------------------------------------
+
+/// Read-only accessor that indexes an underlying [`Tensor`] by coordinate and returns
+/// `fill` whenever the accumulated coordinate falls outside the tensor's shape.
+///
+/// Designed for coordinate-codomain layouts (such as [`im2col_padded`](crate::algorithm::im2col::im2col_padded)):
+/// offsetting accumulates into `origin` via [`Accumulate`] so slicing a padded view preserves
+/// bounds checking without allocating padded storage.
+///
+/// # Examples
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl, const_ops, const_cmp)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::layout::Layout;
+/// use noodle_cute::tensor::{Accessor, OutOfBoundsAccessor, make_tensor};
+///
+/// let mut buf = [0.0f64; 4];
+/// let mut t = make_tensor(
+///     &mut buf,
+///     Layout::new(int_tuple![Int::<2>, Int::<2>], int_tuple![Int::<2>, Int::<1>]),
+/// );
+/// t.set(int_tuple![1i32, 1i32], 5.0);
+///
+/// let oob = OutOfBoundsAccessor::new(t, -1.0);
+/// assert_eq!(oob.load(int_tuple![1i32, 1i32]), 5.0);
+/// assert_eq!(oob.load(int_tuple![2i32, 0i32]), -1.0);
+/// assert_eq!(oob.load(int_tuple![-1i32, 0i32]), -1.0);
+/// ```
+///
+/// `OutOfBoundsAccessor` is read-only; writing through a tensor backed by it fails at compile time:
+///
+/// ```compile_fail,E0277
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::layout::Layout;
+/// use noodle_cute::tensor::{OutOfBoundsAccessor, Tensor, make_tensor};
+///
+/// let mut buf = [0i32; 4];
+/// let base = make_tensor(&mut buf, Int::<4>);
+/// let mut padded = Tensor::new(OutOfBoundsAccessor::new(base, 0), Layout::from_shape(Int::<4>));
+/// padded.set(0i32, 1);
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct OutOfBoundsAccessor<T, Fill, Origin = Int<0>> {
+    /// Backing tensor indexed when the accumulated coordinate is in bounds.
+    pub tensor: T,
+    /// Value returned for out-of-bounds coordinates.
+    pub fill: Fill,
+    /// Accumulated coordinate origin.
+    pub origin: Origin,
+}
+
+const impl<T: Copy, Fill: Copy, Origin: Copy> AccessorBase
+    for OutOfBoundsAccessor<T, Fill, Origin>
+{
+}
+
+impl<T, Fill> OutOfBoundsAccessor<T, Fill, Int<0>> {
+    /// Creates an [`OutOfBoundsAccessor`] rooted at `Int<0>` returning `fill` out of bounds.
+    pub const fn new(tensor: T, fill: Fill) -> Self {
+        Self {
+            tensor,
+            fill,
+            origin: Int::<0>,
+        }
+    }
+}
+
+impl<T, Fill, Origin> OutOfBoundsAccessor<T, Fill, Origin> {
+    /// Creates an [`OutOfBoundsAccessor`] with an explicit coordinate `origin`.
+    pub const fn with_origin(tensor: T, fill: Fill, origin: Origin) -> Self {
+        Self {
+            tensor,
+            fill,
+            origin,
+        }
+    }
+
+    /// Returns a reference to the backing tensor.
+    pub const fn tensor(&self) -> &T {
+        &self.tensor
+    }
+
+    /// Returns a copy of the out-of-bounds fill value.
+    pub const fn fill(&self) -> Fill
+    where
+        Fill: Copy,
+    {
+        self.fill
+    }
+
+    /// Returns a copy of the accumulated coordinate origin.
+    pub const fn origin(&self) -> Origin
+    where
+        Origin: Copy,
+    {
+        self.origin
+    }
+}
+
+const impl<T, Fill, Origin, Off> AccessorOffset<Off> for OutOfBoundsAccessor<T, Fill, Origin>
+where
+    T: Copy,
+    Fill: Copy,
+    Off: [const] IntoBasisCoord,
+    Origin: [const] Accumulate<Off::Output>,
+{
+    type Output = OutOfBoundsAccessor<T, Fill, Origin::Output>;
+
+    fn offset(&self, offset: Off) -> Self::Output {
+        OutOfBoundsAccessor {
+            tensor: self.tensor,
+            fill: self.fill,
+            origin: self.origin.accumulate(into_basis_coord(offset)),
+        }
+    }
+}
+
+const impl<A, S, D, Fill, Origin, Off> Accessor<Off>
+    for OutOfBoundsAccessor<Tensor<A, Layout<S, D>>, Fill, Origin>
+where
+    A: Copy,
+    S: [const] Shape,
+    D: [const] Stride<S>,
+    Fill: Copy,
+    Off: [const] IntoBasisCoord,
+    Origin: [const] Accumulate<Off::Output>,
+    Origin::Output: [const] InBounds<S>,
+    Tensor<A, Layout<S, D>>: [const] TensorIndex<Origin::Output, Output = Fill>,
+{
+    type Item = Fill;
+
+    fn load(&self, offset: Off) -> Self::Item {
+        let crd = self.origin.accumulate(into_basis_coord(offset));
+        if in_bounds(crd, &self.tensor.layout.shape) {
+            self.tensor.at(crd)
+        } else {
+            self.fill
+        }
+    }
+}
+
+const impl<T, Fill, Origin, Off> Add<Off> for OutOfBoundsAccessor<T, Fill, Origin>
+where
+    Self: [const] AccessorOffset<Off>,
+{
+    type Output = <Self as AccessorOffset<Off>>::Output;
+
+    fn add(self, rhs: Off) -> Self::Output {
+        self.offset(rhs)
+    }
+}
+
+const impl<T1, F1, O1, T2, F2, O2> PartialEq<OutOfBoundsAccessor<T2, F2, O2>>
+    for OutOfBoundsAccessor<T1, F1, O1>
+where
+    T1: [const] PartialEq<T2>,
+    F1: [const] PartialEq<F2>,
+    O1: [const] IntoColexTerms,
+    O2: [const] IntoColexTerms,
+    O1::Terms: [const] MergeEq<O2::Terms>,
+{
+    fn eq(&self, other: &OutOfBoundsAccessor<T2, F2, O2>) -> bool {
+        self.tensor == other.tensor
+            && self.fill == other.fill
+            && basis_eq(self.origin, other.origin)
+    }
+}
+
+const impl<T, F, O> Eq for OutOfBoundsAccessor<T, F, O>
+where
+    T: [const] Eq,
+    F: [const] Eq,
+    O: [const] IntoColexTerms,
+    O::Terms: [const] MergeEq<O::Terms>,
+{
+}
+
+impl<T: Display, Fill: Debug, Origin: Display> Display for OutOfBoundsAccessor<T, Fill, Origin> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "OutOfBoundsAccessor({}, fill={:?}, origin={})",
+            self.tensor, self.fill, self.origin
         )
     }
 }

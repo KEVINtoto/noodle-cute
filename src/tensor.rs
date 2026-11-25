@@ -20,7 +20,8 @@
 //!
 //! - [`mod@accessor`]: Accessor traits ([`LinearOffset`], [`AccessorOffset`], [`Accessor`],
 //!   [`MutableAccessor`], [`IntoLinearAccessor`]) and pure `#![no_std]` backends
-//!   ([`SliceAccessor`], [`CellAccessor`], [`Ptr`], [`ImplicitAccessor`], [`TransformAccessor`]).
+//!   ([`SliceAccessor`], [`CellAccessor`], [`Ptr`], [`ImplicitAccessor`], [`TransformAccessor`],
+//!   [`OutOfBoundsAccessor`]).
 //! - [`mod@ops`]: Indexing/slicing ([`TensorIndex`], [`TensorSet`]), layout-algebra
 //!   pass-through, and block tiling ([`local_tile`]).
 //! - **Tensor core**: [`Tensor`], [`IsTensor`], [`is_tensor`], [`identity_tensor`],
