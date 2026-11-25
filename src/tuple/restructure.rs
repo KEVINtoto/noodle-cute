@@ -46,8 +46,8 @@ use super::{
 
 /// Wraps scalar leaves in a singleton tuple and preserves built-in tuple containers.
 ///
-/// A leaf becomes `TupleContainer::new(self, Nil)`. [`Nil`] and
-/// [`TupleContainer`](super::TupleContainer) return copies of themselves. Custom leaf
+/// A leaf becomes `Til::new(self, Nil)`. [`Nil`] and
+/// [`Til`](super::Til) return copies of themselves. Custom leaf
 /// types automatically inherit the [`Leaf`] implementation.
 ///
 /// # Examples
@@ -55,12 +55,12 @@ use super::{
 /// ```
 /// # #![feature(const_trait_impl, const_ops, const_cmp)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Nil, TupleContainer, Wrap};
+/// use noodle_cute::tuple::{Nil, Til, Wrap};
 ///
-/// const WRAPPED: TupleContainer<Int<3>, Nil> = Int::<3>.wrap();
-/// assert_eq!(WRAPPED, TupleContainer::new(Int::<3>, Nil));
-/// assert_eq!(7i32.wrap(), TupleContainer::new(7i32, Nil));
-/// let nested = TupleContainer::new(1i32, TupleContainer::new(TupleContainer::new(2i32, Nil), Nil));
+/// const WRAPPED: Til<Int<3>, Nil> = Int::<3>.wrap();
+/// assert_eq!(WRAPPED, Til::new(Int::<3>, Nil));
+/// assert_eq!(7i32.wrap(), Til::new(7i32, Nil));
+/// let nested = Til::new(1i32, Til::new(Til::new(2i32, Nil), Nil));
 /// assert_eq!(nested.wrap(), nested);
 /// assert_eq!(Nil.wrap(), Nil);
 /// ```
@@ -103,16 +103,16 @@ const impl<H: [const] Item, T: [const] Tuple> Wrap for Til<H, T> {
 /// ```
 /// # #![feature(const_trait_impl, const_ops, const_cmp)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Nil, TupleContainer, Unwrap};
+/// use noodle_cute::tuple::{Nil, Til, Unwrap};
 ///
-/// const UNWRAPPED: Int<3> = TupleContainer::new(TupleContainer::new(Int::<3>, Nil), Nil).unwrap();
+/// const UNWRAPPED: Int<3> = Til::new(Til::new(Int::<3>, Nil), Nil).unwrap();
 /// assert_eq!(UNWRAPPED, Int::<3>);
 /// assert_eq!(7i32.unwrap(), 7i32);
-/// assert_eq!(TupleContainer::new(Nil, Nil).unwrap(), Nil);
+/// assert_eq!(Til::new(Nil, Nil).unwrap(), Nil);
 /// assert_eq!(Nil.unwrap(), Nil);
 ///
-/// let pair = TupleContainer::new(TupleContainer::new(1i32, Nil), TupleContainer::new(2i32, Nil));
-/// assert_eq!(TupleContainer::new(TupleContainer::new(pair, Nil), Nil).unwrap(), pair);
+/// let pair = Til::new(Til::new(1i32, Nil), Til::new(2i32, Nil));
+/// assert_eq!(Til::new(Til::new(pair, Nil), Nil).unwrap(), pair);
 /// ```
 pub const trait Unwrap: [const] Item {
     /// The item reached by recursively unwrapping enclosing singletons.
@@ -159,16 +159,16 @@ const impl<H: [const] Item, TH: [const] Item, TT: [const] Tuple> Unwrap for Til<
 /// ```
 /// # #![feature(const_trait_impl, const_ops, const_cmp)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Append, Nil, TupleContainer};
+/// use noodle_cute::tuple::{Append, Nil, Til};
 ///
-/// const APPENDED: TupleContainer<i32, TupleContainer<Int<2>, Nil>> =
-///     TupleContainer::new(1i32, Nil).append(TupleContainer::new(Int::<2>, Nil));
-/// assert_eq!(APPENDED, TupleContainer::new(1i32, TupleContainer::new(Int::<2>, Nil)));
+/// const APPENDED: Til<i32, Til<Int<2>, Nil>> =
+///     Til::new(1i32, Nil).append(Til::new(Int::<2>, Nil));
+/// assert_eq!(APPENDED, Til::new(1i32, Til::new(Int::<2>, Nil)));
 ///
-/// let nested = TupleContainer::new(TupleContainer::new(1i32, TupleContainer::new(2i32, Nil)), Nil);
+/// let nested = Til::new(Til::new(1i32, Til::new(2i32, Nil)), Nil);
 /// assert_eq!(
-///     nested.append(TupleContainer::new(3i32, Nil)),
-///     TupleContainer::new(nested.0, TupleContainer::new(3i32, Nil))
+///     nested.append(Til::new(3i32, Nil)),
+///     Til::new(nested.0, Til::new(3i32, Nil))
 /// );
 /// assert_eq!(Nil.append(nested), nested);
 /// assert_eq!(nested.append(Nil), nested);
@@ -178,8 +178,8 @@ const impl<H: [const] Item, TH: [const] Item, TT: [const] Tuple> Unwrap for Til<
 /// An integer right operand fails the tuple bound (including when appending to `Nil`).
 ///
 /// ```compile_fail,E0277
-/// use noodle_cute::tuple::{Append, Nil, TupleContainer};
-/// let _ = TupleContainer::new(1i32, Nil).append(2i32);
+/// use noodle_cute::tuple::{Append, Nil, Til};
+/// let _ = Til::new(1i32, Nil).append(2i32);
 /// ```
 ///
 /// ```compile_fail,E0277
@@ -221,8 +221,8 @@ where
 
 /// Inserts `rhs` as the new head mode of a [`Tuple`].
 ///
-/// [`Nil`] becomes the singleton tuple `TupleContainer::new(rhs, Nil)`, and a
-/// [`TupleContainer`](super::TupleContainer) becomes `TupleContainer::new(rhs, *self)`
+/// [`Nil`] becomes the singleton tuple `Til::new(rhs, Nil)`, and a
+/// [`Til`](super::Til) becomes `Til::new(rhs, *self)`
 /// in $O(1)$, preserving its existing modes as the tail.
 ///
 /// # Examples
@@ -230,15 +230,15 @@ where
 /// ```
 /// # #![feature(const_trait_impl, const_ops, const_cmp)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Nil, Prepend, TupleContainer};
+/// use noodle_cute::tuple::{Nil, Prepend, Til};
 ///
-/// const PREPENDED: TupleContainer<i32, TupleContainer<Int<2>, Nil>> =
-///     TupleContainer::new(Int::<2>, Nil).prepend(1i32);
-/// assert_eq!(PREPENDED, TupleContainer::new(1i32, TupleContainer::new(Int::<2>, Nil)));
-/// assert_eq!(Nil.prepend(0i32), TupleContainer::new(0i32, Nil));
+/// const PREPENDED: Til<i32, Til<Int<2>, Nil>> =
+///     Til::new(Int::<2>, Nil).prepend(1i32);
+/// assert_eq!(PREPENDED, Til::new(1i32, Til::new(Int::<2>, Nil)));
+/// assert_eq!(Nil.prepend(0i32), Til::new(0i32, Nil));
 /// assert_eq!(
-///     TupleContainer::new(2i32, Nil).prepend(TupleContainer::new(1i32, Nil)),
-///     TupleContainer::new(TupleContainer::new(1i32, Nil), TupleContainer::new(2i32, Nil))
+///     Til::new(2i32, Nil).prepend(Til::new(1i32, Nil)),
+///     Til::new(Til::new(1i32, Nil), Til::new(2i32, Nil))
 /// );
 /// ```
 ///
@@ -313,16 +313,16 @@ where
 /// ```
 /// # #![feature(const_trait_impl, const_ops, const_cmp)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Flatten, Nil, TupleContainer};
+/// use noodle_cute::tuple::{Flatten, Nil, Til};
 ///
-/// const FLAT: TupleContainer<Int<1>, TupleContainer<i32, Nil>> =
-///     TupleContainer::new(
-///         TupleContainer::new(Int::<1>, TupleContainer::new(2i32, Nil)),
-///         TupleContainer::new(Nil, Nil),
+/// const FLAT: Til<Int<1>, Til<i32, Nil>> =
+///     Til::new(
+///         Til::new(Int::<1>, Til::new(2i32, Nil)),
+///         Til::new(Nil, Nil),
 ///     )
 ///     .flatten();
-/// assert_eq!(FLAT, TupleContainer::new(Int::<1>, TupleContainer::new(2i32, Nil)));
-/// assert_eq!(42i32.flatten(), TupleContainer::new(42i32, Nil));
+/// assert_eq!(FLAT, Til::new(Int::<1>, Til::new(2i32, Nil)));
+/// assert_eq!(42i32.flatten(), Til::new(42i32, Nil));
 /// assert_eq!(Nil.flatten(), Nil);
 /// ```
 pub const trait Flatten: [const] Item {
@@ -517,7 +517,7 @@ where
     }
 }
 
-/// Replaces top-level mode `I` of a [`TupleContainer`](super::TupleContainer) with `x`.
+/// Replaces top-level mode `I` of a [`Til`](super::Til) with `x`.
 pub const trait ReplaceAt<X: [const] Item, const I: int>: [const] Item {
     /// Resulting tuple after replacing mode `I` with `X`.
     type Output: [const] Tuple;

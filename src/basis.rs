@@ -247,8 +247,8 @@ const impl<V: [const] BasisCoeff, P: [const] BasisPath, T: [const] BasisTuple> B
 /// ```compile_fail,E0599
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
 /// # #![allow(incomplete_features)]
-/// use noodle_cute::{basis::{Basis, BasisCombination}, mode, tuple::{Nil, TupleContainer}};
-/// let _ = BasisCombination::<TupleContainer<Basis<mode![1]>, TupleContainer<Basis<mode![0]>, Nil>>>::default();
+/// use noodle_cute::{basis::{Basis, BasisCombination}, mode, tuple::{Nil, Til}};
+/// let _ = BasisCombination::<Til<Basis<mode![1]>, Til<Basis<mode![0]>, Nil>>>::default();
 /// ```
 #[derive(Clone, Copy, Debug)]
 #[repr(transparent)]

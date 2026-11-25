@@ -752,9 +752,9 @@ where
     }
 }
 
-/// Layout composition algebra $A \circ B$.
+/// Layout (or tensor) composition algebra $A \circ B$.
 pub const trait Composition<B>: Copy {
-    /// Resulting composed [`Layout`] (or [`Nil`] when both operands are [`Nil`]).
+    /// Resulting composed [`Layout`], [`Tensor`](crate::tensor::Tensor), or [`Nil`].
     type Output: Copy;
     /// Computes `self o b`, panicking if a dynamic precondition or overflow check fails.
     fn composition(self, b: B) -> Self::Output;

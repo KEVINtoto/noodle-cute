@@ -13,8 +13,7 @@ use noodle_cute::stride::{
     same_path,
 };
 use noodle_cute::tuple::{
-    Congruent, Item, LeafProfile, Nil, NilProfile, Til, TransformLeafFunctor, TupleContainer,
-    TupleProfile,
+    Congruent, Item, LeafProfile, Nil, NilProfile, Til, TransformLeafFunctor, TupleProfile,
 };
 use noodle_cute::{basis_tuple, e, int_tuple, mode, tuple};
 
@@ -124,10 +123,8 @@ fn inner_product_and_prefix_product_work_with_const_eval() {
     );
 
     // Const eval inner_product
-    const C_CRD: TupleContainer<Int<2>, TupleContainer<Int<3>, Nil>> =
-        Til(Int::<2>, Til(Int::<3>, Nil));
-    const C_STRD: TupleContainer<Int<1>, TupleContainer<Int<4>, Nil>> =
-        Til(Int::<1>, Til(Int::<4>, Nil));
+    const C_CRD: Til<Int<2>, Til<Int<3>, Nil>> = Til(Int::<2>, Til(Int::<3>, Nil));
+    const C_STRD: Til<Int<1>, Til<Int<4>, Nil>> = Til(Int::<1>, Til(Int::<4>, Nil));
     const IP: Int<14> = inner_product(C_CRD, C_STRD);
     assert_eq!(IP, Int::<14>);
 
@@ -173,8 +170,7 @@ fn inner_product_and_prefix_product_work_with_const_eval() {
         )
     );
 
-    const P_OUT: TupleContainer<Int<1>, TupleContainer<Int<3>, Nil>> =
-        prefix_product(Til(Int::<3>, Til(Int::<4>, Nil)));
+    const P_OUT: Til<Int<1>, Til<Int<3>, Nil>> = prefix_product(Til(Int::<3>, Til(Int::<4>, Nil)));
     assert_eq!(P_OUT, Til(Int::<1>, Til(Int::<3>, Nil)));
 }
 
@@ -207,8 +203,7 @@ fn scale_stride_works_for_scalar_and_basis_strides() {
         )
     );
 
-    const SCALED: TupleContainer<Int<6>, TupleContainer<int, Nil>> =
-        Til(Int::<2>, Til(3i32, Nil)).scale_stride(Int::<3>);
+    const SCALED: Til<Int<6>, Til<int, Nil>> = Til(Int::<2>, Til(3i32, Nil)).scale_stride(Int::<3>);
     assert_eq!(SCALED, Til(Int::<6>, Til(9i32, Nil)));
 }
 
@@ -246,12 +241,9 @@ fn codomain_profile_reflects_scalar_basis_and_combination_structures() {
     );
 
     type Comb = BasisCombination<
-        TupleContainer<
+        Til<
             BasisTerm<i32, Mode<1, Mode<0>>>,
-            TupleContainer<
-                BasisTerm<i32, Mode<1, Mode<1>>>,
-                TupleContainer<BasisTerm<i32, Mode<3>>, Nil>,
-            >,
+            Til<BasisTerm<i32, Mode<1, Mode<1>>>, Til<BasisTerm<i32, Mode<3>>, Nil>>,
         >,
     >;
     assert_eq!(
@@ -267,7 +259,7 @@ fn codomain_profile_reflects_scalar_basis_and_combination_structures() {
         >()
     );
 
-    type Tup = TupleContainer<Int<1>, TupleContainer<ScaledBasis<Int<1>, Mode<0>>, Nil>>;
+    type Tup = Til<Int<1>, Til<ScaledBasis<Int<1>, Mode<0>>, Nil>>;
     assert_eq!(
         profile_of::<Tup>(),
         TypeId::of::<TupleProfile<LeafProfile, NilProfile>>()
@@ -411,9 +403,8 @@ fn test_inner_product_high_out_of_order_and_repeated_basis_modes() {
         basis_tuple![Int::<0>, 3i32, Int::<0>, 7i32, Int::<0>, 7i32]
     );
 
-    type Expected = BasisCombination<
-        TupleContainer<BasisTerm<Int<2>, Mode<0>>, TupleContainer<BasisTerm<Int<3>, Mode<3>>, Nil>>,
-    >;
+    type Expected =
+        BasisCombination<Til<BasisTerm<Int<2>, Mode<0>>, Til<BasisTerm<Int<3>, Mode<3>>, Nil>>>;
     const RESULT: Expected = inner_product(int_tuple![Int::<3>, Int::<2>], tuple![e![3], e![0]]);
     assert_eq!(RESULT, basis_tuple![Int::<2>, Int::<0>, Int::<0>, Int::<3>]);
 
@@ -450,15 +441,12 @@ fn test_arithmetic_tuple_strides_and_mixed_basis_inner_products() {
         basis_tuple![10i32, 15i32]
     );
 
-    type Expected = BasisCombination<
-        TupleContainer<BasisTerm<Int<6>, Mode<0>>, TupleContainer<BasisTerm<Int<9>, Mode<1>>, Nil>>,
-    >;
+    type Expected =
+        BasisCombination<Til<BasisTerm<Int<6>, Mode<0>>, Til<BasisTerm<Int<9>, Mode<1>>, Nil>>>;
     const RESULT: Expected = inner_product(Int::<3>, basis_tuple![Int::<2>, Int::<3>]);
     assert_eq!(RESULT, basis_tuple![Int::<6>, Int::<9>]);
 
-    type D = BasisCombination<
-        TupleContainer<BasisTerm<i32, Mode<0>>, TupleContainer<BasisTerm<i32, Mode<1>>, Nil>>,
-    >;
+    type D = BasisCombination<Til<BasisTerm<i32, Mode<0>>, Til<BasisTerm<i32, Mode<1>>, Nil>>>;
     assert_eq!(
         TypeId::of::<<D as CodomainProfile>::Profile>(),
         TypeId::of::<TupleProfile<LeafProfile, TupleProfile<LeafProfile, NilProfile>>>()
@@ -510,18 +498,15 @@ fn test_inner_product() {
 
 #[test]
 fn test_inner_product_const_eval() {
-    const CRD: TupleContainer<Int<2>, TupleContainer<Int<3>, Nil>> = int_tuple![Int::<2>, Int::<3>];
-    const STRD: TupleContainer<Int<1>, TupleContainer<Int<4>, Nil>> =
-        int_tuple![Int::<1>, Int::<4>];
+    const CRD: Til<Int<2>, Til<Int<3>, Nil>> = int_tuple![Int::<2>, Int::<3>];
+    const STRD: Til<Int<1>, Til<Int<4>, Nil>> = int_tuple![Int::<1>, Int::<4>];
 
     const RES: Int<14> = inner_product(CRD, STRD);
     assert_eq!(RES, Int::<14>);
 
-    const BASIS_STRD: TupleContainer<Basis<Mode<0>>, TupleContainer<Basis<Mode<1>>, Nil>> =
-        tuple![e![0], e![1]];
-    type ExpectedProj = BasisCombination<
-        TupleContainer<BasisTerm<Int<2>, Mode<0>>, TupleContainer<BasisTerm<Int<3>, Mode<1>>, Nil>>,
-    >;
+    const BASIS_STRD: Til<Basis<Mode<0>>, Til<Basis<Mode<1>>, Nil>> = tuple![e![0], e![1]];
+    type ExpectedProj =
+        BasisCombination<Til<BasisTerm<Int<2>, Mode<0>>, Til<BasisTerm<Int<3>, Mode<1>>, Nil>>>;
     const PROJ: ExpectedProj = inner_product(CRD, BASIS_STRD);
     assert_eq!(PROJ, from_tuple(CRD));
 }
@@ -599,9 +584,8 @@ fn test_prefix_product_single_trait() {
 
 #[test]
 fn test_prefix_product_const_eval() {
-    const SHAPE: TupleContainer<Int<3>, TupleContainer<Int<4>, Nil>> =
-        int_tuple![Int::<3>, Int::<4>];
-    const STRIDE: TupleContainer<Int<1>, TupleContainer<Int<3>, Nil>> = prefix_product(SHAPE);
+    const SHAPE: Til<Int<3>, Til<Int<4>, Nil>> = int_tuple![Int::<3>, Int::<4>];
+    const STRIDE: Til<Int<1>, Til<Int<3>, Nil>> = prefix_product(SHAPE);
     assert_eq!(STRIDE, int_tuple![Int::<1>, Int::<3>]);
 }
 
@@ -690,15 +674,15 @@ fn test_codomain_profile() {
         >()
     );
 
-    // TupleContainer of scalar strides maps to 1D scalar offsets (LeafProfile)
-    type T1 = TupleContainer<Int<1>, Nil>;
+    // Til of scalar strides maps to 1D scalar offsets (LeafProfile)
+    type T1 = Til<Int<1>, Nil>;
     assert_eq!(profile_of::<T1>(), TypeId::of::<LeafProfile>());
 
-    type T2 = TupleContainer<Int<1>, TupleContainer<Int<2>, Nil>>;
+    type T2 = Til<Int<1>, Til<Int<2>, Nil>>;
     assert_eq!(profile_of::<T2>(), TypeId::of::<LeafProfile>());
 
-    // TupleContainer of basis strides merges their active codomain axes
-    type B2 = TupleContainer<Basis<mode![0]>, TupleContainer<Basis<mode![1]>, Nil>>;
+    // Til of basis strides merges their active codomain axes
+    type B2 = Til<Basis<mode![0]>, Til<Basis<mode![1]>, Nil>>;
     assert_eq!(
         profile_of::<B2>(),
         TypeId::of::<TupleProfile<LeafProfile, TupleProfile<LeafProfile, NilProfile>>>()
@@ -889,24 +873,22 @@ fn stride_regression_prefix_product_codomain_profile_accumulate_and_coshape() {
         TypeId::of::<T::Profile>()
     }
 
-    type ScalarStride2D = TupleContainer<Int<1>, TupleContainer<Int<4>, Nil>>;
+    type ScalarStride2D = Til<Int<1>, Til<Int<4>, Nil>>;
     assert_eq!(profile_of::<ScalarStride2D>(), TypeId::of::<LeafProfile>());
 
-    type BasisStride2D = TupleContainer<Basis<Mode<0>>, TupleContainer<Basis<Mode<1>>, Nil>>;
+    type BasisStride2D = Til<Basis<Mode<0>>, Til<Basis<Mode<1>>, Nil>>;
     assert_eq!(
         profile_of::<BasisStride2D>(),
         TypeId::of::<TupleProfile<LeafProfile, TupleProfile<LeafProfile, NilProfile>>>()
     );
 
-    type BasisStrideTransposed =
-        TupleContainer<Basis<Mode<1>>, TupleContainer<Basis<Mode<0>>, Nil>>;
+    type BasisStrideTransposed = Til<Basis<Mode<1>>, Til<Basis<Mode<0>>, Nil>>;
     assert_eq!(
         profile_of::<BasisStrideTransposed>(),
         TypeId::of::<TupleProfile<LeafProfile, TupleProfile<LeafProfile, NilProfile>>>()
     );
 
-    type BroadcastAndBasis =
-        TupleContainer<Int<0>, TupleContainer<ScaledBasis<Int<1>, Mode<0>>, Nil>>;
+    type BroadcastAndBasis = Til<Int<0>, Til<ScaledBasis<Int<1>, Mode<0>>, Nil>>;
     assert_eq!(
         profile_of::<BroadcastAndBasis>(),
         TypeId::of::<TupleProfile<LeafProfile, NilProfile>>()

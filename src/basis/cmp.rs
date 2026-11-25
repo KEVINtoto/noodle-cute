@@ -98,6 +98,13 @@ pub const trait IntoColexTerms: Copy {
     fn into_colex_terms(self) -> Self::Terms;
 }
 
+const impl IntoColexTerms for Nil {
+    type Terms = Nil;
+    fn into_colex_terms(self) -> Nil {
+        Nil
+    }
+}
+
 const impl<V: [const] BasisCoeff> IntoColexTerms for V
 where
     Nil: [const] EmitBasisTerm<V, ModeEnd, { COEFF_IS_STATIC_ZERO::<V> }>,

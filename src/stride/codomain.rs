@@ -32,8 +32,11 @@ use crate::basis::{
     CanonicalBasis, CombAsTuple, ComparePath, EQ_MODE, EmitBasisTerm, IntoBasisCombination,
     MergeAdd, Mode, ModeEnd, PATH_ORDER, PathOrdering, SplitModePrefix,
 };
-use crate::integer::{ArithAdd, INCREASE, IS_NON_NEG, Int, Integer, Sum, add, int, sub};
-use crate::shape::{Shape, ValidShapeExtent};
+use crate::integer::ops::bit_length_non_neg;
+use crate::integer::{
+    ArithAdd, INCREASE, IS_NON_NEG, Int, Integer, Sum, add, int, mul, shiftl, sub,
+};
+use crate::shape::{Shape, ShapeScalar, ValidShapeExtent};
 use crate::tuple::{Item, Leaf, Nil, Til, Tuple};
 
 use super::{Stride, StrideMul};
@@ -57,7 +60,7 @@ use super::{Stride, StrideMul};
 /// use noodle_cute::basis::{Basis, Mode, ScaledBasis};
 /// use noodle_cute::integer::Int;
 /// use noodle_cute::stride::CodomainProfile;
-/// use noodle_cute::tuple::{LeafProfile, Nil, NilProfile, TupleContainer, TupleProfile};
+/// use noodle_cute::tuple::{LeafProfile, Nil, NilProfile, Til, TupleProfile};
 ///
 /// fn profile_of<T: CodomainProfile>() -> TypeId {
 ///     TypeId::of::<T::Profile>()
@@ -71,11 +74,11 @@ use super::{Stride, StrideMul};
 /// );
 ///
 /// // Multi-mode integer strides produce a 1D scalar offset codomain
-/// type Scalar2D = TupleContainer<Int<1>, TupleContainer<Int<2>, Nil>>;
+/// type Scalar2D = Til<Int<1>, Til<Int<2>, Nil>>;
 /// assert_eq!(profile_of::<Scalar2D>(), TypeId::of::<LeafProfile>());
 ///
 /// // Multi-mode basis strides merge their active axes into the codomain profile
-/// type Basis2D = TupleContainer<Basis<Mode<0>>, TupleContainer<Basis<Mode<1>>, Nil>>;
+/// type Basis2D = Til<Basis<Mode<0>>, Til<Basis<Mode<1>>, Nil>>;
 /// assert_eq!(
 ///     profile_of::<Basis2D>(),
 ///     TypeId::of::<TupleProfile<LeafProfile, TupleProfile<LeafProfile, NilProfile>>>()
@@ -1084,4 +1087,152 @@ where
 /// ```
 pub const fn coshape<S: [const] Coshape<D>, D: Stride<S>>(shape: S, stride: D) -> S::Output {
     shape.coshape(stride)
+}
+
+/// Accumulator tracking reachable linear offsets across leaves of a non-empty layout.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinearBoundsAcc {
+    /// No non-zero leaf spans accumulated yet (`[0, 0]`).
+    Zero,
+    /// Integer-strided closed offset interval `[min, max]`.
+    Integer(int, int),
+    /// Binary-field (`F2`) accumulated bitwise OR mask of maximal leaf spans.
+    F2Mask(int),
+}
+
+impl LinearBoundsAcc {
+    /// Combines an integer leaf span `(s - 1) * d` into the running bounds.
+    #[doc(hidden)]
+    pub const fn push_integer_span(self, span: int) -> Self {
+        let (lo_d, hi_d) = if span < 0 { (span, 0) } else { (0, span) };
+        match self {
+            Self::Zero => Self::Integer(lo_d, hi_d),
+            Self::Integer(lo, hi) => Self::Integer(add(lo, lo_d), add(hi, hi_d)),
+            Self::F2Mask(mask) => {
+                assert!(
+                    span == 0,
+                    "cannot mix nonzero integer and F2 strides in linear bounds"
+                );
+                Self::F2Mask(mask)
+            }
+        }
+    }
+
+    /// Combines a carry-less `F2` leaf span `(s - 1) * d` into the running bit-span mask.
+    #[doc(hidden)]
+    pub const fn push_f2_span(self, span: int) -> Self {
+        match self {
+            Self::Zero => Self::F2Mask(span),
+            Self::F2Mask(mask) => Self::F2Mask(mask | span),
+            Self::Integer(0, 0) => Self::F2Mask(span),
+            Self::Integer(_, _) => {
+                assert!(
+                    span == 0,
+                    "cannot mix nonzero integer and F2 strides in linear bounds"
+                );
+                self
+            }
+        }
+    }
+
+    /// Finalizes the accumulated bounds into a closed `[min_offset, max_offset]` interval.
+    #[doc(hidden)]
+    pub const fn finish(self) -> (int, int) {
+        match self {
+            Self::Zero => (0, 0),
+            Self::Integer(lo, hi) => (lo, hi),
+            Self::F2Mask(mask) => {
+                let bits = bit_length_non_neg(mask);
+                let hi = if bits == 31 {
+                    int::MAX
+                } else {
+                    sub(shiftl(1i32, bits), 1)
+                };
+                (0, hi)
+            }
+        }
+    }
+}
+
+/// Walks a congruent `(shape, stride)` pair to fold reachable linear offset bounds.
+///
+/// Implemented only for linear strides (integers, `F2`, `BasisCombination<Nil>`, `Nil`),
+/// rejecting coordinate-basis strides at compile time.
+#[doc(hidden)]
+pub const trait LinearBoundsWalk<S: Shape>: Copy {
+    fn walk_linear_bounds(self, shape: S, acc: LinearBoundsAcc) -> LinearBoundsAcc;
+}
+
+const impl LinearBoundsWalk<Nil> for Nil {
+    fn walk_linear_bounds(self, _: Nil, acc: LinearBoundsAcc) -> LinearBoundsAcc {
+        acc
+    }
+}
+
+const impl<S: [const] ShapeScalar, I: [const] Integer> LinearBoundsWalk<S> for I {
+    fn walk_linear_bounds(self, shape: S, acc: LinearBoundsAcc) -> LinearBoundsAcc {
+        let max_c = sub(shape.value(), 1);
+        let span = mul(max_c, self.value());
+        acc.push_integer_span(span)
+    }
+}
+
+const impl<S: [const] ShapeScalar> LinearBoundsWalk<S> for BasisCombination<Nil> {
+    fn walk_linear_bounds(self, _: S, acc: LinearBoundsAcc) -> LinearBoundsAcc {
+        acc
+    }
+}
+
+const impl<SH, ST, DH, DT> LinearBoundsWalk<Til<SH, ST>> for Til<DH, DT>
+where
+    SH: [const] Shape,
+    ST: Tuple + [const] Shape,
+    DH: [const] LinearBoundsWalk<SH>,
+    DT: Tuple + [const] LinearBoundsWalk<ST>,
+{
+    fn walk_linear_bounds(self, shape: Til<SH, ST>, acc: LinearBoundsAcc) -> LinearBoundsAcc {
+        let acc1 = self.0.walk_linear_bounds(shape.0, acc);
+        self.1.walk_linear_bounds(shape.1, acc1)
+    }
+}
+
+/// Computes the exact closed `[min_offset, max_offset]` interval reachable by all in-bounds
+/// coordinates of a linear-strided `(shape, stride)` pair, or `None` when the domain is empty.
+///
+/// Unlike [`Coshape`], `LinearBounds`:
+/// - handles negative strides accurately (returning negative `min_offset` when reached);
+/// - handles zero-extent shapes cleanly (`None` when `shape.has_zero() == true`), while
+///   preserving `Some((0, 0))` for rank-0 [`Nil`] shapes (which contain 1 coordinate);
+/// - rejects non-linear coordinate-basis strides at compile time.
+pub const trait LinearBounds<D: Stride<Self>>: [const] Shape {
+    /// Returns `None` if `self` has any zero extent, or `Some((min_offset, max_offset))`.
+    fn linear_bounds(self, stride: D) -> Option<(int, int)>;
+}
+
+const impl<S, D> LinearBounds<D> for S
+where
+    S: [const] Shape,
+    D: Stride<S> + [const] LinearBoundsWalk<S>,
+{
+    fn linear_bounds(self, stride: D) -> Option<(int, int)> {
+        if self.has_zero() {
+            None
+        } else {
+            Some(
+                stride
+                    .walk_linear_bounds(self, LinearBoundsAcc::Zero)
+                    .finish(),
+            )
+        }
+    }
+}
+
+/// Returns the reachable linear offset interval `Some((min_offset, max_offset))` for a
+/// congruent linear `(shape, stride)` pair, or `None` when `shape` has a zero extent.
+pub const fn linear_bounds<S: [const] LinearBounds<D>, D: Stride<S>>(
+    shape: S,
+    stride: D,
+) -> Option<(int, int)> {
+    shape.linear_bounds(stride)
 }

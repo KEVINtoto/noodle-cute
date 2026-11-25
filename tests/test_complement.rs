@@ -19,15 +19,12 @@ use noodle_cute::integer::{Int, Integer, ge, int};
 use noodle_cute::layout::{Coprofile, Layout};
 use noodle_cute::shape::{IndexToCoord, Shape, coordinates};
 use noodle_cute::stride::{Coshape, InnerProduct, Stride};
-use noodle_cute::tuple::{Item, Nil, TupleContainer, WeaklyCongruent};
+use noodle_cute::tuple::{Item, Nil, Til, WeaklyCongruent};
 use noodle_cute::{e, int_tuple, make_layout, mode, tuple};
 
 // Post-condition checkers mirroring `test/test_complement.py`
 
-type PairLayout<S0, S1, D0, D1> = Layout<
-    TupleContainer<S0, TupleContainer<S1, Nil>>,
-    TupleContainer<D0, TupleContainer<D1, Nil>>,
->;
+type PairLayout<S0, S1, D0, D1> = Layout<Til<S0, Til<S1, Nil>>, Til<D0, Til<D1, Nil>>>;
 
 fn assert_weak_congruent<A: WeaklyCongruent<B>, B: Item>(_: &A, _: &B) {}
 
@@ -97,16 +94,16 @@ where
             > + MergeEq<
                 <<<int as IndexToCoord<SL>>::Output as InnerProduct<DL>>::Output as IntoColexTerms>::Terms,
             >,
-    TupleContainer<SL, TupleContainer<SR, Nil>>:
-        Coshape<TupleContainer<DL, TupleContainer<DR, Nil>>>,
-    <TupleContainer<SL, TupleContainer<SR, Nil>> as Coshape<
-        TupleContainer<DL, TupleContainer<DR, Nil>>,
+    Til<SL, Til<SR, Nil>>:
+        Coshape<Til<DL, Til<DR, Nil>>>,
+    <Til<SL, Til<SR, Nil>> as Coshape<
+        Til<DL, Til<DR, Nil>>,
     >>::Output: Shape,
-    int: IndexToCoord<TupleContainer<SL, TupleContainer<SR, Nil>>>,
-    <int as IndexToCoord<TupleContainer<SL, TupleContainer<SR, Nil>>>>::Output:
-        InnerProduct<TupleContainer<DL, TupleContainer<DR, Nil>>>,
-    <<int as IndexToCoord<TupleContainer<SL, TupleContainer<SR, Nil>>>>::Output as InnerProduct<
-        TupleContainer<DL, TupleContainer<DR, Nil>>,
+    int: IndexToCoord<Til<SL, Til<SR, Nil>>>,
+    <int as IndexToCoord<Til<SL, Til<SR, Nil>>>>::Output:
+        InnerProduct<Til<DL, Til<DR, Nil>>>,
+    <<int as IndexToCoord<Til<SL, Til<SR, Nil>>>>::Output as InnerProduct<
+        Til<DL, Til<DR, Nil>>,
     >>::Output: Integer,
 {
     let r = assert_complement_weak(l);
@@ -159,27 +156,27 @@ where
             > + MergeEq<
                 <<<int as IndexToCoord<SL>>::Output as InnerProduct<DL>>::Output as IntoColexTerms>::Terms,
             >,
-    TupleContainer<SL, TupleContainer<SR, Nil>>:
-        Coshape<TupleContainer<DL, TupleContainer<DR, Nil>>>,
-    <TupleContainer<SL, TupleContainer<SR, Nil>> as Coshape<
-        TupleContainer<DL, TupleContainer<DR, Nil>>,
+    Til<SL, Til<SR, Nil>>:
+        Coshape<Til<DL, Til<DR, Nil>>>,
+    <Til<SL, Til<SR, Nil>> as Coshape<
+        Til<DL, Til<DR, Nil>>,
     >>::Output: Shape,
-    int: IndexToCoord<TupleContainer<SL, TupleContainer<SR, Nil>>>,
-    <int as IndexToCoord<TupleContainer<SL, TupleContainer<SR, Nil>>>>::Output:
-        InnerProduct<TupleContainer<DL, TupleContainer<DR, Nil>>>,
-    <<int as IndexToCoord<TupleContainer<SL, TupleContainer<SR, Nil>>>>::Output as InnerProduct<
-        TupleContainer<DL, TupleContainer<DR, Nil>>,
+    int: IndexToCoord<Til<SL, Til<SR, Nil>>>,
+    <int as IndexToCoord<Til<SL, Til<SR, Nil>>>>::Output:
+        InnerProduct<Til<DL, Til<DR, Nil>>>,
+    <<int as IndexToCoord<Til<SL, Til<SR, Nil>>>>::Output as InnerProduct<
+        Til<DL, Til<DR, Nil>>,
     >>::Output: IntoColexTerms,
-    <<<int as IndexToCoord<TupleContainer<SL, TupleContainer<SR, Nil>>>>::Output as InnerProduct<
-        TupleContainer<DL, TupleContainer<DR, Nil>>,
+    <<<int as IndexToCoord<Til<SL, Til<SR, Nil>>>>::Output as InnerProduct<
+        Til<DL, Til<DR, Nil>>,
     >>::Output as IntoColexTerms>::Terms: MergeEq<
-        <<<int as IndexToCoord<TupleContainer<SL, TupleContainer<SR, Nil>>>>::Output as InnerProduct<
-            TupleContainer<DL, TupleContainer<DR, Nil>>,
+        <<<int as IndexToCoord<Til<SL, Til<SR, Nil>>>>::Output as InnerProduct<
+            Til<DL, Til<DR, Nil>>,
         >>::Output as IntoColexTerms>::Terms,
     >,
     noodle_cute::shape::Coordinates<
-        <TupleContainer<SL, TupleContainer<SR, Nil>> as Coshape<
-            TupleContainer<DL, TupleContainer<DR, Nil>>,
+        <Til<SL, Til<SR, Nil>> as Coshape<
+            Til<DL, Til<DR, Nil>>,
         >>::Output,
     >: Iterator,
 {

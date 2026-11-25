@@ -16,7 +16,7 @@ use noodle_cute::layout::{
     Fraction, Layout, LayoutBase, MakeLayout, coprofile, coshape, is_layout, make_layout,
     make_layout_like, make_ordered_layout, recast, tiler_to_layout, tiler_to_layout_with,
 };
-use noodle_cute::tuple::{Congruent, Item, LeafProfile, Nil, TupleContainer, lift, select};
+use noodle_cute::tuple::{Congruent, Item, LeafProfile, Nil, Til, lift, select};
 use noodle_cute::{e, int_tuple, make_layout, mode, slice, tuple, walk_mode};
 
 const fn require_congruent<A: [const] Congruent<B>, B: Item>(_: &A, _: &B) {}
@@ -158,10 +158,7 @@ fn test_layout_construction_and_from_shape_with() {
     assert_eq!(zero_l.size(), 0);
 
     // Compile-time constant construction
-    type ConstL = Layout<
-        TupleContainer<Int<3>, TupleContainer<Int<4>, Nil>>,
-        TupleContainer<Int<1>, TupleContainer<Int<3>, Nil>>,
-    >;
+    type ConstL = Layout<Til<Int<3>, Til<Int<4>, Nil>>, Til<Int<1>, Til<Int<3>, Nil>>>;
     const CONST_L: ConstL = Layout::from_shape(int_tuple![Int::<3>, Int::<4>]);
     assert_eq!(CONST_L.shape, int_tuple![Int::<3>, Int::<4>]);
     assert_eq!(CONST_L.stride, int_tuple![Int::<1>, Int::<3>]);
@@ -195,12 +192,10 @@ fn test_three_coordinate_forms_and_const_eval() {
     let l4 = Layout::from_shape(int_tuple![Int::<2>, Int::<3>, Int::<2>, Int::<2>]);
     assert_eq!(l4(1i32, 2i32, 0i32, 1i32), 1 + 2 * 2 + 12);
 
-    type StaticInnerShape = TupleContainer<Int<2>, TupleContainer<Int<4>, Nil>>;
-    type StaticInnerStride = TupleContainer<Int<1>, TupleContainer<Int<6>, Nil>>;
-    type StaticA = Layout<
-        TupleContainer<Int<3>, TupleContainer<StaticInnerShape, Nil>>,
-        TupleContainer<Int<2>, TupleContainer<StaticInnerStride, Nil>>,
-    >;
+    type StaticInnerShape = Til<Int<2>, Til<Int<4>, Nil>>;
+    type StaticInnerStride = Til<Int<1>, Til<Int<6>, Nil>>;
+    type StaticA =
+        Layout<Til<Int<3>, Til<StaticInnerShape, Nil>>, Til<Int<2>, Til<StaticInnerStride, Nil>>>;
     const STATIC_A: StaticA = Layout::new(
         int_tuple![Int::<3>, (Int::<2>, Int::<4>)],
         int_tuple![Int::<2>, (Int::<1>, Int::<6>)],
@@ -915,10 +910,7 @@ fn test_make_ordered_layout() {
     );
 
     // Compile-time constant ordered layout
-    type ConstOrdered = Layout<
-        TupleContainer<Int<4>, TupleContainer<Int<8>, Nil>>,
-        TupleContainer<Int<8>, TupleContainer<Int<1>, Nil>>,
-    >;
+    type ConstOrdered = Layout<Til<Int<4>, Til<Int<8>, Nil>>, Til<Int<8>, Til<Int<1>, Nil>>>;
     const CONST_ORDERED: ConstOrdered = make_ordered_layout(
         &int_tuple![Int::<4>, Int::<8>],
         &int_tuple![Int::<1>, Int::<0>],

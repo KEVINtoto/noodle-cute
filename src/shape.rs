@@ -3,7 +3,7 @@
 //! In CuTe, a **shape** represents the domain of a multi-dimensional tensor. It is either
 //! a non-negative scalar integer extent (dynamic [`int`] or static [`Int<N>`] with `N >= 0`),
 //! the empty shape [`Nil`], or a nested cons-cell tuple of shapes
-//! ([`TupleContainer`](crate::tuple::TupleContainer)).
+//! ([`Til`](crate::tuple::Til)).
 //!
 //! # Core Concepts & Submodules
 //!
@@ -76,7 +76,7 @@ const impl ValidShapeExtent<true> for () {}
 /// A non-negative extent or a nested tuple of non-negative extents.
 ///
 /// Implementors include [`Nil`], [`int`] (dynamic non-negative integer), [`Int<N>`]
-/// (static non-negative integer), and [`TupleContainer<H, T>`](crate::tuple::TupleContainer)
+/// (static non-negative integer), and [`Til<H, T>`](crate::tuple::Til)
 /// where `H` and `T` are shapes.
 ///
 /// # Examples
@@ -204,7 +204,7 @@ const impl<S: sealed::SealedShapeScalar + [const] Integer + [const] Leaf + [cons
 {
 }
 
-/// Marker trait for hierarchical tuple shapes (`Nil` or `TupleContainer<H, T>`).
+/// Marker trait for hierarchical tuple shapes (`Nil` or `Til<H, T>`).
 pub const trait ShapeTuple: [const] Tuple + [const] Shape {}
 const impl<S: [const] Tuple + [const] Shape> ShapeTuple for S {}
 

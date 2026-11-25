@@ -92,7 +92,10 @@ pub mod logical_divide;
 pub mod logical_product;
 pub mod nullspace;
 
-pub use coalesce::{Coalesce, CoalesceExtended, coalesce, coalesce_extended};
+pub use coalesce::{
+    Coalesce, CoalesceExtended, CoalesceProfile, CoalesceTarget, coalesce, coalesce_extended,
+    coalesce_with_profile, coalesce_z,
+};
 pub use complement::{Complement, ComplementWith, complement, complement_with};
 pub use composition::{Composition, composition};
 pub use greatest_common_domain::{GreatestCommonDomain, IntoGcdShape, greatest_common_domain};

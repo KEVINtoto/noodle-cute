@@ -1,18 +1,19 @@
 //! Hierarchical tuples, structural relations, and leaf transformations.
 //!
-//! A [`TupleContainer`] stores a head [`Item`] and a tail [`Tuple`]. Tuple chains
+//! A [`Til`] stores a head [`Item`] and a tail [`Tuple`]. Tuple chains
 //! terminate in [`Nil`], and nested heads introduce additional hierarchy levels
 //! ([`Nil`] can also appear as an empty nested head).
 //!
 //! # Main Interfaces & Submodules
 //!
-//! - **Core types & markers**: [`Nil`], [`TupleContainer`], [`Item`], [`Leaf`],
+//! - **Core types & markers**: [`Nil`], [`Til`], [`Item`], [`Leaf`],
 //!   [`Tuple`], [`FlatTuple`], [`IntTuple`], [`IS_STATIC`], and structural profiles
 //!   ([`NilProfile`], [`LeafProfile`], [`TupleProfile`]).
 //! - **Congruence relations**: [`WeaklyCongruent`] and [`Congruent`].
 //! - [`mod@index`]: Type-level mode paths ([`Mode`], [`ModeEnd`]), signed indexing
-//!   ([`Get`], [`GetOutput`]), multi-mode selection ([`Select`], [`select`]), and
-//!   top-level slicing ([`SliceRange`], [`slice_range`]).
+//!   ([`Get`], [`GetOutput`]), multi-mode selection ([`Select`], [`select`]),
+//!   top-level slicing ([`SliceRange`], [`slice_range`]), and coordinate-driven
+//!   filtering ([`SliceBy`], [`slice_by`], [`DiceBy`], [`dice_by`]).
 //! - [`mod@restructure`]: [`Wrap`], [`Unwrap`], [`Append`], [`Prepend`], [`Flatten`],
 //!   [`Unflatten`], [`RepeatLike`], [`ReplaceAt`], [`Replace`], and [`Lift`].
 //! - [`mod@traversal`]: Single-tree [`TransformLeaf`] and synchronized multi-tree
@@ -28,7 +29,7 @@
 //! # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl, const_ops, const_cmp)]
 //! # #![allow(incomplete_features)]
 //! use noodle_cute::{tuple, walk_mode};
-//! use noodle_cute::tuple::{Flatten, Item, Nil, TupleContainer, TransformLeaf, TransformLeafFunctor};
+//! use noodle_cute::tuple::{Flatten, Item, Nil, Til, TransformLeaf, TransformLeafFunctor};
 //!
 //! // The hierarchy (10, (20, 30), 40).
 //! let t = tuple!(10i32, (20i32, 30i32), 40i32);
@@ -37,7 +38,7 @@
 //! assert_eq!(walk_mode!(t, 1, 0), 20);
 //! assert_eq!(
 //!     t.flatten(),
-//!     TupleContainer::new(10, TupleContainer::new(20, TupleContainer::new(30, TupleContainer::new(40, Nil))))
+//!     Til::new(10, Til::new(20, Til::new(30, Til::new(40, Nil))))
 //! );
 //!
 //! #[derive(Clone, Copy)]
@@ -56,7 +57,7 @@
 //!
 //! - Native Rust tuples `(a, b)` do not implement [`Item`]; construct hierarchical
 //!   tuples with [`tuple!`](crate::tuple!), [`int_tuple!`](crate::int_tuple!), or
-//!   [`TupleContainer::new`].
+//!   [`Til::new`].
 //! - All [`Item`] types must be `Copy`. Scalar leaves have `RANK = 1, DEPTH = 0, LEAVES = 1`,
 //!   whereas [`Nil`] has `RANK = 0, DEPTH = 1, LEAVES = 0`.
 //! - Custom leaf types implement [`Item`] with `type Profile = LeafProfile` and
@@ -78,16 +79,16 @@ pub use traversal::*;
 
 /// The empty tuple and terminator of a built-in tuple chain.
 ///
-/// `Nil` has rank 0, depth 1, and zero leaves. As a [`TupleContainer`] head it
+/// `Nil` has rank 0, depth 1, and zero leaves. As a [`Til`] head it
 /// represents an empty nested tuple.
 ///
 /// # Examples
 ///
 /// ```
-/// use noodle_cute::tuple::{Item, Nil, TupleContainer};
+/// use noodle_cute::tuple::{Item, Nil, Til};
 ///
 /// assert_eq!((Nil::RANK, Nil::DEPTH, Nil::LEAVES), (0, 1, 0));
-/// let nested_empty = TupleContainer::new(Nil, Nil);
+/// let nested_empty = Til::new(Nil, Nil);
 /// assert_eq!(
 ///     (
 ///         nested_empty.rank(),
@@ -109,8 +110,7 @@ const impl PartialEq for Nil {
 
 const impl Eq for Nil {}
 
-/// Cons-cell backing `TupleContainer`, storing head item `H` and tail tuple `T`.
-#[doc(hidden)]
+/// Tuple container representing a hierarchical or flat tuple chain, storing head item `H` and tail tuple `T`.
 #[derive(Clone, Copy, Default, Debug)]
 #[repr(C)]
 pub struct Til<H, T>(pub H, pub T);
@@ -126,9 +126,6 @@ where
 }
 
 const impl<H: [const] Eq, T: [const] Eq> Eq for Til<H, T> {}
-
-/// Tuple container representing a hierarchical or flat tuple chain.
-pub type TupleContainer<H, T> = Til<H, T>;
 
 /// Formats remaining modes of a non-empty tuple chain after the leading head.
 #[doc(hidden)]
@@ -180,26 +177,26 @@ pub struct NilProfile;
 /// [`Item::Profile`].
 pub struct LeafProfile;
 
-/// Structural profile of a nonempty [`TupleContainer`].
+/// Structural profile of a nonempty [`Til`].
 ///
 /// `H` and `T` are the head and tail profiles. Each cons-cell contributes one
 /// `TupleProfile`, including the cons-cells that form the tail chain.
 ///
 /// ```
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Item, LeafProfile, Nil, NilProfile, TupleContainer, TupleProfile};
+/// use noodle_cute::tuple::{Item, LeafProfile, Nil, NilProfile, Til, TupleProfile};
 ///
 /// fn require_profile<T: Item<Profile = P>, P>(_: T) {}
 /// type PairProfile = TupleProfile<LeafProfile, TupleProfile<LeafProfile, NilProfile>>;
-/// require_profile::<_, PairProfile>(TupleContainer::new(1i32, TupleContainer::new(Int::<2>, Nil)));
-/// require_profile::<_, TupleProfile<NilProfile, NilProfile>>(TupleContainer::new(Nil, Nil));
+/// require_profile::<_, PairProfile>(Til::new(1i32, Til::new(Int::<2>, Nil)));
+/// require_profile::<_, TupleProfile<NilProfile, NilProfile>>(Til::new(Nil, Nil));
 /// ```
 pub struct TupleProfile<H, T>(PhantomData<(H, T)>);
 
 /// A scalar leaf or a nested tuple supporting structural queries.
 ///
 /// Built-in implementations cover [`int`] (`i32`),
-/// [`Int<N>`](crate::integer::Int), [`Nil`], and [`TupleContainer`] with an
+/// [`Int<N>`](crate::integer::Int), [`Nil`], and [`Til`] with an
 /// `Item` head and a [`Tuple`] tail. Custom leaf items supply their own
 /// structural constants and [`LeafProfile`].
 ///
@@ -207,7 +204,7 @@ pub struct TupleProfile<H, T>(PhantomData<(H, T)>);
 ///
 /// ```
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Item, Nil, TupleContainer};
+/// use noodle_cute::tuple::{Item, Nil, Til};
 ///
 /// assert_eq!((i32::RANK, i32::DEPTH, i32::LEAVES), (1, 0, 1));
 /// assert_eq!(
@@ -216,15 +213,15 @@ pub struct TupleProfile<H, T>(PhantomData<(H, T)>);
 /// );
 /// assert_eq!((Nil::RANK, Nil::DEPTH, Nil::LEAVES), (0, 1, 0));
 ///
-/// type Nested = TupleContainer<
+/// type Nested = Til<
 ///     Int<1>,
-///     TupleContainer<TupleContainer<Int<2>, TupleContainer<i32, Nil>>, Nil>,
+///     Til<Til<Int<2>, Til<i32, Nil>>, Nil>,
 /// >;
 /// assert_eq!((Nested::RANK, Nested::DEPTH, Nested::LEAVES), (2, 2, 3));
 /// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a hierarchical tuple item",
-    note = "use an integer, a custom Item, Nil, or a TupleContainer with an Item head and a tuple tail"
+    note = "use an integer, a custom Item, Nil, or a Til with an Item head and a tuple tail"
 )]
 pub const trait Item: Copy {
     /// Number of top-level modes, with one for a leaf and zero for [`Nil`].
@@ -241,6 +238,8 @@ pub const trait Item: Copy {
     ///
     /// Defaults to `false` for custom user items.
     const IS_STATIC: bool = false;
+    /// `true` iff this item is a slicing wildcard (`..` / [`core::ops::RangeFull`]).
+    const IS_WILDCARD: bool = false;
 
     /// The nested structure, including empty heads and the terminal tail.
     ///
@@ -282,6 +281,15 @@ const impl<I: [const] Integer> Item for I {
     type Profile = LeafProfile;
 }
 
+const impl Item for core::ops::RangeFull {
+    const RANK: int = 1;
+    const DEPTH: int = 0;
+    const LEAVES: int = 1;
+    const IS_STATIC: bool = true;
+    const IS_WILDCARD: bool = true;
+    type Profile = LeafProfile;
+}
+
 const impl<H: [const] Item, T: [const] Tuple> Item for Til<H, T> {
     const RANK: int = add(1, T::RANK);
     const DEPTH: int = add(1, max(H::DEPTH, sub(T::DEPTH, 1)));
@@ -294,7 +302,7 @@ const impl<H: [const] Item, T: [const] Tuple> Item for Til<H, T> {
 pub const trait Leaf: [const] Item<Profile = LeafProfile> {}
 const impl<L: [const] Item<Profile = LeafProfile>> Leaf for L {}
 
-/// Marker trait for built-in tuple chains (`Nil` or `TupleContainer<H, T>`).
+/// Marker trait for built-in tuple chains (`Nil` or `Til<H, T>`).
 pub const trait Tuple: [const] Item {}
 const impl Tuple for Nil {}
 const impl<H: [const] Item, T: [const] Tuple> Tuple for Til<H, T> {}
@@ -331,10 +339,10 @@ impl<H: Item, T: Tuple> Til<H, T> {
     /// ```
     /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
     /// # #![allow(incomplete_features)]
-    /// use noodle_cute::tuple::{Nil, TupleContainer};
+    /// use noodle_cute::tuple::{Nil, Til};
     ///
-    /// let inner = TupleContainer::new(20i32, TupleContainer::new(30i32, Nil));
-    /// let t = TupleContainer::new(10i32, TupleContainer::new(inner, TupleContainer::new(40i32, Nil)));
+    /// let inner = Til::new(20i32, Til::new(30i32, Nil));
+    /// let t = Til::new(10i32, Til::new(inner, Til::new(40i32, Nil)));
     /// assert_eq!(t.get::<0>(), 10);
     /// assert_eq!(t.get::<1>(), inner);
     /// assert_eq!(t.get::<-1>(), 40);
@@ -354,13 +362,13 @@ impl<H: Item, T: Tuple> Til<H, T> {
     /// ```
     /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
     /// # #![allow(incomplete_features)]
-    /// use noodle_cute::tuple::{Nil, TupleContainer};
+    /// use noodle_cute::tuple::{Nil, Til};
     ///
-    /// let inner = TupleContainer::new(
+    /// let inner = Til::new(
     ///     20i32,
-    ///     TupleContainer::new(TupleContainer::new(30i32, TupleContainer::new(40i32, Nil)), Nil),
+    ///     Til::new(Til::new(30i32, Til::new(40i32, Nil)), Nil),
     /// );
-    /// let t = TupleContainer::new(10i32, TupleContainer::new(inner, Nil));
+    /// let t = Til::new(10i32, Til::new(inner, Nil));
     /// assert_eq!(t.rank_at::<0>(), 1);
     /// assert_eq!(t.rank_at::<1>(), 2);
     /// assert_eq!(t.rank_at::<-1>(), 2);
@@ -379,13 +387,13 @@ impl<H: Item, T: Tuple> Til<H, T> {
     /// ```
     /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
     /// # #![allow(incomplete_features)]
-    /// use noodle_cute::tuple::{Nil, TupleContainer};
+    /// use noodle_cute::tuple::{Nil, Til};
     ///
-    /// let inner = TupleContainer::new(
+    /// let inner = Til::new(
     ///     20i32,
-    ///     TupleContainer::new(TupleContainer::new(30i32, TupleContainer::new(40i32, Nil)), Nil),
+    ///     Til::new(Til::new(30i32, Til::new(40i32, Nil)), Nil),
     /// );
-    /// let t = TupleContainer::new(10i32, TupleContainer::new(inner, Nil));
+    /// let t = Til::new(10i32, Til::new(inner, Nil));
     /// assert_eq!(t.depth_at::<0>(), 0);
     /// assert_eq!(t.depth_at::<1>(), 2);
     /// assert_eq!(t.depth_at::<-1>(), 2);
@@ -404,13 +412,13 @@ impl<H: Item, T: Tuple> Til<H, T> {
     /// ```
     /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
     /// # #![allow(incomplete_features)]
-    /// use noodle_cute::tuple::{Nil, TupleContainer};
+    /// use noodle_cute::tuple::{Nil, Til};
     ///
-    /// let inner = TupleContainer::new(
+    /// let inner = Til::new(
     ///     20i32,
-    ///     TupleContainer::new(TupleContainer::new(30i32, TupleContainer::new(40i32, Nil)), Nil),
+    ///     Til::new(Til::new(30i32, Til::new(40i32, Nil)), Nil),
     /// );
-    /// let t = TupleContainer::new(10i32, TupleContainer::new(inner, Nil));
+    /// let t = Til::new(10i32, Til::new(inner, Nil));
     /// assert_eq!(t.length_at::<0>(), 1);
     /// assert_eq!(t.length_at::<1>(), 3);
     /// assert_eq!(t.length_at::<-1>(), 3);
@@ -471,19 +479,19 @@ where
 ///
 /// ```
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Item, Nil, TupleContainer, WeaklyCongruent};
+/// use noodle_cute::tuple::{Item, Nil, Til, WeaklyCongruent};
 ///
 /// fn require<L: WeaklyCongruent<R>, R: Item>(_: &L, _: &R) {}
 /// require(
 ///     &Int::<32>,
-///     &TupleContainer::new(
+///     &Til::new(
 ///         3i32,
-///         TupleContainer::new(TupleContainer::new(4i32, TupleContainer::new(5i32, Nil)), Nil),
+///         Til::new(Til::new(4i32, Til::new(5i32, Nil)), Nil),
 ///     ),
 /// );
 /// require(
-///     &TupleContainer::new(3i32, Nil),
-///     &TupleContainer::new(TupleContainer::new(4i32, TupleContainer::new(5i32, Nil)), Nil),
+///     &Til::new(3i32, Nil),
+///     &Til::new(Til::new(4i32, Til::new(5i32, Nil)), Nil),
 /// );
 /// require(&32i32, &Nil);
 /// require(&Nil, &Nil);
@@ -492,28 +500,28 @@ where
 /// A tuple-to-scalar comparison fails the relation.
 ///
 /// ```compile_fail,E0277
-/// use noodle_cute::tuple::{Item, Nil, TupleContainer, WeaklyCongruent};
+/// use noodle_cute::tuple::{Item, Nil, Til, WeaklyCongruent};
 /// fn require<L: WeaklyCongruent<R>, R: Item>(_: &L, _: &R) {}
-/// require(&TupleContainer::new(3i32, Nil), &32i32);
+/// require(&Til::new(3i32, Nil), &32i32);
 /// ```
 ///
 /// Different top-level ranks fail the relation.
 ///
 /// ```compile_fail,E0277
-/// use noodle_cute::tuple::{Item, Nil, TupleContainer, WeaklyCongruent};
+/// use noodle_cute::tuple::{Item, Nil, Til, WeaklyCongruent};
 /// fn require<L: WeaklyCongruent<R>, R: Item>(_: &L, _: &R) {}
 /// require(
-///     &TupleContainer::new(1i32, TupleContainer::new(2i32, Nil)),
-///     &TupleContainer::new(1i32, Nil),
+///     &Til::new(1i32, Til::new(2i32, Nil)),
+///     &Til::new(1i32, Nil),
 /// );
 /// ```
 ///
 /// Comparisons from `Nil` to a nonempty tuple or scalar leaf fail the relation.
 ///
 /// ```compile_fail,E0277
-/// use noodle_cute::tuple::{Item, Nil, TupleContainer, WeaklyCongruent};
+/// use noodle_cute::tuple::{Item, Nil, Til, WeaklyCongruent};
 /// fn require<L: WeaklyCongruent<R>, R: Item>(_: &L, _: &R) {}
-/// require(&Nil, &TupleContainer::new(1i32, Nil));
+/// require(&Nil, &Til::new(1i32, Nil));
 /// ```
 ///
 /// ```compile_fail,E0277
@@ -525,19 +533,19 @@ where
 /// A comparison from a nonempty tuple to `Nil` fails the relation.
 ///
 /// ```compile_fail,E0277
-/// use noodle_cute::tuple::{Item, Nil, TupleContainer, WeaklyCongruent};
+/// use noodle_cute::tuple::{Item, Nil, Til, WeaklyCongruent};
 /// fn require<L: WeaklyCongruent<R>, R: Item>(_: &L, _: &R) {}
-/// require(&TupleContainer::new(1i32, Nil), &Nil);
+/// require(&Til::new(1i32, Nil), &Nil);
 /// ```
 ///
 /// Corresponding nested heads must coarsen in the same direction.
 ///
 /// ```compile_fail,E0277
-/// use noodle_cute::tuple::{Item, Nil, TupleContainer, WeaklyCongruent};
+/// use noodle_cute::tuple::{Item, Nil, Til, WeaklyCongruent};
 /// fn require<L: WeaklyCongruent<R>, R: Item>(_: &L, _: &R) {}
 /// require(
-///     &TupleContainer::new(TupleContainer::new(1i32, Nil), Nil),
-///     &TupleContainer::new(2i32, Nil),
+///     &Til::new(Til::new(1i32, Nil), Nil),
+///     &Til::new(2i32, Nil),
 /// );
 /// ```
 pub const trait WeaklyCongruent<R: Item>: Item {}
@@ -556,41 +564,41 @@ const impl<L: Item, R: Item> WeaklyCongruent<R> for L where
 ///
 /// ```
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Congruent, Item, Nil, TupleContainer};
+/// use noodle_cute::tuple::{Congruent, Item, Nil, Til};
 ///
 /// fn require<L: Congruent<R>, R: Item>(_: &L, _: &R) {}
 /// require(
-///     &TupleContainer::new(Int::<4>, TupleContainer::new(8i32, Nil)),
-///     &TupleContainer::new(5i32, TupleContainer::new(Int::<7>, Nil)),
+///     &Til::new(Int::<4>, Til::new(8i32, Nil)),
+///     &Til::new(5i32, Til::new(Int::<7>, Nil)),
 /// );
 /// require(&Int::<31>, &42i32);
-/// require(&TupleContainer::new(Nil, Nil), &TupleContainer::new(Nil, Nil));
+/// require(&Til::new(Nil, Nil), &Til::new(Nil, Nil));
 /// require(&Nil, &Nil);
 /// ```
 ///
 /// One-way coarsening is insufficient for congruence.
 ///
 /// ```compile_fail,E0277
-/// use noodle_cute::tuple::{Congruent, Item, Nil, TupleContainer};
+/// use noodle_cute::tuple::{Congruent, Item, Nil, Til};
 /// fn require<L: Congruent<R>, R: Item>(_: &L, _: &R) {}
 /// require(
-///     &TupleContainer::new(4i32, Nil),
-///     &TupleContainer::new(TupleContainer::new(2i32, TupleContainer::new(4i32, Nil)), Nil),
+///     &Til::new(4i32, Nil),
+///     &Til::new(Til::new(2i32, Til::new(4i32, Nil)), Nil),
 /// );
 /// ```
 ///
 /// Equal ranks and leaf counts can have different nested structures.
 ///
 /// ```compile_fail,E0277
-/// use noodle_cute::tuple::{Congruent, Item, Nil, TupleContainer};
+/// use noodle_cute::tuple::{Congruent, Item, Nil, Til};
 /// fn require<L: Congruent<R>, R: Item>(_: &L, _: &R) {}
-/// let left = TupleContainer::new(
-///     TupleContainer::new(1i32, TupleContainer::new(2i32, Nil)),
-///     TupleContainer::new(3i32, Nil),
+/// let left = Til::new(
+///     Til::new(1i32, Til::new(2i32, Nil)),
+///     Til::new(3i32, Nil),
 /// );
-/// let right = TupleContainer::new(
+/// let right = Til::new(
 ///     1i32,
-///     TupleContainer::new(TupleContainer::new(2i32, TupleContainer::new(3i32, Nil)), Nil),
+///     Til::new(Til::new(2i32, Til::new(3i32, Nil)), Nil),
 /// );
 /// require(&left, &right);
 /// ```
@@ -605,7 +613,7 @@ where
 /// Constructs a hierarchical [`Tuple`] from nested parenthesized items.
 ///
 /// - `tuple!()` produces [`Nil`].
-/// - `tuple!(a, b, ...)` produces `TupleContainer::new(a, TupleContainer::new(b, ...))`.
+/// - `tuple!(a, b, ...)` produces `Til::new(a, Til::new(b, ...))`.
 /// - Inside `tuple!(...)`, `()` builds a nested [`Nil`], `(a)` or `(a,)` builds
 ///   a nested singleton tuple, and `(a, b, ...)` builds a nested tuple.
 ///
@@ -615,23 +623,23 @@ where
 /// # #![feature(const_trait_impl, const_ops, const_cmp)]
 /// use noodle_cute::integer::Int;
 /// use noodle_cute::tuple;
-/// use noodle_cute::tuple::{Nil, TupleContainer};
+/// use noodle_cute::tuple::{Nil, Til};
 ///
-/// const T: TupleContainer<Int<1>, TupleContainer<TupleContainer<Int<2>, TupleContainer<Int<3>, Nil>>, Nil>> =
+/// const T: Til<Int<1>, Til<Til<Int<2>, Til<Int<3>, Nil>>, Nil>> =
 ///     tuple!(Int::<1>, (Int::<2>, Int::<3>));
 /// assert_eq!(
 ///     T,
-///     TupleContainer::new(
+///     Til::new(
 ///         Int::<1>,
-///         TupleContainer::new(TupleContainer::new(Int::<2>, TupleContainer::new(Int::<3>, Nil)), Nil),
+///         Til::new(Til::new(Int::<2>, Til::new(Int::<3>, Nil)), Nil),
 ///     )
 /// );
 /// assert_eq!(tuple!(), Nil);
 /// assert_eq!(
 ///     tuple!((1 + 2) * 2, (3), ()),
-///     TupleContainer::new(
+///     Til::new(
 ///         6i32,
-///         TupleContainer::new(TupleContainer::new(3i32, Nil), TupleContainer::new(Nil, Nil)),
+///         Til::new(Til::new(3i32, Nil), Til::new(Nil, Nil)),
 ///     )
 /// );
 /// ```
@@ -666,14 +674,14 @@ macro_rules! tuple {
 /// ```
 /// use noodle_cute::int_tuple;
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::tuple::{Nil, TupleContainer};
+/// use noodle_cute::tuple::{Nil, Til};
 ///
 /// let t = int_tuple!(Int::<2>, (3i32, Int::<4>));
 /// assert_eq!(
 ///     t,
-///     TupleContainer::new(
+///     Til::new(
 ///         Int::<2>,
-///         TupleContainer::new(TupleContainer::new(3i32, TupleContainer::new(Int::<4>, Nil)), Nil),
+///         Til::new(Til::new(3i32, Til::new(Int::<4>, Nil)), Nil),
 ///     )
 /// );
 /// ```

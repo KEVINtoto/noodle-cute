@@ -6,7 +6,7 @@ use noodle_cute::shape::{
     Shape, common_coarsening, common_refinement, compatible, coord_to_index, coordinates, crd2idx,
     has_zero, idx2crd, in_bounds, index_to_coord, size,
 };
-use noodle_cute::tuple::{Nil, Til, TupleContainer};
+use noodle_cute::tuple::{Nil, Til};
 use noodle_cute::{basis_tuple, e, int_tuple, tuple};
 
 #[test]
@@ -93,13 +93,12 @@ fn coord_conversion_supports_signed_unsigned_and_nested_nil() {
 
 #[test]
 fn shape_operations_support_const_eval() {
-    const S: TupleContainer<Int<3>, TupleContainer<Int<4>, Nil>> =
-        Til(Int::<3>, Til(Int::<4>, Nil));
+    const S: Til<Int<3>, Til<Int<4>, Nil>> = Til(Int::<3>, Til(Int::<4>, Nil));
     const SZ: int = S.size();
     const MATCH: bool = compatible(&Int::<12>, &S);
-    const CRD: TupleContainer<int, TupleContainer<int, Nil>> = Til(1i32, Til(2i32, Nil));
+    const CRD: Til<int, Til<int, Nil>> = Til(1i32, Til(2i32, Nil));
     const IDX: int = coord_to_index(CRD, &S);
-    const BACK: TupleContainer<int, TupleContainer<int, Nil>> = index_to_coord(7i32, &S);
+    const BACK: Til<int, Til<int, Nil>> = index_to_coord(7i32, &S);
     assert_eq!(SZ, 12);
     const { assert!(MATCH) };
     assert_eq!(IDX, 7);
@@ -282,15 +281,15 @@ fn test_coord_to_index_and_index_to_coord() {
 
 #[test]
 fn test_shape_const_eval() {
-    const S: TupleContainer<Int<3>, TupleContainer<Int<4>, Nil>> = int_tuple![Int::<3>, Int::<4>];
+    const S: Til<Int<3>, Til<Int<4>, Nil>> = int_tuple![Int::<3>, Int::<4>];
     const SZ: int = S.size();
     assert_eq!(SZ, 12);
 
-    const CRD: TupleContainer<int, TupleContainer<int, Nil>> = int_tuple![1i32, 2i32];
+    const CRD: Til<int, Til<int, Nil>> = int_tuple![1i32, 2i32];
     const IDX: int = coord_to_index(CRD, &S);
     assert_eq!(IDX, 7);
 
-    const CRD_FROM_IDX: TupleContainer<int, TupleContainer<int, Nil>> = index_to_coord(7i32, &S);
+    const CRD_FROM_IDX: Til<int, Til<int, Nil>> = index_to_coord(7i32, &S);
     assert_eq!(CRD_FROM_IDX, CRD);
 
     const COMPAT_MATCH: bool = compatible(&12i32, &S);
@@ -864,8 +863,8 @@ fn shape_regression_trailing_nil_floor_divmod_signed_crd2idx_and_refinement() {
     );
 
     // Static idx2crd and crd2idx preserve static types
-    type InnerCrd = TupleContainer<Int<1>, TupleContainer<Int<2>, Nil>>;
-    const STATIC_CRD: TupleContainer<Int<2>, TupleContainer<InnerCrd, Nil>> =
+    type InnerCrd = Til<Int<1>, Til<Int<2>, Nil>>;
+    const STATIC_CRD: Til<Int<2>, Til<InnerCrd, Nil>> =
         idx2crd(Int::<17>, &int_tuple![Int::<3>, (Int::<2>, Int::<4>)]);
     assert_eq!(STATIC_CRD, int_tuple![Int::<2>, (Int::<1>, Int::<2>)]);
     const STATIC_IDX: Int<17> = crd2idx(STATIC_CRD, &int_tuple![Int::<3>, (Int::<2>, Int::<4>)]);
