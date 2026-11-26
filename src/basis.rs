@@ -18,7 +18,8 @@
 //! - [`mod@repr`]: Basis decomposition and single-basis accessors ([`basis_repr`],
 //!   [`is_basis`], [`SingleBasis`], [`proj`], [`unit()`]).
 //! - [`mod@convert`]: Conversions between hierarchical tuples and basis forms
-//!   ([`make_basis_like`], [`from_tuple`], [`as_tuple`]).
+//!   ([`make_basis_like`], [`make_top_basis_like`], [`from_tuple`], [`into_basis_coord`],
+//!   [`as_tuple`]).
 //! - **Macros**: [`e!`](crate::e!) and [`basis_tuple!`](crate::basis_tuple!).
 //!
 //! # Usage

@@ -48,10 +48,18 @@
 //! - [`tensor`]: CuTe [`Tensor`](tensor::Tensor) pairing an [`Accessor`](tensor::Accessor)
 //!   with a [`Layout`](layout::Layout), pure `no_std` accessors
 //!   ([`SliceAccessor`](tensor::SliceAccessor), [`CellAccessor`](tensor::CellAccessor),
-//!   [`Ptr`](tensor::Ptr), [`ImplicitAccessor`](tensor::ImplicitAccessor), and
-//!   [`TransformAccessor`](tensor::TransformAccessor)), coordinate indexing/slicing,
+//!   [`Ptr`](tensor::Ptr), [`ImplicitAccessor`](tensor::ImplicitAccessor),
+//!   [`TransformAccessor`](tensor::TransformAccessor), and
+//!   [`OutOfBoundsAccessor`](tensor::OutOfBoundsAccessor)), coordinate indexing/slicing,
 //!   layout-algebra pass-through, [`identity_tensor`](tensor::identity_tensor),
 //!   [`make_tensor`](tensor::make_tensor), and [`local_tile`](tensor::local_tile).
+//! - [`algorithm`]: CuTe tensor algorithms and layout views including reference
+//!   [`reference::copy`](algorithm::reference::copy) and [`gemm`](algorithm::gemm),
+//!   layout-analyzed [`copy`](algorithm::copy()) and [`copy_plan`](algorithm::copy_plan),
+//!   named mode rearrangement [`einfold`](algorithm::einfold()) ([`einfold!`]),
+//!   explicit binary tensor contraction [`einsum`](algorithm::einsum()) ([`einsum!`]),
+//!   and N-D convolution views [`im2col`](algorithm::im2col()),
+//!   [`im2col_coord`](algorithm::im2col_coord), and [`im2col_padded`](algorithm::im2col_padded).
 //!
 //! # Main Root Interfaces
 //!
@@ -101,6 +109,7 @@
 #![allow(incomplete_features)]
 
 pub mod algebra;
+pub mod algorithm;
 pub mod basis;
 pub mod integer;
 pub mod layout;
