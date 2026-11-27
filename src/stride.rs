@@ -65,6 +65,7 @@
 use crate::basis::{
     BasisCoeff, BasisCombination, BasisPath, ComparePath, ModeEnd, PathOrdering, ScaledBasis,
 };
+use crate::f2::{F2, F2Scalar};
 use crate::integer::{Int, Integer};
 use crate::shape::{Shape, ShapeScalar};
 use crate::tuple::{Item, Leaf, Nil, Til, Tuple};
@@ -114,7 +115,7 @@ pub const trait StrideScalar: [const] Leaf {
     /// The coefficient type representing the magnitude of the stride.
     type Value: [const] BasisCoeff;
 
-    /// The coordinate path type, or [`ModeEnd`] if this is a conventional integer stride.
+    /// The coordinate path type, or [`ModeEnd`] for a scalar without a basis path.
     type Path: [const] BasisPath;
 
     /// Returns the coefficient value.
@@ -125,6 +126,15 @@ const impl<I: [const] Integer> StrideScalar for I {
     type Value = Self;
     type Path = ModeEnd;
     fn value(self) -> Self::Value {
+        self
+    }
+}
+
+const impl<V: [const] F2Scalar> StrideScalar for F2<V> {
+    type Value = Self;
+    type Path = ModeEnd;
+
+    fn value(self) -> Self {
         self
     }
 }
@@ -149,7 +159,7 @@ const impl StrideScalar for BasisCombination<Nil> {
 ///
 /// A stride must have the identical nesting structure as the shape it pairs with:
 /// `Self::Profile = S::Profile`. Integer shape leaves accept any [`Leaf`] stride
-/// ([`Integer`], [`ScaledBasis`], or [`BasisCombination`]).
+/// ([`Integer`], [`F2`], [`ScaledBasis`], or [`BasisCombination`]).
 ///
 /// # Examples
 ///
@@ -184,26 +194,67 @@ where
 {
 }
 
+const fn nonzero_f2<V: [const] BasisCoeff>(value: Option<V>) -> Option<bool> {
+    if !matches!(V::ALGEBRA, crate::basis::CoeffAlgebra::F2) {
+        return Some(false);
+    }
+    match value {
+        Some(v) => Some(!v.is_zero()),
+        None if V::IS_STATIC => Some(!V::IS_STATIC_ZERO),
+        None => None,
+    }
+}
+
 /// Classifies stride trees containing a binary-polynomial coefficient.
 #[doc(hidden)]
-pub trait ContainsF2 {
+pub const trait ContainsF2: Copy {
+    /// Whether a nonzero F2 coefficient occurs, using type information when no value is supplied.
+    fn active_f2(_: Option<Self>) -> Option<bool> {
+        Some(Self::HAS_F2)
+    }
     const HAS_F2: bool;
     const HAS_INTEGER: bool = false;
 }
-impl<V: BasisCoeff + Leaf> ContainsF2 for V {
+const impl<V: [const] BasisCoeff + Leaf> ContainsF2 for V {
+    fn active_f2(value: Option<Self>) -> Option<bool> {
+        nonzero_f2(value)
+    }
     const HAS_INTEGER: bool = matches!(V::ALGEBRA, crate::basis::CoeffAlgebra::Integer);
     const HAS_F2: bool = matches!(V::ALGEBRA, crate::basis::CoeffAlgebra::F2);
 }
-impl<V: BasisCoeff, P> ContainsF2 for ScaledBasis<V, P> {
+const impl<V: [const] BasisCoeff, P: Copy> ContainsF2 for ScaledBasis<V, P> {
+    fn active_f2(value: Option<Self>) -> Option<bool> {
+        nonzero_f2(match value {
+            Some(v) => Some(v.value),
+            None => None,
+        })
+    }
     const HAS_F2: bool = matches!(V::ALGEBRA, crate::basis::CoeffAlgebra::F2);
 }
-impl<T: ContainsF2 + crate::basis::BasisTuple> ContainsF2 for BasisCombination<T> {
+const impl<T: [const] ContainsF2 + crate::basis::BasisTuple> ContainsF2 for BasisCombination<T> {
+    fn active_f2(value: Option<Self>) -> Option<bool> {
+        T::active_f2(match value {
+            Some(v) => Some(v.terms()),
+            None => None,
+        })
+    }
     const HAS_F2: bool = T::HAS_F2;
 }
-impl ContainsF2 for Nil {
+const impl ContainsF2 for Nil {
     const HAS_F2: bool = false;
 }
-impl<H: ContainsF2, T: ContainsF2> ContainsF2 for Til<H, T> {
+const impl<H: [const] ContainsF2 + Copy, T: [const] ContainsF2 + Copy> ContainsF2 for Til<H, T> {
+    fn active_f2(value: Option<Self>) -> Option<bool> {
+        let (h, t) = match value {
+            Some(v) => (Some(v.0), Some(v.1)),
+            None => (None, None),
+        };
+        match (H::active_f2(h), T::active_f2(t)) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        }
+    }
     const HAS_F2: bool = H::HAS_F2 || T::HAS_F2;
     const HAS_INTEGER: bool = H::HAS_INTEGER || T::HAS_INTEGER;
 }

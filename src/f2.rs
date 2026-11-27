@@ -1,4 +1,4 @@
-//! Binary polynomial stride scalar [`F2`] over $\mathbb{F}_2\[x\]$.
+//! Binary polynomial arithmetic over `GF(2)[x]`.
 //!
 //! Represents non-negative integers whose bits are coefficients of polynomials over
 //! the two-element field:
@@ -11,7 +11,7 @@
 //!
 //! - [`F2<V>`] / [`StaticF2<N>`] / [`F2Scalar`]: Static (`F2<Int<N>>`, zero-sized) and
 //!   dynamic (`F2<int>`) binary-field stride scalars.
-//! - [`f2`] / [`IntoF2`]: Idempotent constructor (`f2(f2(x)) == f2(x)`).
+//! - [`f2()`], [`crate::f2!`], and [`IntoF2`]: Idempotent construction from integers and `F2` values.
 //! - [`f2_add`], [`f2_sub`], [`f2_mul`], [`f2_divmod`]: `const`-evaluable binary-field
 //!   operations, plus `const` `core::ops::{Add, Sub, Neg, Mul}` overloads.
 //!
@@ -21,7 +21,7 @@
 //! # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl, const_ops, const_cmp)]
 //! # #![allow(incomplete_features)]
 //! use noodle_cute::integer::Int;
-//! use noodle_cute::swizzle::{F2, f2, f2_divmod};
+//! use noodle_cute::f2::{F2, f2, f2_divmod};
 //!
 //! const SUM: F2<Int<0b0110>> = f2(Int::<0b1010>) + f2(Int::<0b1100>);
 //! const PROD: F2<Int<0b101>> = f2(Int::<0b11>) * Int::<0b11>;
@@ -38,10 +38,10 @@
 
 use core::cmp::Ordering;
 use core::fmt::{Display, Formatter};
-use core::ops::{Add, Mul, Neg, Sub};
 
-use crate::integer::ops::{checked_cldivmod, checked_clmul};
-use crate::integer::{BOTH_STATIC, IS_NON_NEG, Int, Integer, cmp, eq, int};
+use crate::integer::{
+    BOTH_STATIC, IS_NON_NEG, Int, Integer, bit_length_non_neg, bitor, bitxor, cmp, eq, int, uint,
+};
 use crate::{NoodleCuteError, NoodleCuteResult, Result};
 
 /// Compile-time guard restricting static [`F2`] values to non-negative integers (`VALID == true`).
@@ -82,7 +82,7 @@ const impl<V: sealed::SealedF2Scalar + [const] Integer> F2Scalar for V {}
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
 /// # #![allow(incomplete_features)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::swizzle::F2;
+/// use noodle_cute::f2::F2;
 /// let _ = F2::new(Int::<-1>);
 /// ```
 ///
@@ -92,17 +92,17 @@ const impl<V: sealed::SealedF2Scalar + [const] Integer> F2Scalar for V {}
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl, const_ops)]
 /// # #![allow(incomplete_features)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::swizzle::f2;
+/// use noodle_cute::f2::f2;
 /// let _ = f2(Int::<1>) + Int::<1>;
 /// ```
 ///
 /// ```compile_fail
-/// use noodle_cute::swizzle::StaticF2;
+/// use noodle_cute::f2::StaticF2;
 /// let _ = StaticF2::<-1>::default();
 /// ```
 #[derive(Clone, Copy, Debug)]
 #[repr(transparent)]
-pub struct F2<V = int>(pub(crate) V);
+pub struct F2<V = int>(V);
 
 impl<V: F2Scalar + Default> Default for F2<V> {
     fn default() -> Self {
@@ -301,7 +301,7 @@ const impl<V: [const] F2Scalar> F2Operand for F2<V> {
 // ------------------------------------------------------------------
 
 const STATIC_F2_XOR<L: F2Scalar, R: F2Scalar>: int = match (L::STATIC_VALUE, R::STATIC_VALUE) {
-    (Some(l), Some(r)) => l ^ r,
+    (Some(l), Some(r)) => bitxor(l, r),
     _ => 0,
 };
 
@@ -327,7 +327,7 @@ where
 const impl<L: [const] F2Scalar, R: [const] F2Scalar> F2XorScalar<R, false> for L {
     type Output = int;
     fn xor_scalar(self, rhs: R) -> Self::Output {
-        self.value() ^ rhs.value()
+        bitxor(self.value(), rhs.value())
     }
 }
 
@@ -335,12 +335,12 @@ const impl<L: [const] F2Scalar, R: [const] F2Scalar> F2XorScalar<R, false> for L
 #[doc(hidden)]
 pub type F2XorOutput<L, R> = <L as F2XorScalar<R, { BOTH_STATIC::<L, R> }>>::Output;
 
-/// Bitwise-OR scalar dispatcher used by codomain bounding (`coshape`) so bits never cancel.
 const STATIC_F2_OR<L: F2Scalar, R: F2Scalar>: int = match (L::STATIC_VALUE, R::STATIC_VALUE) {
-    (Some(l), Some(r)) => l | r,
+    (Some(l), Some(r)) => bitor(l, r),
     _ => 0,
 };
 
+/// Bitwise OR for two binary polynomial scalars, with static folding when both are known.
 #[doc(hidden)]
 pub const trait F2OrScalar<R: [const] F2Scalar, const BOTH_STATIC: bool>:
     [const] F2Scalar
@@ -362,7 +362,7 @@ where
 const impl<L: [const] F2Scalar, R: [const] F2Scalar> F2OrScalar<R, false> for L {
     type Output = int;
     fn or_scalar(self, rhs: R) -> Self::Output {
-        self.value() | rhs.value()
+        bitor(self.value(), rhs.value())
     }
 }
 
@@ -379,6 +379,15 @@ where
     F2(lhs.0.xor_scalar(rhs.0))
 }
 
+/// Combines the occupied bit positions of two binary polynomials.
+pub(crate) const fn f2_or<L, R>(lhs: F2<L>, rhs: F2<R>) -> F2<F2OrOutput<L, R>>
+where
+    L: [const] F2Scalar + [const] F2OrScalar<R, { BOTH_STATIC::<L, R> }>,
+    R: [const] F2Scalar,
+{
+    F2(lhs.0.or_scalar(rhs.0))
+}
+
 /// Evaluates `lhs - rhs` in $\mathbb{F}_2\[x\]$ (identical to [`f2_add`], since XOR is self-inverse).
 pub const fn f2_sub<L, R>(lhs: F2<L>, rhs: F2<R>) -> F2<F2XorOutput<L, R>>
 where
@@ -388,7 +397,7 @@ where
     f2_add(lhs, rhs)
 }
 
-const impl<L, R> Add<F2<R>> for F2<L>
+const impl<L, R> core::ops::Add<F2<R>> for F2<L>
 where
     L: [const] F2Scalar + [const] F2XorScalar<R, { BOTH_STATIC::<L, R> }>,
     R: [const] F2Scalar,
@@ -399,7 +408,7 @@ where
     }
 }
 
-const impl<L, R> Sub<F2<R>> for F2<L>
+const impl<L, R> core::ops::Sub<F2<R>> for F2<L>
 where
     L: [const] F2Scalar + [const] F2XorScalar<R, { BOTH_STATIC::<L, R> }>,
     R: [const] F2Scalar,
@@ -410,35 +419,35 @@ where
     }
 }
 
-const impl<V: [const] F2Scalar> Add<Int<0>> for F2<V> {
+const impl<V: [const] F2Scalar> core::ops::Add<Int<0>> for F2<V> {
     type Output = Self;
     fn add(self, _: Int<0>) -> Self {
         self
     }
 }
 
-const impl<V: [const] F2Scalar> Sub<Int<0>> for F2<V> {
+const impl<V: [const] F2Scalar> core::ops::Sub<Int<0>> for F2<V> {
     type Output = Self;
     fn sub(self, _: Int<0>) -> Self {
         self
     }
 }
 
-const impl<V: [const] F2Scalar> Add<F2<V>> for Int<0> {
+const impl<V: [const] F2Scalar> core::ops::Add<F2<V>> for Int<0> {
     type Output = F2<V>;
     fn add(self, rhs: F2<V>) -> F2<V> {
         rhs
     }
 }
 
-const impl<V: [const] F2Scalar> Sub<F2<V>> for Int<0> {
+const impl<V: [const] F2Scalar> core::ops::Sub<F2<V>> for Int<0> {
     type Output = F2<V>;
     fn sub(self, rhs: F2<V>) -> F2<V> {
         rhs
     }
 }
 
-const impl<V: [const] F2Scalar> Neg for F2<V> {
+const impl<V: [const] F2Scalar> core::ops::Neg for F2<V> {
     type Output = Self;
     fn neg(self) -> Self {
         self
@@ -490,7 +499,7 @@ const fn f2_mul_dispatch(
 
 const fn static_f2_mul_val(a: Option<int>, b: Option<int>) -> int {
     match (a, b) {
-        (Some(va), Some(vb)) => checked_clmul(va, vb).v(),
+        (Some(va), Some(vb)) => clmul(va, vb),
         (Some(va), None) => {
             assert!(va >= 0, "F2 multiplication requires non-negative operands");
             0
@@ -570,7 +579,7 @@ const impl<A: [const] F2Operand, B: [const] F2Operand> F2MulOp<B, { F2MulDispatc
 {
     type OutputScalar = int;
     fn apply_f2_mul(self, rhs: B) -> F2<int> {
-        F2(checked_clmul(self.operand_value(), rhs.operand_value()).v())
+        F2(clmul(self.operand_value(), rhs.operand_value()))
     }
 }
 
@@ -585,7 +594,7 @@ pub type F2Product<A, B> = F2<<A as F2MulOp<B, { F2_MUL_DISPATCH::<A, B> }>>::Ou
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl, const_ops)]
 /// # #![allow(incomplete_features)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::swizzle::f2;
+/// use noodle_cute::f2::f2;
 /// let _ = f2(Int::<1>) * Int::<-1>;
 /// ```
 ///
@@ -593,7 +602,7 @@ pub type F2Product<A, B> = F2<<A as F2MulOp<B, { F2_MUL_DISPATCH::<A, B> }>>::Ou
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl, const_ops)]
 /// # #![allow(incomplete_features)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::swizzle::f2;
+/// use noodle_cute::f2::f2;
 /// let _ = f2(Int::<2>) * f2(Int::<1_073_741_824>);
 /// ```
 pub const fn f2_mul<A, B>(a: A, b: B) -> F2Product<A, B>
@@ -604,7 +613,7 @@ where
     <A as F2MulOp<B, { F2_MUL_DISPATCH::<A, B> }>>::apply_f2_mul(a, b)
 }
 
-const impl<L, R> Mul<F2<R>> for F2<L>
+const impl<L, R> core::ops::Mul<F2<R>> for F2<L>
 where
     L: [const] F2Scalar,
     R: [const] F2Scalar,
@@ -616,7 +625,7 @@ where
     }
 }
 
-const impl<L, const N: int> Mul<Int<N>> for F2<L>
+const impl<L, const N: int> core::ops::Mul<Int<N>> for F2<L>
 where
     L: [const] F2Scalar,
     F2<L>: [const] F2MulOp<Int<N>, { F2_MUL_DISPATCH::<F2<L>, Int<N>> }>,
@@ -627,7 +636,7 @@ where
     }
 }
 
-const impl<L> Mul<int> for F2<L>
+const impl<L> core::ops::Mul<int> for F2<L>
 where
     L: [const] F2Scalar,
     F2<L>: [const] F2MulOp<int, { F2_MUL_DISPATCH::<F2<L>, int> }>,
@@ -638,7 +647,7 @@ where
     }
 }
 
-const impl<const N: int, R> Mul<F2<R>> for Int<N>
+const impl<const N: int, R> core::ops::Mul<F2<R>> for Int<N>
 where
     R: [const] F2Scalar,
     Int<N>: [const] F2MulOp<F2<R>, { F2_MUL_DISPATCH::<Int<N>, F2<R>> }>,
@@ -649,7 +658,7 @@ where
     }
 }
 
-const impl<R> Mul<F2<R>> for int
+const impl<R> core::ops::Mul<F2<R>> for int
 where
     R: [const] F2Scalar,
     int: [const] F2MulOp<F2<R>, { F2_MUL_DISPATCH::<int, F2<R>> }>,
@@ -687,7 +696,7 @@ const fn f2_div_dispatch(a: Option<int>, d: Option<int>) -> F2DivDispatch {
 
 const fn static_f2_divmod_val(a: Option<int>, d: Option<int>) -> (int, int) {
     match (a, d) {
-        (Some(va), Some(vd)) => checked_cldivmod(va, vd).v(),
+        (Some(va), Some(vd)) => cldivmod(va, vd),
         (None, Some(0)) => Result::<(int, int)>::Err(NoodleCuteError::DivisionByZero).v(),
         (None, Some(vd)) => {
             assert!(vd > 0, "F2 division requires positive divisor");
@@ -764,7 +773,7 @@ const impl<A: [const] F2Scalar, D: [const] F2Operand>
     type RemScalar = int;
 
     fn apply_f2_divmod(self, divisor: D) -> (F2<int>, F2<int>) {
-        let (q, r) = checked_cldivmod(self.value(), divisor.operand_value()).v();
+        let (q, r) = cldivmod(self.value(), divisor.operand_value());
         (F2(q), F2(r))
     }
 }
@@ -784,7 +793,7 @@ pub type F2Remainder<A, D> = F2<<F2<A> as F2DivModOp<D, { F2_DIV_DISPATCH::<A, D
 /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
 /// # #![allow(incomplete_features)]
 /// use noodle_cute::integer::Int;
-/// use noodle_cute::swizzle::{f2, f2_divmod};
+/// use noodle_cute::f2::{f2, f2_divmod};
 /// let _ = f2_divmod(f2(10i32), Int::<0>);
 /// ```
 pub const fn f2_divmod<A, D>(a: F2<A>, d: D) -> (F2Quotient<A, D>, F2Remainder<A, D>)
@@ -794,4 +803,110 @@ where
     F2<A>: [const] F2DivModOp<D, { F2_DIV_DISPATCH::<A, D> }>,
 {
     <F2<A> as F2DivModOp<D, { F2_DIV_DISPATCH::<A, D> }>>::apply_f2_divmod(a, d)
+}
+
+/// Constructs an [`F2`] value idempotently from an integer or existing [`F2`].
+#[macro_export]
+macro_rules! f2 {
+    ($val:expr $(,)?) => {
+        $crate::f2::f2($val)
+    };
+}
+
+/// Returns the carry-less product of non-negative operands, or `None` on overflow.
+pub(crate) const fn clmul_maybe_overflows(a: int, b: int) -> Option<int> {
+    assert!(
+        a >= 0 && b >= 0,
+        "carry-less multiplication requires non-negative operands"
+    );
+    if a == 0 || b == 0 {
+        return Some(0);
+    }
+    // The degree of a nonzero product is the sum of its operands' degrees.
+    if bit_length_non_neg(a) + bit_length_non_neg(b) > int::BITS as int {
+        return None;
+    }
+
+    let mut res: uint = 0;
+    let mut c: uint = a as uint;
+    let mut v: uint = b as uint;
+    while v != 0 {
+        if (v & 1) != 0 {
+            res ^= c;
+        }
+        v >>= 1;
+        if v != 0 {
+            c <<= 1;
+        }
+    }
+    Some(res as int)
+}
+
+/// Carry-less (polynomial over GF(2)) multiplication for non-negative `int` operands.
+pub(crate) const fn clmul(a: int, b: int) -> int {
+    clmul_maybe_overflows(a, b)
+        .ok_or(NoodleCuteError::ArithmeticOverflow)
+        .v()
+}
+
+/// Carry-less (polynomial over GF(2)) Euclidean division for non-negative `a` and positive `d`.
+pub(crate) const fn cldivmod(a: int, d: int) -> (int, int) {
+    assert!(a >= 0, "carry-less division requires non-negative dividend");
+    if d == 0 {
+        return Result::<(int, int)>::Err(NoodleCuteError::DivisionByZero).v();
+    }
+    assert!(d > 0, "carry-less division requires positive divisor");
+    let deg_d = bit_length_non_neg(d) - 1;
+    let ud = d as uint;
+    let mut q: uint = 0;
+    let mut r: uint = a as uint;
+    while r != 0 {
+        let deg_r = (uint::BITS - r.leading_zeros()) as int - 1;
+        if deg_r < deg_d {
+            break;
+        }
+        let shift = (deg_r - deg_d) as uint;
+        q ^= 1u32 << shift;
+        r ^= ud << shift;
+    }
+    (q as int, r as int)
+}
+
+/// Row-echelon basis for binary-polynomial offsets paired with their domain preimages.
+#[doc(hidden)]
+pub struct BinaryPreimages {
+    offsets: [int; 31],
+    indices: [int; 31],
+}
+impl BinaryPreimages {
+    pub(crate) const fn new() -> Self {
+        Self {
+            offsets: [0; 31],
+            indices: [0; 31],
+        }
+    }
+    pub(crate) const fn insert(&mut self, mut y: int, mut x: int) {
+        while y != 0 {
+            let k = (bit_length_non_neg(y) - 1) as usize;
+            if self.offsets[k] == 0 {
+                self.offsets[k] = y;
+                self.indices[k] = x;
+                return;
+            }
+            y ^= self.offsets[k];
+            x ^= self.indices[k];
+        }
+    }
+    pub(crate) const fn solve(&self, mut y: int) -> Option<int> {
+        let mut x = 0;
+        while y != 0 {
+            let k = (bit_length_non_neg(y) - 1) as usize;
+            if self.offsets[k] == 0 {
+                return None;
+            }
+            y ^= self.offsets[k];
+            x ^= self.indices[k];
+        }
+        Some(x)
+    }
 }

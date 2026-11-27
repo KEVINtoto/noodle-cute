@@ -168,6 +168,7 @@ const impl<const N: int> StaticInteger for Int<N> {
 pub const BOTH_STATIC<A: Integer, B: Integer>: bool = A::IS_STATIC && B::IS_STATIC;
 
 /// Returns `true` when compile-time signed integer `N >= 0`.
+#[doc(hidden)]
 pub const IS_NON_NEG<const N: int>: bool = N >= 0;
 
 pub(crate) const IS_ZERO<const N: int>: bool = N == 0;

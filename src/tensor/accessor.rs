@@ -69,11 +69,11 @@ use core::ops::Add;
 use crate::basis::{
     BasisCombination, IntoBasisCoord, IntoColexTerms, MergeEq, basis_eq, into_basis_coord,
 };
+use crate::f2::{F2, F2Scalar};
 use crate::integer::{Int, Integer, add, int};
 use crate::layout::Layout;
 use crate::shape::{InBounds, Shape, in_bounds};
 use crate::stride::{Accumulate, Stride};
-use crate::swizzle::{F2, F2Scalar};
 use crate::tuple::Nil;
 
 use super::{Tensor, TensorIndex};

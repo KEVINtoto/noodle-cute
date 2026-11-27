@@ -93,8 +93,10 @@
 
 use core::marker::ConstParamTy;
 
-use crate::integer::ops::{checked_lcm, divides_product};
-use crate::integer::{IS_NON_NEG, Int, div, gcd, int, lcm, mul, rem};
+use crate::integer::{
+    IS_NON_NEG, Int, div, divides_product, gcd, int, lcm, lcm_maybe_overflows, mul,
+    mul_maybe_overflows, rem,
+};
 use crate::layout::Layout;
 use crate::shape::{AssertPositiveShape, Shape, ShapeScalar, ValidShapeExtent};
 use crate::stride::Stride;
@@ -340,7 +342,10 @@ const fn gcd_dynamic<const M: usize, const N: usize, const K: usize>(
             break;
         }
 
-        match (p_a.checked_mul(a[i]), p_b.checked_mul(b[j])) {
+        match (
+            mul_maybe_overflows(p_a, a[i]),
+            mul_maybe_overflows(p_b, b[j]),
+        ) {
             (Some(ea), Some(eb)) => {
                 let q_a = rem(eb, ea) == 0;
                 let q_b = rem(ea, eb) == 0;
@@ -428,7 +433,7 @@ const fn gcd_step_action<
         return GcdStepAction::Invalid;
     }
 
-    let Ok(lcm_pab) = checked_lcm(p_a, p_b) else {
+    let Some(lcm_pab) = lcm_maybe_overflows(p_a, p_b) else {
         return GcdStepAction::Invalid;
     };
     let r_a = div(lcm_pab, p_a);
@@ -447,28 +452,21 @@ const fn gcd_step_action<
             {
                 return GcdStepAction::EmitAndStop;
             }
-            if rem_a == 1 && rem_b == 1 {
-                return if lcm_pab.checked_mul(g).is_some() {
-                    GcdStepAction::EmitBothDone
-                } else {
-                    GcdStepAction::Invalid
-                };
+            if (rem_a == 1 || rem_b == 1) && mul_maybe_overflows(lcm_pab, g).is_none() {
+                return GcdStepAction::Invalid;
             }
             if rem_a == 1 {
-                return if lcm_pab.checked_mul(g).is_some() {
-                    GcdStepAction::EmitADone
+                return if rem_b == 1 {
+                    GcdStepAction::EmitBothDone
                 } else {
-                    GcdStepAction::Invalid
+                    GcdStepAction::EmitADone
                 };
             }
             if rem_b == 1 {
-                return if lcm_pab.checked_mul(g).is_some() {
-                    GcdStepAction::EmitBDone
-                } else {
-                    GcdStepAction::Invalid
-                };
+                return GcdStepAction::EmitBDone;
             }
-            return if p_a.checked_mul(a).is_some() && p_b.checked_mul(b).is_some() {
+            return if mul_maybe_overflows(p_a, a).is_some() && mul_maybe_overflows(p_b, b).is_some()
+            {
                 GcdStepAction::EmitAdvanceBoth
             } else {
                 GcdStepAction::Invalid
@@ -480,7 +478,7 @@ const fn gcd_step_action<
         return GcdStepAction::Stop;
     }
 
-    match (p_a.checked_mul(a), p_b.checked_mul(b)) {
+    match (mul_maybe_overflows(p_a, a), mul_maybe_overflows(p_b, b)) {
         (Some(ea), Some(eb)) => {
             let q_a = rem(eb, ea) == 0;
             let q_b = rem(ea, eb) == 0;
@@ -553,9 +551,10 @@ const fn static_lcm_or_one<PA: ShapeScalar, PB: ShapeScalar>() -> int {
     let (Some(p_a), Some(p_b)) = (PA::STATIC_VALUE, PB::STATIC_VALUE) else {
         return 1;
     };
-    match checked_lcm(p_a, p_b) {
-        Ok(l) if l > 0 => l,
-        _ => 1,
+    if p_a == 0 || p_b == 0 {
+        1
+    } else {
+        lcm_maybe_overflows(p_a, p_b).unwrap_or(1)
     }
 }
 
@@ -572,7 +571,7 @@ const fn static_gcd_parts<PA: ShapeScalar, PB: ShapeScalar, AH: ShapeScalar, BH:
     if p_a <= 0 || p_b <= 0 || a <= 0 || b <= 0 {
         return (1, 1, 1, 1);
     }
-    let Ok(l) = checked_lcm(p_a, p_b) else {
+    let Some(l) = lcm_maybe_overflows(p_a, p_b) else {
         return (1, 1, 1, 1);
     };
     let r_a = div(l, p_a);
@@ -588,10 +587,7 @@ const fn static_gcd_parts<PA: ShapeScalar, PB: ShapeScalar, AH: ShapeScalar, BH:
     }
     let rem_a = div(qa, g);
     let rem_b = div(qb, g);
-    let next_p = match l.checked_mul(g) {
-        Some(v) => v,
-        None => 1,
-    };
+    let next_p = mul_maybe_overflows(l, g).unwrap_or(1);
     (g, rem_a, rem_b, next_p)
 }
 
@@ -602,10 +598,7 @@ const fn static_end_or_one<P: ShapeScalar, S: ShapeScalar>() -> int {
     if p <= 0 || s <= 0 {
         return 1;
     }
-    match p.checked_mul(s) {
-        Some(v) => v,
-        None => 1,
-    }
+    mul_maybe_overflows(p, s).unwrap_or(1)
 }
 
 const STATIC_LCM<PA: ShapeScalar, PB: ShapeScalar>: int = static_lcm_or_one::<PA, PB>();

@@ -105,11 +105,11 @@ use crate::algebra::{
     coalesce, greatest_common_domain, logical_divide, logical_divide_at, nullspace, right_inverse,
 };
 use crate::basis::{BasisCoeff, BasisCombination, BasisTerm, BasisTuple};
+use crate::f2::F2;
 use crate::integer::{ArithSub, Difference, Int, Integer, add, int, sub};
 use crate::layout::Layout;
 use crate::shape::{Shape, ShapeScalar};
 use crate::stride::Stride;
-use crate::swizzle::F2;
 use crate::tensor::{Tensor, TensorIndex, TensorSet};
 use crate::tuple::{Get, GetOutput, Mode, ModeEnd, Nil, Til, TupleProduct, tuple_product};
 

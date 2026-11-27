@@ -32,9 +32,10 @@ use crate::basis::{
     CanonicalBasis, CombAsTuple, ComparePath, EQ_MODE, EmitBasisTerm, IntoBasisCombination,
     MergeAdd, Mode, ModeEnd, PATH_ORDER, PathOrdering, SplitModePrefix,
 };
-use crate::integer::ops::bit_length_non_neg;
+use crate::f2::{F2, F2OrOutput, F2OrScalar, F2Scalar, ValidF2Value, clmul};
 use crate::integer::{
-    ArithAdd, INCREASE, IS_NON_NEG, Int, Integer, Sum, add, int, mul, shiftl, sub,
+    ArithAdd, BOTH_STATIC, INCREASE, IS_NON_NEG, Int, Integer, Sum, add, bit_length_non_neg, bitor,
+    int, mul, shiftl, sub,
 };
 use crate::shape::{Shape, ShapeScalar, ValidShapeExtent};
 use crate::tuple::{Item, Leaf, Nil, Til, Tuple};
@@ -134,6 +135,26 @@ where
     }
 }
 
+const F2_COSHAPE_EXTENT<const N: int>: int = shiftl(1i32, bit_length_non_neg(N));
+
+const impl OffsetExtent for F2<int> {
+    type Output = int;
+    fn offset_extent(self) -> int {
+        shiftl(1i32, bit_length_non_neg(self.value()))
+    }
+}
+
+const impl<const N: int> OffsetExtent for F2<Int<N>>
+where
+    (): [const] ValidF2Value<{ IS_NON_NEG::<N> }>,
+    (): [const] ValidShapeExtent<{ IS_NON_NEG::<{ F2_COSHAPE_EXTENT::<N> }> }>,
+{
+    type Output = Int<{ F2_COSHAPE_EXTENT::<N> }>;
+    fn offset_extent(self) -> Self::Output {
+        Int
+    }
+}
+
 /// Decrements every leaf extent of a shape by `1` to form its maximum coordinate.
 #[doc(hidden)]
 pub const trait MaxCoord: [const] Shape {
@@ -225,6 +246,13 @@ const impl StrideSkeleton for Nil {
 }
 
 const impl<I: Integer> StrideSkeleton for I {
+    type Terms = Nil;
+    fn skeleton_terms(self) -> Nil {
+        Nil
+    }
+}
+
+const impl<V: [const] F2Scalar> StrideSkeleton for F2<V> {
     type Terms = Nil;
     fn skeleton_terms(self) -> Nil {
         Nil
@@ -573,6 +601,31 @@ where
     type Output = Sum<L, R>;
     fn coshape_coeff_accum(self, rhs: R) -> Self::Output {
         add(self, rhs)
+    }
+}
+
+const impl<L, R> CoshapeCoeffAccum<F2<R>> for F2<L>
+where
+    L: [const] F2Scalar + [const] F2OrScalar<R, { BOTH_STATIC::<L, R> }>,
+    R: [const] F2Scalar,
+{
+    type Output = F2<F2OrOutput<L, R>>;
+    fn coshape_coeff_accum(self, rhs: F2<R>) -> Self::Output {
+        crate::f2::f2_or(self, rhs)
+    }
+}
+
+const impl<L: [const] F2Scalar> CoshapeCoeffAccum<Int<0>> for F2<L> {
+    type Output = Self;
+    fn coshape_coeff_accum(self, _: Int<0>) -> Self {
+        self
+    }
+}
+
+const impl<R: [const] F2Scalar> CoshapeCoeffAccum<F2<R>> for Int<0> {
+    type Output = F2<R>;
+    fn coshape_coeff_accum(self, rhs: F2<R>) -> F2<R> {
+        rhs
     }
 }
 
@@ -991,6 +1044,97 @@ where
     }
 }
 
+const impl<V: [const] F2Scalar> CoshapeAccumulate<F2<V>> for Nil {
+    type Output = F2<V>;
+    fn coshape_accumulate(self, rhs: F2<V>) -> F2<V> {
+        rhs
+    }
+}
+
+const impl<V: [const] F2Scalar> CoshapeAccumulate<Nil> for F2<V> {
+    type Output = Self;
+    fn coshape_accumulate(self, _: Nil) -> Self {
+        self
+    }
+}
+
+const impl<V: [const] F2Scalar> CoshapeAccumulate<Int<0>> for F2<V> {
+    type Output = Self;
+    fn coshape_accumulate(self, _: Int<0>) -> Self {
+        self
+    }
+}
+
+const impl<V: [const] F2Scalar> CoshapeAccumulate<F2<V>> for Int<0> {
+    type Output = F2<V>;
+    fn coshape_accumulate(self, rhs: F2<V>) -> F2<V> {
+        rhs
+    }
+}
+
+const impl<L, R> CoshapeAccumulate<F2<R>> for F2<L>
+where
+    L: [const] F2Scalar + [const] F2OrScalar<R, { BOTH_STATIC::<L, R> }>,
+    R: [const] F2Scalar,
+{
+    type Output = F2<F2OrOutput<L, R>>;
+    fn coshape_accumulate(self, rhs: F2<R>) -> Self::Output {
+        self.coshape_coeff_accum(rhs)
+    }
+}
+
+const impl<V: [const] F2Scalar> CoshapeAccumulate<BasisCombination<Nil>> for F2<V> {
+    type Output = Self;
+    fn coshape_accumulate(self, _: BasisCombination<Nil>) -> Self {
+        self
+    }
+}
+
+const impl<V: [const] F2Scalar> CoshapeAccumulate<F2<V>> for BasisCombination<Nil> {
+    type Output = F2<V>;
+    fn coshape_accumulate(self, rhs: F2<V>) -> F2<V> {
+        rhs
+    }
+}
+
+const impl<V: BasisCoeff, P: Copy> CoshapeAccumulate<BasisTerm<V, P>> for F2<Int<0>> {
+    type Output = BasisTerm<V, P>;
+    fn coshape_accumulate(self, rhs: BasisTerm<V, P>) -> Self::Output {
+        rhs
+    }
+}
+
+const impl<V: BasisCoeff, P: Copy> CoshapeAccumulate<F2<Int<0>>> for BasisTerm<V, P> {
+    type Output = Self;
+    fn coshape_accumulate(self, _: F2<Int<0>>) -> Self::Output {
+        self
+    }
+}
+
+const impl<H, T> CoshapeAccumulate<BasisCombination<Til<H, T>>> for F2<Int<0>>
+where
+    H: Copy,
+    T: BasisTuple,
+    Til<H, T>: BasisTuple,
+{
+    type Output = BasisCombination<Til<H, T>>;
+    fn coshape_accumulate(self, rhs: BasisCombination<Til<H, T>>) -> Self::Output {
+        rhs
+    }
+}
+
+const impl<H, T> CoshapeAccumulate<F2<Int<0>>> for BasisCombination<Til<H, T>>
+where
+    H: Copy,
+    T: BasisTuple,
+    Til<H, T>: BasisTuple,
+{
+    type Output = Self;
+    fn coshape_accumulate(self, _: F2<Int<0>>) -> Self::Output {
+        self
+    }
+}
+
 /// Folds maximal mode contributions `(s_i - 1) * d_i` via [`CoshapeAccumulate`].
 #[doc(hidden)]
 pub const trait CoshapeInnerProduct<D, Acc = Int<0>>: Copy {
@@ -1085,6 +1229,18 @@ where
 ///     int_tuple![Int::<4>, Int::<1>, Int::<8>]
 /// );
 /// ```
+///
+/// A static codomain bit span of `1 << 31` exceeds [`int::MAX`] and fails at compile time.
+///
+/// ```compile_fail,E0080
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::f2::f2;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::stride::coshape;
+///
+/// let _ = coshape(Int::<2>, f2(Int::<1_073_741_824>));
+/// ```
 pub const fn coshape<S: [const] Coshape<D>, D: Stride<S>>(shape: S, stride: D) -> S::Output {
     shape.coshape(stride)
 }
@@ -1124,7 +1280,7 @@ impl LinearBoundsAcc {
     pub const fn push_f2_span(self, span: int) -> Self {
         match self {
             Self::Zero => Self::F2Mask(span),
-            Self::F2Mask(mask) => Self::F2Mask(mask | span),
+            Self::F2Mask(mask) => Self::F2Mask(bitor(mask, span)),
             Self::Integer(0, 0) => Self::F2Mask(span),
             Self::Integer(_, _) => {
                 assert!(
@@ -1175,6 +1331,14 @@ const impl<S: [const] ShapeScalar, I: [const] Integer> LinearBoundsWalk<S> for I
         let max_c = sub(shape.value(), 1);
         let span = mul(max_c, self.value());
         acc.push_integer_span(span)
+    }
+}
+
+const impl<S: [const] ShapeScalar, V: [const] F2Scalar> LinearBoundsWalk<S> for F2<V> {
+    fn walk_linear_bounds(self, shape: S, acc: LinearBoundsAcc) -> LinearBoundsAcc {
+        let max_c = sub(shape.value(), 1);
+        let span = clmul(max_c, self.value());
+        acc.push_f2_span(span)
     }
 }
 

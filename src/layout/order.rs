@@ -38,6 +38,7 @@ use core::cmp::Ordering;
 use crate::basis::{
     BasisCoeff, BasisCombination, BasisPath, BasisTerm, BasisTuple, IntoColexTerms, MergeColex,
 };
+use crate::f2::{F2, F2Scalar};
 use crate::integer::{ArithMul, INCREASE, Int, Integer, Product, int, mul};
 use crate::shape::{Shape, ShapeScalar};
 use crate::stride::Stride;
@@ -57,6 +58,10 @@ const impl OrderKey for int {
 
 const impl<const N: int> OrderKey for Int<N> {
     const IS_STATIC_ZERO: bool = N == 0;
+}
+
+const impl<V: [const] F2Scalar> OrderKey for F2<V> {
+    const IS_STATIC_ZERO: bool = matches!(V::STATIC_VALUE, Some(0));
 }
 
 const impl<V, P> OrderKey for BasisTerm<V, P>

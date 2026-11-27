@@ -36,6 +36,7 @@ use crate::basis::{
     BasisCombination, BasisTerm, BasisTuple, CombAsTuple, MakeBasisLikeOutput,
     MakeBasisLikeTopProfile, make_basis_like,
 };
+use crate::f2::F2;
 use crate::integer::{Int, int};
 use crate::shape::{Shape, ShapeScalar};
 use crate::stride::{Coshape, ScaleStride, Stride, StrideSkeleton};
@@ -116,6 +117,10 @@ pub const trait TilerFactor: Copy {
 const impl TilerFactor for int {}
 const impl<const N: int> TilerFactor for Int<N> {
     const IS_UNIT: bool = N == 1;
+}
+// Scaling by F2(1) lifts integer strides into the F2 algebra.
+const impl<V: Copy> TilerFactor for F2<V> {
+    const IS_UNIT: bool = false;
 }
 const impl<V: Copy, P: Copy> TilerFactor for BasisTerm<V, P> {}
 const impl<T: BasisTuple> TilerFactor for BasisCombination<T> {}

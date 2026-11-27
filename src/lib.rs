@@ -1,17 +1,18 @@
 //! Exact hierarchical layout and tensor algebra in Rust (`no_std`).
 //!
-//! The crate is organized in layers from low-level arithmetic primitives up to
-//! hierarchical tuples, sparse coordinate bases, shapes, strides, layouts, and layout algebra:
+//! The crate is organized in layers from arithmetic primitives through
+//! hierarchical layout algebra and tensor algorithms:
 //!
 //! - [`integer`]: Static ([`Int<N>`](integer::Int)) and dynamic ([`int`](integer::int))
-//!   signed integers, `const` comparisons, three-valued static predicates, and checked
-//!   arithmetic.
-//! - [`mod@slice`]: `const`-capable Python-style slice specifications ([`Slice`](slice::Slice),
-//!   [`Bound`](slice::Bound)) and dimension resolution ([`slice!`], [`slices!`]).
-//! - [`mod@tuple`]: Hierarchical tuples ([`Til`](tuple::Til),
+//!   signed integers, `const` comparisons, three-valued static predicates, and arithmetic.
+//! - [`mod@f2`]: Static and dynamic binary polynomials ([`F2`](f2::F2)) with XOR,
+//!   carry-less multiplication, and polynomial division ([`f2!`]).
+//! - [`mod@tuple`] and [`mod@slice`]: Hierarchical tuples ([`Tuple`](tuple::Tuple),
 //!   [`Nil`](tuple::Nil)), structural congruence, mode indexing/slicing, restructuring,
 //!   synchronized multi-tree leaf traversal, and product reductions
-//!   ([`tuple!`], [`int_tuple!`], [`mode!`], [`walk_mode!`]).
+//!   ([`tuple!`], [`int_tuple!`], [`mode!`], [`walk_mode!`]). Python-style slice
+//!   specifications ([`Slice`](slice::Slice), [`Bound`](slice::Bound)) support
+//!   `const` dimension resolution ([`slice!`], [`slices!`]).
 //! - [`basis`]: Sparse, path-sorted coordinate tuples and basis vectors
 //!   ([`Basis`](basis::Basis), [`BasisTerm`](basis::BasisTerm),
 //!   [`BasisCombination`](basis::BasisCombination)) with linear arithmetic, zero-padded
@@ -23,7 +24,7 @@
 //!   colexicographical coordinate-index conversions ([`crd2idx`](shape::crd2idx),
 //!   [`idx2crd`](shape::idx2crd)), bounds checks ([`in_bounds`](shape::in_bounds)), and
 //!   iteration ([`coordinates`](shape::coordinates)).
-//! - [`stride`]: Congruent integer/basis strides ([`Stride`](stride::Stride),
+//! - [`stride`]: Congruent integer, F2, and basis strides ([`Stride`](stride::Stride),
 //!   [`StrideScalar`](stride::StrideScalar)), leaf scaling and accumulation
 //!   ([`StrideMul`](stride::StrideMul), [`Accumulate`](stride::Accumulate),
 //!   [`ScaleStride`](stride::ScaleStride)), [`inner_product`](stride::inner_product),
@@ -34,17 +35,15 @@
 //!   ordered compact layouts ([`make_ordered_layout`](layout::make_ordered_layout),
 //!   [`make_layout_like`](layout::make_layout_like)), rational element recasting
 //!   ([`recast`](layout::recast())), and [`make_layout!`].
-//! - [`algebra`]: Layout algebra transformations including [`coalesce`](algebra::coalesce()),
+//! - [`algebra`] and [`mod@swizzle`]: Layout algebra transformations including [`coalesce`](algebra::coalesce()),
 //!   [`nullspace`](algebra::nullspace()), [`composition`](algebra::composition()),
 //!   [`complement`](algebra::complement()), [`right_inverse`](algebra::right_inverse),
 //!   [`left_inverse`](algebra::left_inverse), [`logical_divide`](algebra::logical_divide()),
 //!   [`zipped_divide`](algebra::zipped_divide), [`logical_product`](algebra::logical_product()),
 //!   [`blocked_product`](algebra::blocked_product), [`raked_product`](algebra::raked_product),
 //!   [`greatest_common_domain`](algebra::greatest_common_domain()), and
-//!   [`layout_add`](algebra::layout_add()).
-//! - [`mod@swizzle`]: Binary-field stride scalar [`F2`](swizzle::F2) ($\mathbb{F}_2\[x\]$ XOR /
-//!   carry-less arithmetic passing through the layout algebra) and bit-field permutation
-//!   functor [`Swizzle`](swizzle::Swizzle) ([`f2!`], [`swizzle!`]).
+//!   [`layout_add`](algebra::layout_add()). [`Swizzle`](swizzle::Swizzle) applies a
+//!   bit-field XOR permutation to offsets ([`swizzle!`]).
 //! - [`tensor`]: CuTe [`Tensor`](tensor::Tensor) pairing an [`Accessor`](tensor::Accessor)
 //!   with a [`Layout`](layout::Layout), pure `no_std` accessors
 //!   ([`SliceAccessor`](tensor::SliceAccessor), [`CellAccessor`](tensor::CellAccessor),
@@ -111,6 +110,7 @@
 pub mod algebra;
 pub mod algorithm;
 pub mod basis;
+pub mod f2;
 pub mod integer;
 pub mod layout;
 pub mod shape;

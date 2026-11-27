@@ -10,9 +10,9 @@
 use std::panic::catch_unwind;
 
 use noodle_cute::algorithm::einfold::{ModeToken, parse_einfold};
+use noodle_cute::f2::f2;
 use noodle_cute::integer::{Int, int};
 use noodle_cute::layout::{Layout, is_layout};
-use noodle_cute::swizzle::f2;
 use noodle_cute::tensor::{ImplicitAccessor, Tensor, is_tensor, make_tensor};
 use noodle_cute::tuple::{Item, LeafProfile};
 use noodle_cute::{e, einfold, int_tuple, tuple};

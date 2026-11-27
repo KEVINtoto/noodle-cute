@@ -58,25 +58,22 @@
 //! ```compile_fail
 //! # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
 //! # #![allow(incomplete_features)]
-//! use noodle_cute::{algebra::composition, integer::Int, layout::Layout, swizzle::f2};
-//! const BAD: Layout<Int<4>, noodle_cute::swizzle::StaticF2<3>> = composition(
+//! use noodle_cute::{algebra::composition, f2::f2, integer::Int, layout::Layout};
+//! const BAD: Layout<Int<4>, noodle_cute::f2::StaticF2<3>> = composition(
 //!     Layout::new(Int::<16>, f2(Int::<1>)), Layout::new(Int::<4>, Int::<3>));
 //! ```
 
 use core::marker::ConstParamTy;
 
-use crate::basis::ComparePath;
-use crate::basis::{BasisCoeff, ProjectByPath, SingleBasis};
-use crate::integer::ops::carry_free_mask;
-use crate::integer::uint;
+use crate::basis::{BasisCoeff, ComparePath, ProjectByPath, SingleBasis};
+use crate::f2::{F2, F2Scalar};
 use crate::integer::{
-    ArithFloorDiv, FloorQuotient, IS_NON_NEG, Int, Integer, div, floor_div, floor_rem, int, sub,
+    ArithFloorDiv, FloorQuotient, IS_NON_NEG, Int, Integer, carry_free_mask, div, floor_div,
+    floor_rem, int, sub, uint,
 };
 use crate::layout::{Coprofile, Layout, Tiler, tiler_to_layout};
-use crate::shape::{Shape, ShapeScalar, ValidShapeExtent};
-use crate::stride::{ContainsF2, same_path};
-use crate::stride::{Stride, StrideMul, StrideScalar};
-use crate::swizzle::F2;
+use crate::shape::{IndexToCoord, Shape, ShapeScalar, ValidShapeExtent};
+use crate::stride::{ContainsF2, InnerProduct, Stride, StrideMul, StrideScalar, same_path};
 use crate::tuple::{Item, LeafProfile, Nil, Til, Tuple, Wrap};
 
 use super::coalesce::{Coalesce, CoalesceExtended, DropTrailingUnit};
@@ -642,6 +639,29 @@ where
         let div = self.divide_out(b.stride);
         let kept = div.keep_shape(b.shape);
         Coalesce::<true>::coalesce(kept).drop_trailing_unit()
+    }
+}
+
+const impl<S0, TS, D0, TD, M> AtomCompose<Layout<Int<1>, F2<M>>>
+    for Layout<Til<S0, TS>, Til<D0, TD>>
+where
+    S0: ShapeScalar,
+    D0: StrideScalar + Stride<S0>,
+    TS: Tuple + Shape,
+    TD: Tuple + Stride<TS>,
+    M: [const] F2Scalar,
+    F2<M>: [const] IndexToCoord<Til<S0, TS>>,
+    <F2<M> as IndexToCoord<Til<S0, TS>>>::Output: [const] InnerProduct<Til<D0, TD>>,
+    <<F2<M> as IndexToCoord<Til<S0, TS>>>::Output as InnerProduct<Til<D0, TD>>>::Output:
+        Stride<Int<1>>,
+{
+    type Output = Layout<
+        Int<1>,
+        <<F2<M> as IndexToCoord<Til<S0, TS>>>::Output as InnerProduct<Til<D0, TD>>>::Output,
+    >;
+
+    fn atom_compose(self, b: Layout<Int<1>, F2<M>>) -> Self::Output {
+        Layout::new(Int::<1>, self.call(b.stride))
     }
 }
 

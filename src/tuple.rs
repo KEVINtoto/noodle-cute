@@ -32,7 +32,7 @@
 //! use noodle_cute::tuple::{Flatten, Item, Nil, Til, TransformLeaf, TransformLeafFunctor};
 //!
 //! // The hierarchy (10, (20, 30), 40).
-//! let t = tuple!(10i32, (20i32, 30i32), 40i32);
+//! let t = tuple!(10, (20i32, 30i32), 40i32);
 //! assert_eq!((t.rank(), t.depth(), t.length()), (3, 2, 4));
 //! assert_eq!(t.get::<-1>(), 40);
 //! assert_eq!(walk_mode!(t, 1, 0), 20);
@@ -65,6 +65,7 @@
 
 use core::marker::PhantomData;
 
+use crate::f2::{F2, F2Scalar};
 use crate::integer::{Integer, add, int, max, sub};
 
 pub mod index;
@@ -278,6 +279,14 @@ const impl<I: [const] Integer> Item for I {
     const DEPTH: int = 0;
     const LEAVES: int = 1;
     const IS_STATIC: bool = I::IS_STATIC;
+    type Profile = LeafProfile;
+}
+
+const impl<V: [const] F2Scalar> Item for F2<V> {
+    const RANK: int = 1;
+    const DEPTH: int = 0;
+    const LEAVES: int = 1;
+    const IS_STATIC: bool = V::IS_STATIC;
     type Profile = LeafProfile;
 }
 

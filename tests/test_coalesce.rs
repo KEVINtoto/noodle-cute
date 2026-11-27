@@ -11,8 +11,10 @@ use noodle_cute::algebra::coalesce::{
     Coalesce, CoalesceExtended, CoalescePrepend, DropTrailingUnit, PrependAction, coalesce,
     coalesce_extended,
 };
+use noodle_cute::algebra::composition;
+
 use noodle_cute::basis::{BasisCombination, Mode, ScaledBasis};
-use noodle_cute::integer::Int;
+use noodle_cute::integer::{Int, add};
 use noodle_cute::layout::Layout;
 use noodle_cute::tuple::{LeafProfile, Nil, NilProfile, Til, TupleProfile};
 use noodle_cute::{e, int_tuple, tuple};
@@ -577,4 +579,51 @@ fn test_coalesce_basis_combination_strides() {
         tuple![e![0] + e![1], BasisCombination::<Nil>::zero()],
     );
     assert_eq!(zero_ext.coalesce(), Layout::new(Int::<0>, e![0] + e![1]));
+}
+
+#[test]
+fn coalesce_preserves_the_domain_and_is_idempotent() {
+    // docs/04_layout_algebra.md: the middle pair merges across the nested modes.
+    let layout = Layout::new(
+        int_tuple![(Int::<2>, Int::<2>), (Int::<2>, Int::<2>)],
+        int_tuple![(Int::<1>, Int::<4>), (Int::<8>, Int::<32>)],
+    );
+    let result = coalesce(layout);
+    assert_eq!(
+        result,
+        Layout::new(
+            int_tuple![Int::<2>, Int::<4>, Int::<2>],
+            int_tuple![Int::<1>, Int::<4>, Int::<32>],
+        )
+    );
+    assert_eq!(result.depth(), 1);
+    assert_eq!(result.size(), layout.size());
+    assert_eq!(coalesce(result), result);
+    assert_eq!(composition(layout, Layout::from_shape(Int::<16>)), result);
+    for i in 0..layout.size() {
+        assert_eq!(result(i), layout(i));
+    }
+}
+
+#[test]
+fn coalesce_extended_preserves_offsets_past_the_domain() {
+    // test/test_coalesce_z.py: an extent-one tail carries the extended-domain stride.
+    let layout = Layout::new(
+        int_tuple![Int::<2>, Int::<1>, Int::<6>, Int::<1>],
+        int_tuple![Int::<1>, Int::<7>, Int::<8>, Int::<57>],
+    );
+    let result = coalesce_extended(layout);
+    assert_eq!(
+        result,
+        Layout::new(
+            int_tuple![Int::<2>, Int::<6>, Int::<1>],
+            int_tuple![Int::<1>, Int::<8>, Int::<57>],
+        )
+    );
+    assert_eq!(result.depth(), 1);
+    assert_eq!(result.size(), layout.size());
+    assert_eq!(coalesce_extended(result), result);
+    for i in 0..add(layout.size(), 10i32) {
+        assert_eq!(result(i), layout(i));
+    }
 }

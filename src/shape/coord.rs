@@ -40,9 +40,13 @@ use crate::basis::{
     BasisCoeff, BasisCoeffAdd, BasisCoeffMul, BasisCombination, BasisPath, BasisTerm, BasisTuple,
     COEFF_IS_STATIC_ZERO, EQ_MODE, EmitBasisTerm, Mode, ModeEnd, SplitModePrefix,
 };
+use crate::f2::{
+    F2, F2_DIV_DISPATCH, F2DivModOp, F2Operand, F2Quotient, F2Remainder, F2Scalar, clmul,
+    clmul_maybe_overflows, f2_divmod,
+};
 use crate::integer::{
-    ArithFloorDivMod, FloorQuotient, FloorRemainder, INCREASE, Int, Integer, floor_divmod, ge, int,
-    lt,
+    ArithFloorDivMod, ArithMul, FloorQuotient, FloorRemainder, INCREASE, Int, Integer, Product,
+    floor_divmod, ge, int, lt, mul, mul_maybe_overflows,
 };
 use crate::tuple::{FlatTuple, Item, Leaf, Nil, RepeatLike, Til, Tuple, TupleProduct, repeat_like};
 
@@ -84,6 +88,14 @@ const impl CoordToIndex<Nil> for Nil {
 const impl<S: [const] Shape, I: [const] Integer> CoordToIndex<S> for I {
     type Output = I;
     fn coord_to_index(self, shape: &S) -> Self::Output {
+        let _ = shape.has_zero();
+        self
+    }
+}
+
+const impl<S: [const] Shape, V: [const] F2Scalar> CoordToIndex<S> for F2<V> {
+    type Output = Self;
+    fn coord_to_index(self, shape: &S) -> Self {
         let _ = shape.has_zero();
         self
     }
@@ -348,6 +360,195 @@ where
     }
 }
 
+const fn static_prefix_no_carry<Pps: Integer, S: ShapeScalar>() -> bool {
+    match (Pps::STATIC_VALUE, S::STATIC_VALUE) {
+        (Some(p), Some(s)) => {
+            p >= 0
+                && s > 0
+                && matches!((mul_maybe_overflows(p, s), clmul_maybe_overflows(p, s)), (Some(integer), Some(binary)) if integer == binary)
+        }
+        _ => true,
+    }
+}
+
+const F2_PREFIX_NO_CARRY<Pps: Integer, S: ShapeScalar>: bool = static_prefix_no_carry::<Pps, S>();
+
+/// Accepts `OK` when the static carry-less and ordinary prefix products agree.
+#[doc(hidden)]
+pub const trait ValidF2PrefixProduct<const OK: bool> {}
+const impl ValidF2PrefixProduct<true> for () {}
+
+/// Colexicographical carry-less decomposition of an [`F2`] index across shape `S`,
+/// threading remaining [`F2`] quotient and running $\mathbb{Z}$ prefix product `Pps`.
+/// `IS_LAST` skips division at the final leaf.
+#[doc(hidden)]
+pub const trait F2IndexToCoordCarry<S: Shape, Pps: [const] Integer, const IS_LAST: bool>:
+    Copy
+{
+    type Output: Item;
+    type RemScalar: [const] F2Scalar;
+    type NextPps: [const] Integer;
+
+    fn f2_index_to_coord_carry(
+        self,
+        shape: &S,
+        pps: Pps,
+    ) -> (Self::Output, F2<Self::RemScalar>, Self::NextPps);
+}
+
+const impl<V: [const] F2Scalar, Pps: [const] Integer, const IS_LAST: bool>
+    F2IndexToCoordCarry<Nil, Pps, IS_LAST> for F2<V>
+{
+    type Output = Nil;
+    type RemScalar = V;
+    type NextPps = Pps;
+
+    fn f2_index_to_coord_carry(self, _: &Nil, pps: Pps) -> (Nil, F2<V>, Pps) {
+        (Nil, self, pps)
+    }
+}
+
+const impl<S: [const] ShapeScalar, V: [const] F2Scalar, Pps: [const] Integer>
+    F2IndexToCoordCarry<S, Pps, true> for F2<V>
+{
+    type Output = F2<V>;
+    type RemScalar = Int<0>;
+    type NextPps = Pps;
+
+    fn f2_index_to_coord_carry(self, shape: &S, pps: Pps) -> (F2<V>, F2<Int<0>>, Pps) {
+        let _ = shape.size();
+        (self, F2::new(Int), pps)
+    }
+}
+
+const impl<S, V, Pps> F2IndexToCoordCarry<S, Pps, false> for F2<V>
+where
+    S: [const] ShapeScalar + [const] F2Operand,
+    V: [const] F2Scalar,
+    Pps: [const] Integer + [const] ArithMul<Pps, S>,
+    (): [const] ValidF2PrefixProduct<{ F2_PREFIX_NO_CARRY::<Pps, S> }>,
+    F2<V>: [const] F2DivModOp<S, { F2_DIV_DISPATCH::<V, S> }>,
+{
+    type Output = F2Remainder<V, S>;
+    type RemScalar = <F2<V> as F2DivModOp<S, { F2_DIV_DISPATCH::<V, S> }>>::QuotScalar;
+    type NextPps = Product<Pps, S>;
+
+    fn f2_index_to_coord_carry(
+        self,
+        shape: &S,
+        pps: Pps,
+    ) -> (Self::Output, F2<Self::RemScalar>, Self::NextPps) {
+        let s_val = shape.size();
+        let next_pps = mul(pps, *shape);
+        let f2_prod = clmul(Integer::value(pps), s_val);
+        assert!(
+            f2_prod == Integer::value(next_pps),
+            "F2 idx2crd requires carry-less prefix product agreement (F2(pps) * F2(s) == pps * s)"
+        );
+        let (quot, rem): (F2Quotient<V, S>, F2Remainder<V, S>) = f2_divmod(self, *shape);
+        (rem, quot, next_pps)
+    }
+}
+
+const impl<SH, ST, V, Pps, const IS_LAST: bool> F2IndexToCoordCarry<Til<SH, ST>, Pps, IS_LAST>
+    for F2<V>
+where
+    SH: Shape,
+    ST: Tuple + Shape,
+    V: [const] F2Scalar,
+    Pps: [const] Integer,
+    F2<V>: [const] F2IndexToCoordCarry<SH, Pps, { AND_BOOL::<IS_LAST, { HAS_NO_LEAVES::<ST> }> }>,
+    F2<
+        <F2<V> as F2IndexToCoordCarry<SH, Pps, { AND_BOOL::<IS_LAST, { HAS_NO_LEAVES::<ST> }> }>>::RemScalar,
+    >: [const] F2IndexToCoordCarry<
+            ST,
+            <F2<V> as F2IndexToCoordCarry<
+                SH,
+                Pps,
+                { AND_BOOL::<IS_LAST, { HAS_NO_LEAVES::<ST> }> },
+            >>::NextPps,
+            IS_LAST,
+        >,
+    <F2<
+        <F2<V> as F2IndexToCoordCarry<SH, Pps, { AND_BOOL::<IS_LAST, { HAS_NO_LEAVES::<ST> }> }>>::RemScalar,
+    > as F2IndexToCoordCarry<
+        ST,
+        <F2<V> as F2IndexToCoordCarry<SH, Pps, { AND_BOOL::<IS_LAST, { HAS_NO_LEAVES::<ST> }> }>>::NextPps,
+        IS_LAST,
+    >>::Output: Tuple,
+{
+    type Output = Til<
+        <F2<V> as F2IndexToCoordCarry<SH, Pps, { AND_BOOL::<IS_LAST, { HAS_NO_LEAVES::<ST> }> }>>::Output,
+        <F2<
+            <F2<V> as F2IndexToCoordCarry<
+                SH,
+                Pps,
+                { AND_BOOL::<IS_LAST, { HAS_NO_LEAVES::<ST> }> },
+            >>::RemScalar,
+        > as F2IndexToCoordCarry<
+            ST,
+            <F2<V> as F2IndexToCoordCarry<
+                SH,
+                Pps,
+                { AND_BOOL::<IS_LAST, { HAS_NO_LEAVES::<ST> }> },
+            >>::NextPps,
+            IS_LAST,
+        >>::Output,
+    >;
+    type RemScalar = <F2<
+        <F2<V> as F2IndexToCoordCarry<SH, Pps, { AND_BOOL::<IS_LAST, { HAS_NO_LEAVES::<ST> }> }>>::RemScalar,
+    > as F2IndexToCoordCarry<
+        ST,
+        <F2<V> as F2IndexToCoordCarry<SH, Pps, { AND_BOOL::<IS_LAST, { HAS_NO_LEAVES::<ST> }> }>>::NextPps,
+        IS_LAST,
+    >>::RemScalar;
+    type NextPps = <F2<
+        <F2<V> as F2IndexToCoordCarry<SH, Pps, { AND_BOOL::<IS_LAST, { HAS_NO_LEAVES::<ST> }> }>>::RemScalar,
+    > as F2IndexToCoordCarry<
+        ST,
+        <F2<V> as F2IndexToCoordCarry<SH, Pps, { AND_BOOL::<IS_LAST, { HAS_NO_LEAVES::<ST> }> }>>::NextPps,
+        IS_LAST,
+    >>::NextPps;
+
+    fn f2_index_to_coord_carry(
+        self,
+        shape: &Til<SH, ST>,
+        pps: Pps,
+    ) -> (Self::Output, F2<Self::RemScalar>, Self::NextPps) {
+        let (head, rem, next_pps) = self.f2_index_to_coord_carry(&shape.0, pps);
+        let (tail, rem2, next_pps2) = rem.f2_index_to_coord_carry(&shape.1, next_pps);
+        (Til(head, tail), rem2, next_pps2)
+    }
+}
+
+const impl<V: [const] F2Scalar> IndexToCoord<Nil> for F2<V> {
+    type Output = Nil;
+    fn index_to_coord(self, _: &Nil) -> Nil {
+        Nil
+    }
+}
+
+const impl<S: [const] ShapeScalar, V: [const] F2Scalar> IndexToCoord<S> for F2<V> {
+    type Output = Self;
+    fn index_to_coord(self, shape: &S) -> Self {
+        let _ = shape.size();
+        self
+    }
+}
+
+const impl<SH, ST, V> IndexToCoord<Til<SH, ST>> for F2<V>
+where
+    SH: Shape,
+    ST: Tuple + Shape,
+    V: [const] F2Scalar,
+    F2<V>: [const] F2IndexToCoordCarry<Til<SH, ST>, Int<1>, true>,
+{
+    type Output = <F2<V> as F2IndexToCoordCarry<Til<SH, ST>, Int<1>, true>>::Output;
+    fn index_to_coord(self, shape: &Til<SH, ST>) -> Self::Output {
+        self.f2_index_to_coord_carry(shape, Int::<1>).0
+    }
+}
+
 /// Converts a 1D linear index into a natural coordinate for a shape.
 ///
 /// # Examples
@@ -380,6 +581,19 @@ pub const fn index_to_coord<I: [const] IndexToCoord<S>, S: Shape>(
 ///
 /// let s = int_tuple![3i32, (2i32, 3i32)];
 /// assert_eq!(idx2crd(7i32, &s), int_tuple![1i32, (0i32, 1i32)]);
+/// ```
+///
+/// Carrying prefix products in `idx2crd(F2, shape)` fail at compile time for static shapes.
+///
+/// ```compile_fail,E0277
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::f2::f2;
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::shape::idx2crd;
+///
+/// let _ = idx2crd(f2(Int::<0b10110>), &int_tuple![Int::<3>, Int::<3>, Int::<3>]);
 /// ```
 pub const fn idx2crd<I: [const] IndexToCoord<S>, S: Shape>(index: I, shape: &S) -> I::Output {
     index.index_to_coord(shape)
@@ -574,6 +788,13 @@ const impl<C: [const] Integer, S: [const] ShapeScalar> LeavesInBounds<S> for C {
     }
 }
 
+const impl<V: [const] F2Scalar, S: [const] ShapeScalar> LeavesInBounds<S> for F2<V> {
+    fn leaves_in_bounds(&self, shape: &S) -> bool {
+        let extent = shape.size();
+        lt(self.value(), extent)
+    }
+}
+
 const impl<CH, CT, SH, ST> LeavesInBounds<Til<SH, ST>> for Til<CH, CT>
 where
     CH: [const] LeavesInBounds<SH>,
@@ -588,13 +809,22 @@ where
 
 const SHAPE_IS_STATIC_ZERO<S: Shape>: bool = S::STATIC_HAS_ZERO;
 
+const fn scalar_index_in_bounds<I, S>(index: I, shape: &S) -> bool
+where
+    I: Copy + [const] IndexToCoord<S>,
+    S: [const] Shape,
+    I::Output: [const] LeavesInBounds<S>,
+{
+    !shape.has_zero() && index.index_to_coord(shape).leaves_in_bounds(shape)
+}
+
 /// Dispatches scalar `InBounds` for shape `S`: `STATIC_ZERO = true` short-circuits to `false` without dividing by 0.
 #[doc(hidden)]
-pub const trait ScalarInBounds<S: Shape, const STATIC_ZERO: bool>: Integer {
+pub const trait ScalarInBounds<S: Shape, const STATIC_ZERO: bool>: F2Operand {
     fn scalar_in_bounds(self, shape: &S) -> bool;
 }
 
-const impl<I: [const] Integer, S: Shape> ScalarInBounds<S, true> for I {
+const impl<I: [const] F2Operand, S: Shape> ScalarInBounds<S, true> for I {
     fn scalar_in_bounds(self, _: &S) -> bool {
         false
     }
@@ -602,16 +832,12 @@ const impl<I: [const] Integer, S: Shape> ScalarInBounds<S, true> for I {
 
 const impl<I, S> ScalarInBounds<S, false> for I
 where
-    I: [const] Integer + [const] IndexToCoord<S>,
+    I: [const] F2Operand + [const] IndexToCoord<S>,
     S: [const] Shape,
     I::Output: [const] LeavesInBounds<S>,
 {
     fn scalar_in_bounds(self, shape: &S) -> bool {
-        if shape.has_zero() {
-            false
-        } else {
-            self.index_to_coord(shape).leaves_in_bounds(shape)
-        }
+        scalar_index_in_bounds(self, shape)
     }
 }
 

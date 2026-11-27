@@ -10,16 +10,17 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use noodle_cute::algebra::{
-    Composition, LogicalDivide, LogicalDivideAt, ZippedDivide, ZippedDivideAt, coalesce,
-    coalesce_extended, coalesce_with_profile, coalesce_z, composition, greatest_common_domain,
-    logical_divide, logical_divide_at, zipped_divide, zipped_divide_at,
+    Composition, LogicalDivide, LogicalDivideAt, ZippedDivide, ZippedDivideAt, blocked_product,
+    coalesce, coalesce_extended, coalesce_with_profile, coalesce_z, composition,
+    greatest_common_domain, logical_divide, logical_divide_at, zipped_divide, zipped_divide_at,
 };
 use noodle_cute::basis::{BasisTerm, ModeEnd, as_tuple, basis_eq};
+use noodle_cute::f2::f2;
 use noodle_cute::integer::{Int, int};
 use noodle_cute::layout::{Layout, is_layout};
-use noodle_cute::shape::{idx2crd, in_bounds};
+use noodle_cute::shape::{compatible, idx2crd, in_bounds};
 use noodle_cute::stride::linear_bounds;
-use noodle_cute::swizzle::{Swizzle, f2};
+use noodle_cute::swizzle::Swizzle;
 use noodle_cute::tensor::{
     Accessor, AccessorOffset, CellAccessor, ImplicitAccessor, MutableAccessor, Ptr, SliceAccessor,
     Tensor, TransformAccessor, identity_tensor, is_tensor, local_tile, make_tensor,
@@ -923,11 +924,19 @@ fn test_local_tile_none_keeps_grid_modes() {
         vec![int_tuple![0i32, 6i32], int_tuple![4i32, 6i32]]
     );
 
-    // local_tile(I, (4, 6), ..) == zipped_divide(I, (4, 6))
+    // pycute/tensor.py and docs/05_tensor.md: grid coordinates slice the zipped division.
+    let tiler = int_tuple![Int::<4>, Int::<6>];
+    let divided = zipped_divide(id, tiler);
+    let block = int_tuple![1i32, 1i32];
+    let tile = local_tile(id, tiler, block);
+    assert_eq!(tile, divided(.., block));
+    assert_eq!(tile, local_tile(id, tiler, 3i32));
+    assert!(compatible(&tiler, &tile.shape().get::<0>()));
     assert_eq!(
-        local_tile(id, int_tuple![Int::<4>, Int::<6>], ..),
-        zipped_divide(id, int_tuple![Int::<4>, Int::<6>])
+        as_tuple(tile(tuple!((3i32, 5i32)))),
+        int_tuple![7i32, 11i32]
     );
+    assert_eq!(local_tile(id, tiler, ..), divided);
 }
 
 #[test]
@@ -1090,4 +1099,61 @@ fn test_accessor_bounds_and_overflow_panics() {
     assert!(catch_unwind(AssertUnwindSafe(|| c.load(4i32))).is_err());
     assert!(catch_unwind(AssertUnwindSafe(|| c.load(-1i32))).is_err());
     assert!(catch_unwind(AssertUnwindSafe(|| make_tensor(c + (-1i32), Int::<2>))).is_err());
+}
+
+#[test]
+fn hierarchical_morton_tensor_coordinates_and_slices() {
+    // docs/GPUMODE_057_CuTe.pdf, p. 28: recursive blocked product builds Morton order.
+    let morton1 = Layout::from_shape(int_tuple![Int::<2>, Int::<2>]);
+    let morton2 = blocked_product(morton1, morton1);
+    let morton3 = blocked_product(morton1, morton2);
+    let a = Tensor::new(ImplicitAccessor::new(Int::<0>), morton3);
+
+    assert_eq!(a(37i32), 49);
+    assert_eq!(a(5i32, 4i32), 49);
+    assert_eq!(a(int_tuple![1i32, 2i32], int_tuple![0i32, 2i32]), 49);
+    assert_eq!(
+        a(int_tuple![(1i32, (0i32, 1i32)), (0i32, (0i32, 1i32))]),
+        49
+    );
+
+    let column = a(.., 2i32);
+    assert_eq!(
+        (0..column.size()).map(|i| column(i)).collect::<Vec<_>>(),
+        [8, 9, 12, 13, 24, 25, 28, 29],
+    );
+    let tile = a(tuple!((.., 1i32), (.., 2i32)));
+    assert_eq!(tile.shape(), int_tuple![Int::<2>, Int::<2>]);
+    assert_eq!([tile(0i32, 0i32), tile(0i32, 1i32)], [36, 38]);
+    assert_eq!([tile(1i32, 0i32), tile(1i32, 1i32)], [37, 39]);
+}
+
+#[test]
+fn thread_value_partition_composes_then_slices() {
+    // docs/GPUMODE_057_CuTe.pdf, pp. 50–55, and docs/GPUMODE_114_PyCuTe.pdf, p. 66.
+    let data = Tensor::new(
+        ImplicitAccessor::new(Int::<0>),
+        Layout::from_shape(int_tuple![Int::<4>, Int::<6>]),
+    );
+    let thread_value = Layout::new(
+        int_tuple![(Int::<2>, Int::<2>), (Int::<2>, Int::<3>)],
+        int_tuple![(Int::<2>, Int::<12>), (Int::<1>, Int::<4>)],
+    );
+    let partitioned = composition(data, thread_value);
+    let expected = [
+        [0, 1, 4, 5, 8, 9],
+        [2, 3, 6, 7, 10, 11],
+        [12, 13, 16, 17, 20, 21],
+        [14, 15, 18, 19, 22, 23],
+    ];
+    for (tid, offsets) in (0..4).zip(expected) {
+        let values = partitioned(tid, ..);
+        assert_eq!(values.size(), 6);
+        assert_eq!(
+            (0..values.size())
+                .map(|vid| values(vid))
+                .collect::<Vec<_>>(),
+            offsets,
+        );
+    }
 }

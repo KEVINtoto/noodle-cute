@@ -7,11 +7,13 @@
 )]
 #![allow(incomplete_features)]
 
-use noodle_cute::algebra::composition::composition;
+use noodle_cute::algebra::composition::{Composition, composition};
+use noodle_cute::basis::basis_eq;
 use noodle_cute::integer::{Int, int};
-use noodle_cute::layout::Layout;
+use noodle_cute::layout::{Layout, tiler_to_layout};
+use noodle_cute::shape::compatible;
 use noodle_cute::tuple::Nil;
-use noodle_cute::{e, int_tuple, tuple};
+use noodle_cute::{e, int_tuple, make_layout, tuple};
 
 #[test]
 fn test_composition_rank1_base() {
@@ -238,4 +240,173 @@ fn test_composition_dynamic_and_const() {
 
     let ok_dyn = Layout::new(20i32, 2i32).composition(Layout::new(5i32, 4i32));
     assert_eq!(ok_dyn, Layout::new(5i32, 8i32));
+}
+
+#[test]
+fn composition_rank1_postconditions() {
+    // test/test_composition.py: exhaust small shapes and strides, including broadcasts.
+    for a_extent in 1..4 {
+        for a_stride in 0..4 {
+            for b_extent in 1..4 {
+                for b_stride in 0..4 {
+                    let a = Layout::new(a_extent, a_stride);
+                    let b = Layout::new(b_extent, b_stride);
+                    let result = composition(a, b);
+                    assert!(compatible(&b.shape(), &result.shape()));
+                    for i in 0..b.size() {
+                        assert_eq!(result(i), a(b(i)), "{a} composed with {b} at {i}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn composition_hierarchical_postconditions() {
+    // docs/04_layout_algebra.md: column-major reshape crosses a mode boundary.
+    let a = Layout::new(
+        int_tuple![Int::<10>, Int::<2>],
+        int_tuple![Int::<16>, Int::<4>],
+    );
+    let b = Layout::from_shape(int_tuple![Int::<5>, Int::<4>]);
+    let result = composition(a, b);
+    assert_eq!(
+        result,
+        Layout::new(
+            int_tuple![Int::<5>, (Int::<2>, Int::<2>)],
+            int_tuple![Int::<16>, (Int::<80>, Int::<4>)],
+        )
+    );
+    assert!(compatible(&b.shape(), &result.shape()));
+    for i in 0..b.size() {
+        assert_eq!(result(i), a(b(i)));
+    }
+}
+
+#[test]
+fn composition_associativity_on_nested_domains() {
+    // test/test_composition.py: both intermediate coordinates are within their domains.
+    let a = Layout::new(
+        int_tuple![Int::<4>, Int::<3>],
+        int_tuple![Int::<3>, Int::<1>],
+    );
+    let b = Layout::from_shape(int_tuple![Int::<4>, Int::<3>]);
+    let c = Layout::new(Int::<6>, Int::<2>);
+    let left = composition(composition(a, b), c);
+    let right = composition(a, composition(b, c));
+    for i in 0..c.size() {
+        let expected = a(b(c(i)));
+        assert_eq!(left(i), expected);
+        assert_eq!(right(i), expected);
+    }
+}
+
+#[test]
+fn composition_short_tiler_and_its_promotion_agree() {
+    // test/test_composition.py: omitted modes do not contribute to the result.
+    let a = Layout::new(
+        int_tuple![(Int::<4>, Int::<2>), Int::<5>],
+        int_tuple![(Int::<5>, Int::<40>), Int::<1>],
+    );
+    let tiler = tuple![Layout::new(Int::<2>, Int::<2>)];
+    let result = composition(a, tiler);
+    assert_eq!(result, composition(a, tiler_to_layout(tiler)));
+    assert_eq!(
+        result,
+        Layout::new(int_tuple![Int::<2>], int_tuple![Int::<10>])
+    );
+}
+
+#[test]
+fn composition_within_a_mode_can_use_nondividing_stride() {
+    // test/test_composition.py: offsets 0 and 3 both lie in A's first mode.
+    let a = Layout::new(
+        int_tuple![Int::<5>, Int::<3>],
+        int_tuple![Int::<7>, Int::<1>],
+    );
+    let b = Layout::new(Int::<2>, Int::<3>);
+    let result = composition(a, b);
+    assert_eq!(result, Layout::new(Int::<2>, Int::<21>));
+    for i in 0..b.size() {
+        assert_eq!(result(i), a(b(i)));
+    }
+}
+
+#[test]
+fn composition_rejects_static_shape_and_stride_divisibility_violations() {
+    // A valid Composition implementation would make the marker type ambiguous.
+    trait RejectedComposition<B, Marker> {
+        fn check(&self, _: B) {}
+    }
+    impl<A, B> RejectedComposition<B, ()> for A {}
+    struct Implemented;
+    impl<A: Composition<B>, B> RejectedComposition<B, Implemented> for A {}
+
+    // test/test_composition.py: shape truncation cannot keep a partial second mode.
+    let a = Layout::new(
+        int_tuple![Int::<5>, Int::<3>],
+        int_tuple![Int::<7>, Int::<1>],
+    );
+    RejectedComposition::<_, _>::check(&a, Layout::new(Int::<7>, Int::<1>));
+    // The same nondividing stride as above now crosses a mode boundary.
+    RejectedComposition::<_, _>::check(&a, Layout::new(Int::<3>, Int::<3>));
+
+    let whitepaper = Layout::new(
+        int_tuple![Int::<4>, Int::<6>, Int::<8>],
+        int_tuple![Int::<2>, Int::<3>, Int::<5>],
+    );
+    RejectedComposition::<_, _>::check(&whitepaper, Layout::new(Int::<6>, Int::<3>));
+    RejectedComposition::<_, _>::check(&whitepaper, Layout::new(Int::<6>, Int::<1>));
+
+    let coalescible = Layout::new(
+        int_tuple![Int::<4>, Int::<2>, Int::<8>],
+        int_tuple![Int::<3>, Int::<12>, Int::<97>],
+    );
+    let gapped = Layout::new(
+        coalescible.shape(),
+        int_tuple![Int::<3>, Int::<15>, Int::<97>],
+    );
+    let within = Layout::new(Int::<3>, Int::<3>);
+    assert_eq!(
+        composition(coalescible, within),
+        Layout::new(Int::<3>, Int::<9>)
+    );
+    RejectedComposition::<_, _>::check(&coalescible, Layout::new(Int::<4>, Int::<3>));
+    RejectedComposition::<_, _>::check(&gapped, within);
+}
+
+#[test]
+fn composition_preserves_coordinate_codomain() {
+    // test/test_composition.py: factor a walk that crosses distinct basis axes.
+    let a = Layout::new(int_tuple![Int::<4>, Int::<3>], tuple![e!(1), e!(0)]);
+    let b = Layout::new(Int::<6>, Int::<2>);
+    let result = composition(a, b);
+    assert_eq!(
+        result,
+        Layout::new(
+            int_tuple![Int::<2>, Int::<3>],
+            tuple![Int::<2> * e!(1), e!(0)],
+        )
+    );
+    assert!(compatible(&b.shape(), &result.shape()));
+    for i in 0..b.size() {
+        assert!(basis_eq(result(i), a(b(i))));
+    }
+}
+
+#[test]
+fn composition_of_one_mode_preserves_its_siblings() {
+    // pycute/algebra.py: selecting mode 1 is equivalent to an explicit padded tiler.
+    let a = Layout::from_shape(int_tuple![Int::<4>, Int::<6>]);
+    let b = Layout::new(Int::<3>, Int::<2>);
+    let result = composition(a, tuple![Nil, b]);
+    assert_eq!(
+        result,
+        make_layout!(a.get::<0>(), composition(a.get::<1>(), b))
+    );
+    assert!(compatible(&b.shape(), &result.get::<1>().shape()));
+    for i in 0..b.size() {
+        assert_eq!(result.get::<1>()(i), a.get::<1>()(b(i)));
+    }
 }

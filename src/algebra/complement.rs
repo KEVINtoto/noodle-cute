@@ -141,7 +141,7 @@ use crate::basis::{
     Basis, BasisPath, ComparePath, MakeBasisLikeOutput, MakeBasisLikeTopProfile, ModeEnd,
     PathOrdering, make_basis_like,
 };
-use crate::integer::{IS_NON_NEG, Int, Integer, ceil_div, div, int, mul};
+use crate::integer::{IS_NON_NEG, Int, Integer, ceil_div, div, int, mul, mul_maybe_overflows};
 use crate::layout::{Coprofile, Layout, Tiler, tiler_to_layout};
 use crate::shape::{Shape, ShapeScalar, ValidShapeExtent};
 use crate::stride::{PrefixProduct, ScaleStride, Stride, StrideScalar, prefix_product_with};
@@ -457,7 +457,7 @@ const fn fold_action<S: ShapeScalar, D: Integer, CurrD: ShapeScalar>() -> FoldAc
             let gap = div(d, c);
             match S::STATIC_VALUE {
                 Some(s) => {
-                    if s <= 0 || d.checked_mul(s).is_none() {
+                    if s <= 0 || mul_maybe_overflows(d, s).is_none() {
                         return FoldAction::Invalid;
                     }
                     if gap == 1 {
@@ -482,7 +482,7 @@ const fn fold_action<S: ShapeScalar, D: Integer, CurrD: ShapeScalar>() -> FoldAc
                 return FoldAction::Invalid;
             }
             if let (Some(d), Some(s)) = (D::STATIC_VALUE, S::STATIC_VALUE)
-                && (s <= 0 || d.checked_mul(s).is_none())
+                && (s <= 0 || mul_maybe_overflows(d, s).is_none())
             {
                 return FoldAction::Invalid;
             }
@@ -1290,6 +1290,19 @@ impl<S, D> Layout<S, D> {
 }
 
 /// Computes the minimal complement layout of a [`Layout`] or [`Tiler`].
+///
+/// Strides must use integer arithmetic. [`F2`](crate::f2::F2) strides fail at compile time.
+///
+/// ```compile_fail,E0277
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::algebra::complement;
+/// use noodle_cute::f2::f2;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::layout::Layout;
+///
+/// let _ = complement(Layout::new(Int::<4>, f2(Int::<2>)));
+/// ```
 pub const fn complement<A: [const] Complement>(a: A) -> A::Output {
     a.complement()
 }

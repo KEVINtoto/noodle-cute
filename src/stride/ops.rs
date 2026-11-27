@@ -44,12 +44,17 @@ use crate::basis::ops::BasisAdd;
 use crate::basis::{
     BasisCoeff, BasisCombination, BasisPath, BasisTuple, COEFF_IS_STATIC_ZERO, ScaledBasis,
 };
-use crate::integer::{ArithAdd, ArithMul, Int, Integer, Product, Sum, add, mul};
+use crate::f2::{
+    F2, F2_MUL_DISPATCH, F2MulOp, F2Operand, F2Product, F2Scalar, F2XorOutput, F2XorScalar, f2_add,
+    f2_mul,
+};
+use crate::integer::{ArithAdd, ArithMul, BOTH_STATIC, Int, Integer, Product, Sum, add, mul};
 use crate::tuple::{Item, Leaf, Nil, Til, TransformLeaf, TransformLeafFunctor};
 
-/// Integer multiplication between a stride leaf and a scalar coordinate or extent.
+/// Multiplication between a stride leaf and a scalar coordinate or extent.
 ///
 /// - `Integer × Integer -> Integer` ($d \cdot s$).
+/// - Products involving an [`F2`] scalar use carry-less multiplication.
 /// - `ScaledBasis<V, P> × Integer -> ScaledBasis<V · S, P>` (or `BasisCombination<Nil>` for static zero `S`).
 /// - `BasisCombination<T> × Integer -> BasisCombination<...>` (collapsing static zero `S` to `BasisCombination<Nil>`).
 ///
@@ -93,6 +98,30 @@ where
     }
 }
 
+const impl<V, S> StrideMul<S> for F2<V>
+where
+    V: [const] F2Scalar,
+    S: [const] F2Operand,
+    F2<V>: [const] F2MulOp<S, { F2_MUL_DISPATCH::<F2<V>, S> }>,
+{
+    type Output = F2Product<F2<V>, S>;
+    fn stride_mul(self, shape: S) -> Self::Output {
+        f2_mul(self, shape)
+    }
+}
+
+const impl<A, VS> StrideMul<F2<VS>> for A
+where
+    A: [const] Integer + [const] F2Operand,
+    VS: [const] F2Scalar,
+    A: [const] F2MulOp<F2<VS>, { F2_MUL_DISPATCH::<A, F2<VS>> }>,
+{
+    type Output = F2Product<A, F2<VS>>;
+    fn stride_mul(self, shape: F2<VS>) -> Self::Output {
+        f2_mul(self, shape)
+    }
+}
+
 const impl<V, P, S> StrideMul<S> for ScaledBasis<V, P>
 where
     V: BasisCoeff,
@@ -118,11 +147,9 @@ where
     }
 }
 
-/// Accumulation operation in the stride integer module: `self.accumulate(rhs)`.
-///
 /// Combines intermediate products during an [`inner_product`](super::inner_product). For ordinary
-/// integers, this is standard addition. For basis elements, [`Nil`] and static scalar zeros act as
-/// additive identities, while non-zero basis terms combine via [`BasisAdd`].
+/// integers, this is standard addition. For [`F2`], it is XOR. [`Nil`] and static scalar
+/// zeros act as additive identities, while non-zero basis terms combine via [`BasisAdd`].
 ///
 /// # Examples
 ///
@@ -393,9 +420,101 @@ where
     }
 }
 
+const impl<V: [const] F2Scalar> Accumulate<F2<V>> for Nil {
+    type Output = F2<V>;
+    fn accumulate(self, rhs: F2<V>) -> F2<V> {
+        rhs
+    }
+}
+
+const impl<V: [const] F2Scalar> Accumulate<Nil> for F2<V> {
+    type Output = Self;
+    fn accumulate(self, _: Nil) -> Self {
+        self
+    }
+}
+
+const impl<V: [const] F2Scalar> Accumulate<Int<0>> for F2<V> {
+    type Output = Self;
+    fn accumulate(self, _: Int<0>) -> Self {
+        self
+    }
+}
+
+const impl<V: [const] F2Scalar> Accumulate<F2<V>> for Int<0> {
+    type Output = F2<V>;
+    fn accumulate(self, rhs: F2<V>) -> F2<V> {
+        rhs
+    }
+}
+
+const impl<L, R> Accumulate<F2<R>> for F2<L>
+where
+    L: [const] F2Scalar + [const] F2XorScalar<R, { BOTH_STATIC::<L, R> }>,
+    R: [const] F2Scalar,
+{
+    type Output = F2<F2XorOutput<L, R>>;
+    fn accumulate(self, rhs: F2<R>) -> Self::Output {
+        f2_add(self, rhs)
+    }
+}
+
+const impl<V: [const] F2Scalar> Accumulate<BasisCombination<Nil>> for F2<V> {
+    type Output = Self;
+    fn accumulate(self, _: BasisCombination<Nil>) -> Self {
+        self
+    }
+}
+
+const impl<V: [const] F2Scalar> Accumulate<F2<V>> for BasisCombination<Nil> {
+    type Output = F2<V>;
+    fn accumulate(self, rhs: F2<V>) -> F2<V> {
+        rhs
+    }
+}
+
+const impl<V: BasisCoeff, P: Copy> Accumulate<ScaledBasis<V, P>> for F2<Int<0>> {
+    type Output = ScaledBasis<V, P>;
+    fn accumulate(self, rhs: ScaledBasis<V, P>) -> Self::Output {
+        rhs
+    }
+}
+
+const impl<V: BasisCoeff, P: Copy> Accumulate<F2<Int<0>>> for ScaledBasis<V, P> {
+    type Output = Self;
+    fn accumulate(self, _: F2<Int<0>>) -> Self::Output {
+        self
+    }
+}
+
+const impl<H, T> Accumulate<BasisCombination<Til<H, T>>> for F2<Int<0>>
+where
+    H: Copy,
+    T: BasisTuple,
+    Til<H, T>: BasisTuple,
+{
+    type Output = BasisCombination<Til<H, T>>;
+    fn accumulate(self, rhs: BasisCombination<Til<H, T>>) -> Self::Output {
+        rhs
+    }
+}
+
+const impl<H, T> Accumulate<F2<Int<0>>> for BasisCombination<Til<H, T>>
+where
+    H: Copy,
+    T: BasisTuple,
+    Til<H, T>: BasisTuple,
+{
+    type Output = Self;
+    fn accumulate(self, _: F2<Int<0>>) -> Self::Output {
+        self
+    }
+}
+
 /// Functor used by [`ScaleStride`] to scale scalar or basis leaves within hierarchical tuples.
 ///
 /// - When applied to an [`Integer`] leaf with `Factor: Integer`, multiplies the scalars.
+/// - When either scalar operand is [`F2`], uses carry-less multiplication.
 /// - When applied to an [`Integer`] leaf with `Factor: ScaledBasis` or `BasisCombination`, scales the basis by the scalar leaf.
 /// - When applied to a [`ScaledBasis`] or [`BasisCombination`] leaf with `Factor: Integer`, scales the basis by `Factor`.
 ///
@@ -486,6 +605,69 @@ where
     type Output = <BasisCombination<T> as StrideMul<Factor>>::Output;
     fn apply(&self, leaf: BasisCombination<T>) -> Self::Output {
         leaf.stride_mul(self.0)
+    }
+}
+
+const impl<V, VF> TransformLeafFunctor<V> for ScaleBasisFunctor<F2<VF>>
+where
+    V: [const] Integer + [const] Leaf + [const] F2Operand,
+    VF: [const] F2Scalar,
+    V: [const] F2MulOp<F2<VF>, { F2_MUL_DISPATCH::<V, F2<VF>> }>,
+{
+    type Output = F2Product<V, F2<VF>>;
+    fn apply(&self, leaf: V) -> Self::Output {
+        f2_mul(leaf, self.0)
+    }
+}
+
+const impl<V, Factor> TransformLeafFunctor<F2<V>> for ScaleBasisFunctor<Factor>
+where
+    V: [const] F2Scalar,
+    Factor: [const] Integer + [const] F2Operand,
+    F2<V>: [const] F2MulOp<Factor, { F2_MUL_DISPATCH::<F2<V>, Factor> }>,
+{
+    type Output = F2Product<F2<V>, Factor>;
+    fn apply(&self, leaf: F2<V>) -> Self::Output {
+        f2_mul(leaf, self.0)
+    }
+}
+
+const impl<V, VF> TransformLeafFunctor<F2<V>> for ScaleBasisFunctor<F2<VF>>
+where
+    V: [const] F2Scalar,
+    VF: [const] F2Scalar,
+    F2<V>: [const] F2MulOp<F2<VF>, { F2_MUL_DISPATCH::<F2<V>, F2<VF>> }>,
+{
+    type Output = F2Product<F2<V>, F2<VF>>;
+    fn apply(&self, leaf: F2<V>) -> Self::Output {
+        f2_mul(leaf, self.0)
+    }
+}
+
+const impl<V, VF, PF> TransformLeafFunctor<F2<V>> for ScaleBasisFunctor<ScaledBasis<VF, PF>>
+where
+    V: [const] F2Scalar,
+    VF: BasisCoeff,
+    PF: BasisPath,
+    ScaledBasis<VF, PF>: [const] StrideMul<F2<V>>,
+    <ScaledBasis<VF, PF> as StrideMul<F2<V>>>::Output: [const] Item,
+{
+    type Output = <ScaledBasis<VF, PF> as StrideMul<F2<V>>>::Output;
+    fn apply(&self, leaf: F2<V>) -> Self::Output {
+        self.0.stride_mul(leaf)
+    }
+}
+
+const impl<V, T> TransformLeafFunctor<F2<V>> for ScaleBasisFunctor<BasisCombination<T>>
+where
+    V: [const] F2Scalar,
+    T: BasisTuple,
+    BasisCombination<T>: [const] StrideMul<F2<V>>,
+    <BasisCombination<T> as StrideMul<F2<V>>>::Output: [const] Item,
+{
+    type Output = <BasisCombination<T> as StrideMul<F2<V>>>::Output;
+    fn apply(&self, leaf: F2<V>) -> Self::Output {
+        self.0.stride_mul(leaf)
     }
 }
 

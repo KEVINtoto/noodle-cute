@@ -36,9 +36,13 @@
 
 use core::ops::{Add, Mul, Neg, Sub};
 
+use crate::f2::{
+    F2, F2_MUL_DISPATCH, F2MulOp, F2Operand, F2Product, F2Scalar, F2XorOutput, F2XorScalar, f2_add,
+    f2_mul,
+};
 use crate::integer::{
-    ArithAdd, ArithMul, ArithNeg, ArithSub, Difference, Int, Integer, Product, Sum, add, int, mul,
-    neg, sub,
+    ArithAdd, ArithMul, ArithNeg, ArithSub, BOTH_STATIC, Difference, Int, Integer, Product, Sum,
+    add, int, mul, neg, sub,
 };
 use crate::tuple::{Nil, Til};
 
@@ -124,6 +128,99 @@ where
     type Output = Product<L, R>;
     fn coeff_mul(self, rhs: R) -> Self::Output {
         mul(self, rhs)
+    }
+}
+
+const impl<L, R> BasisCoeffAdd<F2<R>> for F2<L>
+where
+    L: [const] F2Scalar + [const] F2XorScalar<R, { BOTH_STATIC::<L, R> }>,
+    R: [const] F2Scalar,
+{
+    type Output = F2<F2XorOutput<L, R>>;
+    fn coeff_add(self, rhs: F2<R>) -> Self::Output {
+        f2_add(self, rhs)
+    }
+}
+
+const impl<L: [const] F2Scalar> BasisCoeffAdd<Int<0>> for F2<L> {
+    type Output = Self;
+    fn coeff_add(self, _: Int<0>) -> Self {
+        self
+    }
+}
+
+const impl<R: [const] F2Scalar> BasisCoeffAdd<F2<R>> for Int<0> {
+    type Output = F2<R>;
+    fn coeff_add(self, rhs: F2<R>) -> F2<R> {
+        rhs
+    }
+}
+
+const impl<V: [const] F2Scalar> BasisCoeffNeg for F2<V> {
+    type Output = Self;
+    fn coeff_neg(self) -> Self {
+        self
+    }
+}
+
+const impl<L, R> BasisCoeffSub<F2<R>> for F2<L>
+where
+    L: [const] F2Scalar + [const] F2XorScalar<R, { BOTH_STATIC::<L, R> }>,
+    R: [const] F2Scalar,
+{
+    type Output = F2<F2XorOutput<L, R>>;
+    fn coeff_sub(self, rhs: F2<R>) -> Self::Output {
+        f2_add(self, rhs)
+    }
+}
+
+const impl<L: [const] F2Scalar> BasisCoeffSub<Int<0>> for F2<L> {
+    type Output = Self;
+    fn coeff_sub(self, _: Int<0>) -> Self {
+        self
+    }
+}
+
+const impl<R: [const] F2Scalar> BasisCoeffSub<F2<R>> for Int<0> {
+    type Output = F2<R>;
+    fn coeff_sub(self, rhs: F2<R>) -> F2<R> {
+        rhs
+    }
+}
+
+const impl<L, R> BasisCoeffMul<F2<R>> for F2<L>
+where
+    L: [const] F2Scalar,
+    R: [const] F2Scalar,
+    F2<L>: [const] F2MulOp<F2<R>, { F2_MUL_DISPATCH::<F2<L>, F2<R>> }>,
+{
+    type Output = F2Product<F2<L>, F2<R>>;
+    fn coeff_mul(self, rhs: F2<R>) -> Self::Output {
+        f2_mul(self, rhs)
+    }
+}
+
+const impl<L, R> BasisCoeffMul<R> for F2<L>
+where
+    L: [const] F2Scalar,
+    R: [const] Integer + [const] F2Operand,
+    F2<L>: [const] F2MulOp<R, { F2_MUL_DISPATCH::<F2<L>, R> }>,
+{
+    type Output = F2Product<F2<L>, R>;
+    fn coeff_mul(self, rhs: R) -> Self::Output {
+        f2_mul(self, rhs)
+    }
+}
+
+const impl<L, R> BasisCoeffMul<F2<R>> for L
+where
+    L: [const] Integer + [const] F2Operand,
+    R: [const] F2Scalar,
+    L: [const] F2MulOp<F2<R>, { F2_MUL_DISPATCH::<L, F2<R>> }>,
+{
+    type Output = F2Product<L, F2<R>>;
+    fn coeff_mul(self, rhs: F2<R>) -> Self::Output {
+        f2_mul(self, rhs)
     }
 }
 
@@ -700,6 +797,8 @@ impl_add_sub_op!([V: [const] BasisCoeff, P: [const] BasisPath, R]; BasisTerm<V, 
 impl_add_sub_op!([T: [const] BasisTuple, R]; BasisCombination<T>; R);
 impl_add_sub_op!([V: [const] BasisCoeff, P: [const] BasisPath]; Int<0>; BasisTerm<V, P>);
 impl_add_sub_op!([T: [const] BasisTuple]; Int<0>; BasisCombination<T>);
+impl_add_sub_op!([V: [const] BasisCoeff, P: [const] BasisPath]; F2<Int<0>>; BasisTerm<V, P>);
+impl_add_sub_op!([T: [const] BasisTuple]; F2<Int<0>>; BasisCombination<T>);
 
 const impl<V: [const] BasisCoeff, P: [const] BasisPath> Neg for BasisTerm<V, P>
 where
@@ -737,3 +836,4 @@ macro_rules! impl_left_mul {
 
 impl_left_mul!([const N: int]; Int<N>);
 impl_left_mul!([]; int);
+impl_left_mul!([L: [const] F2Scalar]; F2<L>);

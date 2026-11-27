@@ -16,7 +16,9 @@ use noodle_cute::layout::{
     Fraction, Layout, LayoutBase, MakeLayout, coprofile, coshape, is_layout, make_layout,
     make_layout_like, make_ordered_layout, recast, tiler_to_layout, tiler_to_layout_with,
 };
-use noodle_cute::tuple::{Congruent, Item, LeafProfile, Nil, Til, lift, select};
+use noodle_cute::tuple::{
+    ApplyLeafFunctor, Congruent, Item, LeafProfile, Nil, Til, lift, select, transform_apply_leaf,
+};
 use noodle_cute::{e, int_tuple, make_layout, mode, slice, tuple, walk_mode};
 
 const fn require_congruent<A: [const] Congruent<B>, B: Item>(_: &A, _: &B) {}
@@ -171,7 +173,13 @@ fn test_three_coordinate_forms_and_const_eval() {
         int_tuple![Int::<2>, (Int::<1>, Int::<6>)],
     );
 
-    for i in 0..a.size() {
+    // docs/03_layout.md: expected physical offsets for the whole hierarchical layout.
+    let offsets = [
+        0, 2, 4, 1, 3, 5, 6, 8, 10, 7, 9, 11, 12, 14, 16, 13, 15, 17, 18, 20, 22, 19, 21, 23,
+    ];
+    assert_eq!(a.size(), 24);
+    for (i, expected) in (0..a.size()).zip(offsets) {
+        assert_eq!(a(i), expected);
         let crd_2d = int_tuple![i % 3, i / 3];
         let crd_nat = int_tuple![i % 3, ((i / 3) % 2, (i / 3) / 2)];
         assert_eq!(a(i), a.call(crd_2d));
@@ -1153,5 +1161,49 @@ fn layout_regression_recast_tiler_nil_zero_basis_eq_and_integration() {
             int_tuple![Int::<2>, Int::<2_000_000_000>],
             int_tuple![Int::<1>, Int::<2>]
         )
+    );
+}
+
+#[test]
+fn make_layout_like_packs_nonbroadcast_offsets_and_is_idempotent() {
+    // pycute/layout.py and test/test_make_layout.py: retain broadcast modes.
+    let layout = Layout::new(
+        int_tuple![Int::<2>, Int::<3>, Int::<4>, Int::<5>],
+        int_tuple![Int::<0>, Int::<42>, Int::<4>, Int::<0>],
+    );
+    let packed = make_layout_like(&layout);
+    assert_eq!(packed.shape(), layout.shape());
+    assert_eq!(
+        packed.stride(),
+        int_tuple![Int::<0>, Int::<4>, Int::<1>, Int::<0>],
+    );
+    assert_eq!(make_layout_like(&packed), packed);
+
+    let mut offsets: Vec<_> = (0..packed.size()).map(|i| packed(i)).collect();
+    offsets.sort_unstable();
+    offsets.dedup();
+    assert_eq!(offsets, (0..12).collect::<Vec<_>>());
+}
+
+#[test]
+fn transform_apply_leaf_builds_layouts_at_tuple_boundaries() {
+    // pycute/htuple.py: build one layout per leaf and concatenate at each tuple node.
+    struct MakeLeafLayout;
+
+    impl ApplyLeafFunctor<(int, int)> for MakeLeafLayout {
+        type Output = Layout<int, int>;
+
+        fn apply(&self, (extent, stride): (int, int)) -> Self::Output {
+            Layout::new(extent, stride)
+        }
+    }
+
+    let shape = int_tuple![(2i32, 3i32), 4i32];
+    let stride = int_tuple![(4i32, 8i32), 1i32];
+    let result = transform_apply_leaf(&shape, &MakeLayout, &MakeLeafLayout, stride);
+    assert_eq!(result, Layout::new(shape, stride));
+    assert_eq!(
+        result.get::<0>(),
+        Layout::new(int_tuple![2i32, 3i32], int_tuple![4i32, 8i32]),
     );
 }

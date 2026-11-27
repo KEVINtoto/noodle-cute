@@ -36,8 +36,11 @@
 //!   scale are all static, and panic at runtime when any operand is dynamic.
 
 use crate::basis::{BasisCoeff, BasisCombination, BasisPath, BasisTerm};
-use crate::integer::ops::carry_free_mask;
-use crate::integer::{IS_NON_NEG, Int, Integer, add, ceil_div, div, floor_divmod, gcd, int, mul};
+use crate::f2::{F2, F2Scalar, ValidF2Value};
+use crate::integer::{
+    IS_NON_NEG, Int, Integer, add, carry_free_mask, ceil_div, div, floor_divmod, gcd, int, is_pow2,
+    mul, rem,
+};
 use crate::shape::{Shape, ShapeScalar, ValidShapeExtent};
 use crate::stride::Stride;
 use crate::tuple::{Leaf, Nil, Til, Tuple};
@@ -95,8 +98,7 @@ pub(crate) const fn recast_f2_leaf_values(s: int, dd: int, num: int, den: int) -
     let result = recast_leaf_values(s, dd, n, d);
     // Binary scaling shifts the polynomial coefficients directly. Other
     // ratios are exact when both address sequences are ordinary progressions.
-    let binary =
-        n.count_ones() == 1 && d.count_ones() == 1 && (dd % n == 0 || dd.count_ones() == 1);
+    let binary = is_pow2(n) && is_pow2(d) && (rem(dd, n) == 0 || is_pow2(dd));
     assert!(
         dd <= 1
             || s <= 1
@@ -183,6 +185,16 @@ const impl<const D: int, const NEW_D: int> MakeStaticRecastStride<NEW_D> for Int
     }
 }
 
+const impl<V: [const] F2Scalar, const NEW_D: int> MakeStaticRecastStride<NEW_D> for F2<V>
+where
+    (): [const] ValidF2Value<{ IS_NON_NEG::<NEW_D> }>,
+{
+    type Output = F2<Int<NEW_D>>;
+    fn make_static_recast_stride() -> F2<Int<NEW_D>> {
+        F2::new(Int::<NEW_D>)
+    }
+}
+
 const impl<V, P, const NEW_D: int> MakeStaticRecastStride<NEW_D> for BasisTerm<V, P>
 where
     V: [const] BasisCoeff + [const] MakeStaticRecastStride<NEW_D>,
@@ -238,6 +250,20 @@ const impl<const D: int> RecastStrideScalar for Int<D> {
     }
     fn make_dynamic_out(new_d: int) -> int {
         new_d
+    }
+}
+
+const impl<V: [const] F2Scalar> RecastStrideScalar for F2<V> {
+    const IS_STATIC_COEFF: bool = V::IS_STATIC;
+    const STATIC_SIGNED: Option<int> = V::STATIC_VALUE;
+    const IS_F2_COEFF: bool = true;
+    type DynamicOut = F2<int>;
+
+    fn signed_coeff(&self) -> int {
+        self.value()
+    }
+    fn make_dynamic_out(new_d: int) -> F2<int> {
+        F2::new(new_d)
     }
 }
 

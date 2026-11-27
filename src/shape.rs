@@ -59,7 +59,7 @@
 //!
 //! - Negative dynamic [`int`] extents panic at runtime when queried.
 
-use crate::integer::{IS_NON_NEG, IS_ZERO, Int, Integer, int, mul};
+use crate::integer::{IS_NON_NEG, IS_ZERO, Int, Integer, int, is_pow2, mul};
 use crate::tuple::{FlatTuple, Item, Leaf, Nil, Til, Tuple};
 
 pub mod compatible;
@@ -248,11 +248,11 @@ pub const trait BinaryExtents: Shape {
 }
 const impl<S: [const] ShapeScalar> BinaryExtents for S {
     const STATIC_BINARY: Option<bool> = match S::STATIC_VALUE {
-        Some(s) => Some(s > 0 && s.count_ones() == 1),
+        Some(s) => Some(is_pow2(s)),
         None => None,
     };
     fn binary_extents(self) -> bool {
-        self.value() > 0 && self.value().count_ones() == 1
+        is_pow2(self.value())
     }
 }
 const impl BinaryExtents for Nil {

@@ -38,6 +38,7 @@
 
 use core::cmp::Ordering;
 
+use crate::f2::{F2, F2Scalar};
 use crate::integer::{Integer, cmp, eq, static_and, static_cmp, static_cmp_of, static_eq};
 use crate::tuple::{Nil, Til};
 
@@ -80,6 +81,63 @@ const impl<L: [const] Integer, R: [const] Integer> BasisCoeffOrd<R> for L {
     }
     fn coeff_static_cmp(&self, rhs: &R) -> Option<Ordering> {
         static_cmp(*self, *rhs)
+    }
+}
+
+const impl<L: [const] F2Scalar, R: [const] F2Scalar> BasisCoeffEq<F2<R>> for F2<L> {
+    fn coeff_eq(&self, rhs: &F2<R>) -> bool {
+        eq(self.inner(), rhs.inner())
+    }
+    fn coeff_static_eq(&self, rhs: &F2<R>) -> Option<bool> {
+        static_eq(self.inner(), rhs.inner())
+    }
+}
+
+const impl<L: [const] F2Scalar, R: [const] Integer> BasisCoeffEq<R> for F2<L> {
+    fn coeff_eq(&self, rhs: &R) -> bool {
+        eq(self.inner(), *rhs)
+    }
+    fn coeff_static_eq(&self, rhs: &R) -> Option<bool> {
+        static_eq(self.inner(), *rhs)
+    }
+}
+
+const impl<L: [const] Integer, R: [const] F2Scalar> BasisCoeffEq<F2<R>> for L {
+    fn coeff_eq(&self, rhs: &F2<R>) -> bool {
+        eq(*self, rhs.inner())
+    }
+    fn coeff_static_eq(&self, rhs: &F2<R>) -> Option<bool> {
+        static_eq(*self, rhs.inner())
+    }
+}
+
+const impl<L: [const] F2Scalar, R: [const] F2Scalar> BasisCoeffOrd<F2<R>> for F2<L> {
+    const STATIC_CMP: Option<Ordering> = static_cmp_of::<L, R>();
+    fn coeff_cmp(&self, rhs: &F2<R>) -> Ordering {
+        cmp(self.inner(), rhs.inner())
+    }
+    fn coeff_static_cmp(&self, rhs: &F2<R>) -> Option<Ordering> {
+        static_cmp(self.inner(), rhs.inner())
+    }
+}
+
+const impl<L: [const] F2Scalar, R: [const] Integer> BasisCoeffOrd<R> for F2<L> {
+    const STATIC_CMP: Option<Ordering> = static_cmp_of::<L, R>();
+    fn coeff_cmp(&self, rhs: &R) -> Ordering {
+        cmp(self.inner(), *rhs)
+    }
+    fn coeff_static_cmp(&self, rhs: &R) -> Option<Ordering> {
+        static_cmp(self.inner(), *rhs)
+    }
+}
+
+const impl<L: [const] Integer, R: [const] F2Scalar> BasisCoeffOrd<F2<R>> for L {
+    const STATIC_CMP: Option<Ordering> = static_cmp_of::<L, R>();
+    fn coeff_cmp(&self, rhs: &F2<R>) -> Ordering {
+        cmp(*self, rhs.inner())
+    }
+    fn coeff_static_cmp(&self, rhs: &F2<R>) -> Option<Ordering> {
+        static_cmp(*self, rhs.inner())
     }
 }
 

@@ -185,19 +185,24 @@ use crate::basis::{
     Basis, BasisCoeff, BasisPath, CoeffAlgebra, ComparePath, MakeBasisLikeOutput,
     MakeBasisLikeTopProfile, ModeEnd, PathOrdering, make_basis_like,
 };
-use crate::integer::ops::{BinaryPreimages, checked_clmul};
-use crate::integer::{BOTH_STATIC, IS_NON_NEG, Int, Integer, div, eq, int, mul, rem};
-use crate::layout::{Coprofile, Layout, LayoutBase, Tiler, tiler_to_layout};
+use crate::f2::{
+    BinaryPreimages, F2, F2Scalar, F2XorOutput, F2XorScalar, ValidF2Value, clmul_maybe_overflows,
+    f2, f2_add,
+};
+use crate::integer::{
+    BOTH_STATIC, IS_NON_NEG, Int, Integer, bit_floor, bitxor, div, eq, int, is_pow2, mul,
+    mul_maybe_overflows, rem, sub,
+};
+use crate::layout::{Coprofile, Layout, LayoutBase, ScaleIfNotOne, Tiler, tiler_to_layout};
 use crate::shape::{
     AssertPositiveShape, BinaryExtents, IndexToCoord, Shape, ShapeScalar, ValidShapeExtent,
 };
-use crate::stride::{InnerProduct, PrefixProduct, Stride, StrideScalar, prefix_product_with};
-use crate::swizzle::{F2, F2Scalar, F2XorOutput, F2XorScalar, f2, f2_add};
+use crate::stride::{
+    ContainsF2, InnerProduct, PrefixProduct, Stride, StrideScalar, prefix_product_with,
+};
 use crate::tuple::{Append, FlatTuple, Flatten, Item, Leaf, LeafProfile, Nil, Til, Tuple};
 
 use super::coalesce::{Coalesce, DropTrailingUnit};
-use crate::layout::ScaleIfNotOne;
-use crate::stride::ContainsF2;
 
 /// Scalar `(shape, stride, pps)` mode triple collected along a single codomain axis.
 #[doc(hidden)]
@@ -590,6 +595,22 @@ pub struct ExhaustedExtent;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DynamicExtent(pub Option<int>);
 
+impl DynamicExtent {
+    const fn advance(current: Option<int>, extent: int) -> Self {
+        match current {
+            Some(c) => Self(mul_maybe_overflows(c, extent)),
+            None => Self(None),
+        }
+    }
+
+    const fn advance_f2(current: Option<int>, extent: int) -> Self {
+        match current {
+            Some(c) => Self(clmul_maybe_overflows(c, extent)),
+            None => Self(None),
+        }
+    }
+}
+
 const impl<const N: int> RightRunningExtent for Int<N> {
     const STATIC_EXTENT: Option<int> = Some(N);
     const IS_EXHAUSTED: bool = false;
@@ -647,7 +668,7 @@ const fn right_fold_action<S: ShapeScalar, D: Integer, CurrD: RightRunningExtent
             }
             match S::STATIC_VALUE {
                 Some(s) => {
-                    if c.checked_mul(s).is_some() {
+                    if mul_maybe_overflows(c, s).is_some() {
                         RightFoldAction::StaticMatchStaticNext
                     } else {
                         RightFoldAction::StaticMatchExhausted
@@ -813,10 +834,7 @@ where
     > as PrependInverseMode<S, P>>::Stride;
 
     fn right_inverse_fold_step(self, curr_d: CurrD) -> Layout<Self::Shape, Self::Stride> {
-        let next_curr = match curr_d.dynamic_extent() {
-            Some(c) => DynamicExtent(c.checked_mul(self.0.shape.value())),
-            None => DynamicExtent(None),
-        };
+        let next_curr = DynamicExtent::advance(curr_d.dynamic_extent(), self.0.shape.value());
         let tail = self.1.right_inverse_fold(next_curr);
         tail.prepend_inverse_mode(self.0.shape, self.0.pps)
     }
@@ -852,10 +870,7 @@ where
             None => false,
         };
         if matched {
-            let next_curr = match curr_opt {
-                Some(c) => DynamicExtent(c.checked_mul(s)),
-                None => DynamicExtent(None),
-            };
+            let next_curr = DynamicExtent::advance(curr_opt, s);
             let tail = self.1.right_inverse_fold(next_curr);
             tail.prepend_inverse_mode(s, self.0.pps.value())
         } else {
@@ -1462,6 +1477,11 @@ pub enum F2RightFoldAction {
     DynamicStep,
 }
 
+const fn f2_residue_fits(s: int, residue: int, c: int) -> bool {
+    let max_coord = sub(s, 1);
+    matches!(clmul_maybe_overflows(max_coord, residue), Some(product) if product < c)
+}
+
 const fn f2_right_fold_action<S: ShapeScalar, D: F2Scalar, CurrD: RightRunningExtent>()
 -> F2RightFoldAction {
     if CurrD::IS_EXHAUSTED {
@@ -1469,11 +1489,11 @@ const fn f2_right_fold_action<S: ShapeScalar, D: F2Scalar, CurrD: RightRunningEx
     }
     match (D::STATIC_VALUE, CurrD::STATIC_EXTENT) {
         (Some(d), Some(c)) => {
-            let residue = c ^ d;
+            let residue = bitxor(c, d);
             if residue == 0 {
                 match S::STATIC_VALUE {
                     Some(s) => {
-                        if checked_clmul(c, s).is_ok() {
+                        if clmul_maybe_overflows(c, s).is_some() {
                             F2RightFoldAction::StaticZeroResStaticNext
                         } else {
                             F2RightFoldAction::StaticZeroResExhausted
@@ -1484,18 +1504,13 @@ const fn f2_right_fold_action<S: ShapeScalar, D: F2Scalar, CurrD: RightRunningEx
             } else {
                 match S::STATIC_VALUE {
                     Some(s) => {
-                        if s <= 1 {
+                        if s <= 1 || !f2_residue_fits(s, residue, c) {
                             return F2RightFoldAction::StaticSkip;
                         }
-                        match checked_clmul(s - 1, residue) {
-                            Ok(reach) if reach < c => {
-                                if checked_clmul(c, s).is_ok() {
-                                    F2RightFoldAction::StaticBackSubStaticNext
-                                } else {
-                                    F2RightFoldAction::StaticBackSubExhausted
-                                }
-                            }
-                            _ => F2RightFoldAction::StaticSkip,
+                        if clmul_maybe_overflows(c, s).is_none() {
+                            F2RightFoldAction::StaticBackSubExhausted
+                        } else {
+                            F2RightFoldAction::StaticBackSubStaticNext
                         }
                     }
                     None => F2RightFoldAction::DynamicStep,
@@ -1510,23 +1525,20 @@ const F2_RIGHT_FOLD_ACTION<S: ShapeScalar, D: F2Scalar, CurrD: RightRunningExten
     F2RightFoldAction = {
     let action = f2_right_fold_action::<S, D, CurrD>();
     if matches!(action,F2RightFoldAction::StaticBackSubStaticNext | F2RightFoldAction::StaticBackSubExhausted)
-        && Acc::Shape::LEAVES > 1 && matches!(S::STATIC_VALUE,Some(s) if s > 2 && s.count_ones()==1) {
+        && Acc::Shape::LEAVES > 1 && matches!(S::STATIC_VALUE,Some(s) if s > 2 && is_pow2(s)) {
         F2RightFoldAction::SplitBits
     } else { action }
 };
 
 const STATIC_F2_RESIDUE<CurrD: RightRunningExtent, D: F2Scalar>: int =
     match (CurrD::STATIC_EXTENT, D::STATIC_VALUE) {
-        (Some(c), Some(d)) => c ^ d,
+        (Some(c), Some(d)) => bitxor(c, d),
         _ => 0,
     };
 
 const STATIC_F2_NEXT_D<CurrD: RightRunningExtent, S: ShapeScalar>: int =
     match (CurrD::STATIC_EXTENT, S::STATIC_VALUE) {
-        (Some(c), Some(s)) => match checked_clmul(c, s) {
-            Ok(v) => v,
-            Err(_) => 1,
-        },
+        (Some(c), Some(s)) => clmul_maybe_overflows(c, s).unwrap_or(1),
         _ => 1,
     };
 
@@ -1547,7 +1559,7 @@ const impl ShapeScalarToF2 for int {
 const impl<const N: int> ShapeScalarToF2 for Int<N>
 where
     (): [const] ValidShapeExtent<{ IS_NON_NEG::<N> }>,
-    (): [const] crate::swizzle::ValidF2Value<{ IS_NON_NEG::<N> }>,
+    (): [const] ValidF2Value<{ IS_NON_NEG::<N> }>,
 {
     type Scalar = Int<N>;
     fn to_f2(self) -> F2<Int<N>> {
@@ -1730,13 +1742,7 @@ where
         acc: Acc,
     ) -> Layout<Self::Shape, Self::Stride> {
         let s = self.0.shape.value();
-        let next_curr = match curr_d.dynamic_extent() {
-            Some(c) => match checked_clmul(c, s) {
-                Ok(v) => DynamicExtent(Some(v)),
-                Err(_) => DynamicExtent(None),
-            },
-            None => DynamicExtent(None),
-        };
+        let next_curr = DynamicExtent::advance_f2(curr_d.dynamic_extent(), s);
         let next_acc = acc.append_inverse_mode(self.0.shape, self.0.pps.to_f2());
         self.1.f2_right_inverse_fold(next_curr, next_acc)
     }
@@ -1801,7 +1807,7 @@ where
     CurrD: RightRunningExtent,
     AccS: Shape,
     AccD: Stride<AccS>,
-    (): [const] crate::swizzle::ValidF2Value<{ IS_NON_NEG::<{ STATIC_F2_RESIDUE::<CurrD, D> }> }>,
+    (): [const] ValidF2Value<{ IS_NON_NEG::<{ STATIC_F2_RESIDUE::<CurrD, D> }> }>,
     F2<Int<{ STATIC_F2_RESIDUE::<CurrD, D> }>>: [const] IndexToCoord<AccS>,
     <F2<Int<{ STATIC_F2_RESIDUE::<CurrD, D> }>> as IndexToCoord<AccS>>::Output:
         [const] InnerProduct<AccD, Output = F2<CorrV>>,
@@ -1846,7 +1852,7 @@ where
     CurrD: RightRunningExtent,
     AccS: Shape,
     AccD: Stride<AccS>,
-    (): [const] crate::swizzle::ValidF2Value<{ IS_NON_NEG::<{ STATIC_F2_RESIDUE::<CurrD, D> }> }>,
+    (): [const] ValidF2Value<{ IS_NON_NEG::<{ STATIC_F2_RESIDUE::<CurrD, D> }> }>,
     F2<Int<{ STATIC_F2_RESIDUE::<CurrD, D> }>>: [const] IndexToCoord<AccS>,
     <F2<Int<{ STATIC_F2_RESIDUE::<CurrD, D> }>> as IndexToCoord<AccS>>::Output:
         [const] InnerProduct<AccD, Output = F2<CorrV>>,
@@ -1908,28 +1914,21 @@ where
         let matched = if s <= 1 || d == 0 {
             false
         } else if let Some(c) = curr_opt {
-            let residue = c ^ d;
-            if residue == 0 {
-                true
-            } else {
-                matches!(checked_clmul(s - 1, residue), Ok(reach) if reach < c)
-            }
+            let residue = bitxor(c, d);
+            residue == 0 || f2_residue_fits(s, residue, c)
         } else {
             false
         };
         if matched {
             let c = curr_opt.unwrap();
-            let residue = c ^ d;
+            let residue = bitxor(c, d);
             let base_stride = f2(Integer::value(self.0.pps));
             let stride = if residue == 0 {
                 base_stride
             } else {
                 f2_add(base_stride, acc.eval_f2_residue(f2(residue)))
             };
-            let next_curr = match checked_clmul(c, s) {
-                Ok(v) => DynamicExtent(Some(v)),
-                Err(_) => DynamicExtent(None),
-            };
+            let next_curr = DynamicExtent::advance_f2(curr_opt, s);
             let next_acc = acc.append_inverse_mode(s, stride);
             self.1.f2_right_inverse_fold(next_curr, next_acc)
         } else {
@@ -1946,15 +1945,15 @@ where
 /// is the identity on the resulting contiguous binary space.
 const fn polynomial_radices(s: int, d: int, p: int, t: int, e: int, q: int) -> [int; 4] {
     let mut modes = [s, t, e, q];
-    if p == 1 && q == s && s.count_ones() > 1 && t > 1 {
-        let h = 1 << (int::BITS - 1 - s.leading_zeros());
+    if p == 1 && q == s && s > 1 && !is_pow2(s) && t > 1 {
+        let h = bit_floor(s);
         modes[0] = h;
-        if d == 1 && e == s && t.count_ones() == 1 {
+        if d == 1 && e == s && is_pow2(t) {
             modes[2] = h;
             modes[3] = h;
         }
-    } else if q == 1 && p == t && t.count_ones() > 1 && s > 1 {
-        modes[1] = 1 << (int::BITS - 1 - t.leading_zeros());
+    } else if q == 1 && p == t && t > 1 && !is_pow2(t) && s > 1 {
+        modes[1] = bit_floor(t);
     }
     modes
 }
@@ -1972,7 +1971,7 @@ const PAIR_VALUES<S:Integer,D:Integer,P:Integer,T:Integer,E:Integer,Q:Integer>:[
         _=>[0;4],
     };
 const PAIR_CASE<S:Integer,D:Integer,P:Integer,T:Integer,E:Integer,Q:Integer>:int =
-    if matches!((S::STATIC_VALUE,T::STATIC_VALUE),(Some(s),Some(t)) if s.count_ones()==1 && t.count_ones()==1) {0}
+    if matches!((S::STATIC_VALUE,T::STATIC_VALUE),(Some(s),Some(t)) if is_pow2(s) && is_pow2(t)) {0}
     else if S::IS_STATIC && D::IS_STATIC && P::IS_STATIC && T::IS_STATIC && E::IS_STATIC && Q::IS_STATIC {1}
     else {-1};
 const PAIR_S<S:Integer,D:Integer,P:Integer,T:Integer,E:Integer,Q:Integer>:int=PAIR_VALUES::<S,D,P,T,E,Q>[0];
@@ -1994,7 +1993,7 @@ const impl<M: FlatTuple> NormalizeRadix<0> for M {
 const impl<S: ShapeScalar, D: F2Scalar, P: ShapeScalar, T: ShapeScalar, E: F2Scalar, Q: ShapeScalar>
     NormalizeRadix<1> for PairModes<S, D, P, T, E, Q>
 where
-    (): [const] crate::swizzle::ValidF2Value<{ IS_NON_NEG::<{ PAIR_E::<S, D, P, T, E, Q> }> }>,
+    (): [const] ValidF2Value<{ IS_NON_NEG::<{ PAIR_E::<S, D, P, T, E, Q> }> }>,
 {
     type Modes = PairModes<
         Int<{ PAIR_S::<S, D, P, T, E, Q> }>,
@@ -2099,8 +2098,8 @@ const impl<
     T: [const] InsertInverseBits,
 > InsertInverseBits for Til<ModeTriple<S, F2<D>, P>, T>
 {
-    const STATIC_BINARY: bool = matches!(S::STATIC_VALUE,Some(s) if s.count_ones()==1)
-        && matches!(P::STATIC_VALUE,Some(p) if p.count_ones()==1)
+    const STATIC_BINARY: bool = matches!(S::STATIC_VALUE,Some(s) if is_pow2(s))
+        && matches!(P::STATIC_VALUE,Some(p) if is_pow2(p))
         && T::STATIC_BINARY;
 
     fn insert_bits(self, basis: &mut BinaryPreimages) {
@@ -2561,11 +2560,43 @@ impl<S, D> Layout<S, D> {
 }
 
 /// Computes the largest right inverse layout of a [`Layout`] or [`Tiler`].
+///
+/// Every codomain axis must use one stride algebra. Combining integer and [`F2`]
+/// strides on the same axis is a compile-time error.
+///
+/// ```compile_fail,E0277
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::algebra::right_inverse;
+/// use noodle_cute::f2::f2;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::layout::Layout;
+/// use noodle_cute::{int_tuple, tuple};
+///
+/// let _ = right_inverse(Layout::new(
+///     int_tuple![Int::<4>, Int::<4>],
+///     tuple![Int::<1>, f2(Int::<4>)],
+/// ));
+/// ```
 pub const fn right_inverse<A: [const] RightInverse>(a: A) -> A::Output {
     a.right_inverse()
 }
 
 /// Computes the left inverse layout of a [`Layout`] or [`Tiler`].
+///
+/// Each F2 codomain axis supports one active mode with unit stride. A larger
+/// static stride fails at compile time.
+///
+/// ```compile_fail,E0277
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::algebra::left_inverse;
+/// use noodle_cute::f2::f2;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::layout::Layout;
+///
+/// let _ = left_inverse(Layout::new(Int::<8>, f2(Int::<2>)));
+/// ```
 pub const fn left_inverse<A: [const] LeftInverse>(a: A) -> A::Output {
     a.left_inverse()
 }

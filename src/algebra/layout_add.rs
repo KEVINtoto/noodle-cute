@@ -70,6 +70,17 @@
 //!
 //! # Compile-Time Rejections
 //!
+//! Splitting a nonzero F2 stride at an interior non-binary radix introduces carries:
+//!
+//! ```compile_fail,E0277
+//! # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+//! # #![allow(incomplete_features)]
+//! use noodle_cute::{algebra::layout_add, f2::f2, integer::Int, layout::Layout, int_tuple, tuple};
+//! let a = Layout::new(Int::<9>, f2(Int::<1>));
+//! let b = Layout::new(int_tuple![Int::<3>, Int::<3>], tuple![f2(Int::<2>), f2(Int::<4>)]);
+//! let _ = layout_add(a, b);
+//! ```
+//!
 //! Size mismatch is rejected at compile time for static shapes:
 //!
 //! ```compile_fail,E0277
@@ -165,9 +176,10 @@
 //! let _ = layout_add_with_profile(a, a, int_tuple![(1, 1), 1]);
 //! ```
 
+use crate::integer::{div, int, is_pow2};
 use crate::layout::Layout;
 use crate::shape::{AssertPositiveShape, IndexToCoord, Shape, ShapeScalar};
-use crate::stride::{Accumulate, InnerProduct, Stride};
+use crate::stride::{Accumulate, ContainsF2, InnerProduct, Stride};
 use crate::tuple::{
     FlatTuple, Flatten, Item, Leaf, LeafProfile, Nil, NilProfile, Til, Tuple, TupleProfile,
 };
@@ -232,6 +244,99 @@ type CanonShape<S, D> = <Layout<S, D> as CanonicalCoalesce>::Shape;
 type CanonStride<S, D> = <Layout<S, D> as CanonicalCoalesce>::Stride;
 type CanonLayout<S, D> = Layout<CanonShape<S, D>, CanonStride<S, D>>;
 
+/// Checks a common-domain generator against the radix of its original mode.
+/// An interior split of a nonzero F2 mode must separate disjoint bit fields.
+#[doc(hidden)]
+pub const trait RefinementBoundary: Copy {
+    const HAS_F2: bool;
+    fn valid_boundary(layout: Option<Self>, weight: int) -> Option<bool>;
+}
+
+const impl<S: ShapeScalar, D: [const] ContainsF2 + Copy> RefinementBoundary for Layout<S, D> {
+    const HAS_F2: bool = D::HAS_F2;
+    fn valid_boundary(layout: Option<Self>, weight: int) -> Option<bool> {
+        if weight <= 1 || is_pow2(weight) {
+            return Some(true);
+        }
+        match D::active_f2(match layout {
+            Some(l) => Some(l.stride),
+            None => None,
+        }) {
+            Some(active) => Some(!active),
+            None => None,
+        }
+    }
+}
+
+const impl RefinementBoundary for Layout<Nil, Nil> {
+    const HAS_F2: bool = false;
+    fn valid_boundary(_: Option<Self>, _: int) -> Option<bool> {
+        Some(true)
+    }
+}
+
+const impl<H: [const] Shape, T: Copy, D: Copy, R: Copy> RefinementBoundary
+    for Layout<Til<H, T>, Til<D, R>>
+where
+    Layout<H, D>: [const] RefinementBoundary,
+    Layout<T, R>: [const] RefinementBoundary,
+{
+    const HAS_F2: bool = Layout::<H, D>::HAS_F2 || Layout::<T, R>::HAS_F2;
+    fn valid_boundary(layout: Option<Self>, weight: int) -> Option<bool> {
+        if weight <= 1 {
+            return Some(true);
+        }
+        let (extent, head, tail) = match layout {
+            Some(l) => (
+                Some(l.shape.0.size()),
+                Some(Layout {
+                    shape: l.shape.0,
+                    stride: l.stride.0,
+                }),
+                Some(Layout {
+                    shape: l.shape.1,
+                    stride: l.stride.1,
+                }),
+            ),
+            None => (H::STATIC_SIZE, None, None),
+        };
+        let Some(n) = extent else { return None };
+        if n == 0 {
+            return None;
+        }
+        if weight < n {
+            Layout::<H, D>::valid_boundary(head, weight)
+        } else {
+            Layout::<T, R>::valid_boundary(tail, div(weight, n))
+        }
+    }
+}
+
+const STATIC_BOUNDARY<L: const RefinementBoundary, W: ShapeScalar>: Option<bool> =
+    if !L::HAS_F2 { Some(true) } else {
+        match W::STATIC_VALUE {
+            Some(w) => L::valid_boundary(None, w),
+            None => None,
+        }
+    };
+
+const VALID_BOUNDARY<L: const RefinementBoundary, W: ShapeScalar>: bool =
+    !matches!(STATIC_BOUNDARY::<L, W>, Some(false));
+
+/// Allows a generator whose radix is compatible with the original F2 mode.
+#[doc(hidden)]
+pub trait ValidRefinementBoundary<const VALID: bool> {}
+impl ValidRefinementBoundary<true> for () {}
+
+const fn check_boundary<L: const RefinementBoundary, W: [const] ShapeScalar>(layout: L, weight: W) {
+    if STATIC_BOUNDARY::<L, W>.is_none() {
+        assert!(
+            matches!(L::valid_boundary(Some(layout), weight.value()), Some(true)),
+            "layout_add refinement carries in an F2 mode"
+        );
+    }
+}
+
 /// Evaluates `A_co(d_k) + B_co(d_k)` at every leaf `d_k` of `G.stride`.
 #[doc(hidden)]
 pub const trait EvalSumStrides<SA, DA, SB, DB>: FlatTuple {
@@ -249,6 +354,10 @@ const impl<SA: Copy, DA: Copy, SB: Copy, DB: Copy> EvalSumStrides<SA, DA, SB, DB
 
 const impl<DH, DT, SA, DA, SB, DB, ValA, ValB> EvalSumStrides<SA, DA, SB, DB> for Til<DH, DT>
 where
+    Layout<SA, DA>: const RefinementBoundary,
+    Layout<SB, DB>: const RefinementBoundary,
+    (): ValidRefinementBoundary<{ VALID_BOUNDARY::<Layout<SA, DA>, DH> }>
+        + ValidRefinementBoundary<{ VALID_BOUNDARY::<Layout<SB, DB>, DH> }>,
     DH: [const] ShapeScalar + [const] IndexToCoord<SA> + [const] IndexToCoord<SB>,
     DT: [const] EvalSumStrides<SA, DA, SB, DB>,
     SA: Shape,
@@ -264,6 +373,8 @@ where
     type Output = Til<<ValA as Accumulate<ValB>>::Output, DT::Output>;
 
     fn eval_sum_strides(self, a: Layout<SA, DA>, b: Layout<SB, DB>) -> Self::Output {
+        check_boundary(a, self.0);
+        check_boundary(b, self.0);
         let va = a.call(self.0);
         let vb = b.call(self.0);
         let sum = va.accumulate(vb);

@@ -53,6 +53,7 @@ use core::cmp::Ordering;
 use core::fmt::{Display, Formatter};
 use core::marker::{ConstParamTy, PhantomData};
 
+use crate::f2::{F2, F2Scalar};
 use crate::integer::{
     Int, Integer, cmp as scalar_cmp, eq as scalar_eq, int, static_cmp, static_cmp_of, static_eq_of,
     static_true,
@@ -79,7 +80,7 @@ pub use repr::*;
 pub enum CoeffAlgebra {
     /// Ordinary signed integers (`int` / [`Int<N>`]).
     Integer,
-    /// Binary polynomial ring over GF(2) ([`F2`](crate::swizzle::F2)).
+    /// Binary polynomial ring over GF(2) ([`F2`]).
     F2,
     /// Any other custom external coefficient ring.
     Other,
@@ -145,6 +146,31 @@ const impl<I: [const] Integer> BasisCoeff for I {
 
     fn algebra_unit() -> Self::Unit {
         Int
+    }
+}
+
+const impl<V: [const] F2Scalar> BasisCoeff for F2<V> {
+    const IS_STATIC_ZERO: bool = static_true(static_eq_of::<V, Int<0>>());
+    const IS_STATIC: bool = V::IS_STATIC;
+    const STATIC_CMP_ZERO: Option<Ordering> = static_cmp_of::<V, Int<0>>();
+    const STATIC_VALUE: Option<int> = V::STATIC_VALUE;
+    const ALGEBRA: CoeffAlgebra = CoeffAlgebra::F2;
+    type Unit = F2<Int<1>>;
+
+    fn is_zero(&self) -> bool {
+        scalar_eq(self.inner(), Int::<0>)
+    }
+
+    fn cmp_zero(&self) -> Ordering {
+        scalar_cmp(self.inner(), Int::<0>)
+    }
+
+    fn static_cmp_zero(&self) -> Option<Ordering> {
+        static_cmp(self.inner(), Int::<0>)
+    }
+
+    fn algebra_unit() -> Self::Unit {
+        F2::new(Int)
     }
 }
 
@@ -483,7 +509,8 @@ const impl<T: [const] BasisTuple, V: [const] BasisCoeff, P: [const] BasisPath>
     }
 }
 
-/// Converts basis terms, combinations, or static zero [`Int<0>`] into a normalized [`BasisTuple`].
+/// Converts basis terms, combinations, or static zeros [`Int<0>`] and [`F2<Int<0>>`]
+/// into a normalized [`BasisTuple`].
 pub const trait IntoBasisCombination: Copy {
     /// Zero-stripped, path-sorted [`BasisTuple`] chain.
     type Terms: [const] BasisTuple;
@@ -511,6 +538,13 @@ const impl<T: [const] BasisTuple> IntoBasisCombination for BasisCombination<T> {
 const impl IntoBasisCombination for Int<0> {
     type Terms = Nil;
     fn into_basis_terms(self) -> Self::Terms {
+        Nil
+    }
+}
+
+const impl IntoBasisCombination for F2<Int<0>> {
+    type Terms = Nil;
+    fn into_basis_terms(self) -> Nil {
         Nil
     }
 }

@@ -110,11 +110,11 @@ use core::marker::ConstParamTy;
 use core::ops::RangeFull;
 
 use crate::basis::{BasisCombination, BasisTerm, BasisTuple};
+use crate::f2::F2;
 use crate::integer::{INCREASE, Int, int};
 use crate::layout::{Layout, MakeLayout};
 use crate::shape::Shape;
 use crate::stride::Stride;
-use crate::swizzle::F2;
 use crate::tensor::Tensor;
 use crate::tuple::{
     Get, GetOutput, Item, LeafProfile, MakeNodeFunctor, MakeTuple, Nil, NilProfile, Til, Tuple,

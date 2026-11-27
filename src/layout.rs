@@ -50,7 +50,8 @@
 //!   mixed static/dynamic integers) rather than functional equivalence.
 
 use crate::basis::{BasisCoeff, BasisCombination, BasisPath, BasisTerm, BasisTuple};
-use crate::integer::{Int, int};
+use crate::f2::{F2, F2Scalar};
+use crate::integer::{Int, eq, int};
 use crate::shape::{IndexToCoord, Shape};
 use crate::slice::Slice;
 use crate::stride::{
@@ -171,6 +172,10 @@ const impl IsLayout for int {
 }
 
 const impl<const N: int> IsLayout for Int<N> {
+    const IS_LAYOUT: bool = false;
+}
+
+const impl<V: Copy> IsLayout for F2<V> {
     const IS_LAYOUT: bool = false;
 }
 
@@ -609,7 +614,8 @@ where
 }
 
 /// Structural equality across hierarchical tuple shapes and strides, supporting
-/// heterogeneous static/dynamic integers and differing tuple structures.
+/// heterogeneous scalar types and differing tuple structures. Two scalar leaves of
+/// integer or [`F2`] type compare by their numeric values.
 pub const trait LayoutItemEq<Rhs> {
     /// Returns `true` iff `self` and `rhs` are structurally identical with equal leaves.
     fn layout_item_eq(&self, rhs: &Rhs) -> bool;
@@ -657,7 +663,7 @@ macro_rules! impl_scalar_eq_pair {
     ([$($lg:tt)*] $L:ty, [$($rg:tt)*] $R:ty) => {
         const impl<$($lg)* $($rg)*> LayoutItemEq<$R> for $L {
             fn layout_item_eq(&self, rhs: &$R) -> bool {
-                crate::integer::eq(*self, *rhs)
+                eq(*self, *rhs)
             }
         }
     };
@@ -672,6 +678,36 @@ macro_rules! impl_scalar_eq_matrix {
 
 impl_scalar_eq_matrix!(int, []);
 impl_scalar_eq_matrix!(Int<L>, [const L: int,]);
+
+const impl<L: [const] F2Scalar, R: [const] F2Scalar> LayoutItemEq<F2<R>> for F2<L> {
+    fn layout_item_eq(&self, rhs: &F2<R>) -> bool {
+        eq(self.inner(), rhs.inner())
+    }
+}
+
+const impl<V: [const] F2Scalar, const N: int> LayoutItemEq<Int<N>> for F2<V> {
+    fn layout_item_eq(&self, rhs: &Int<N>) -> bool {
+        eq(self.inner(), *rhs)
+    }
+}
+
+const impl<const N: int, V: [const] F2Scalar> LayoutItemEq<F2<V>> for Int<N> {
+    fn layout_item_eq(&self, rhs: &F2<V>) -> bool {
+        eq(*self, rhs.inner())
+    }
+}
+
+const impl<V: [const] F2Scalar> LayoutItemEq<int> for F2<V> {
+    fn layout_item_eq(&self, rhs: &int) -> bool {
+        eq(self.inner(), *rhs)
+    }
+}
+
+const impl<V: [const] F2Scalar> LayoutItemEq<F2<V>> for int {
+    fn layout_item_eq(&self, rhs: &F2<V>) -> bool {
+        eq(*self, rhs.inner())
+    }
+}
 
 macro_rules! impl_false_eq {
     ([$($g:tt)*] $L:ty, $R:ty) => {
@@ -701,6 +737,7 @@ macro_rules! impl_false_with_scalars {
     ([$($g:tt)*] $Other:ty) => {
         impl_false_both!([$($g)*] $Other, int);
         impl_false_both!([$($g)* const N: int] $Other, Int<N>);
+        impl_false_both!([$($g)* F: [const] F2Scalar] $Other, F2<F>);
     };
 }
 
@@ -731,22 +768,24 @@ macro_rules! impl_non_empty_comb_false_with_scalar {
 
 impl_non_empty_comb_false_with_scalar!([] int);
 impl_non_empty_comb_false_with_scalar!([const N: int] Int<N>);
+impl_non_empty_comb_false_with_scalar!([V: [const] F2Scalar] F2<V>);
 
 macro_rules! impl_empty_comb_eq_scalar {
     ([$($sg:tt)*] $S:ty) => {
         const impl<$($sg)*> LayoutItemEq<$S> for BasisCombination<Nil> {
             fn layout_item_eq(&self, rhs: &$S) -> bool {
-                crate::integer::eq(*rhs, Int::<0>)
+                crate::basis::BasisCoeffEq::coeff_eq(rhs, &Int::<0>)
             }
         }
         const impl<$($sg)*> LayoutItemEq<BasisCombination<Nil>> for $S {
             fn layout_item_eq(&self, _: &BasisCombination<Nil>) -> bool {
-                crate::integer::eq(*self, Int::<0>)
+                crate::basis::BasisCoeffEq::coeff_eq(self, &Int::<0>)
             }
         }
     };
 }
 
+impl_empty_comb_eq_scalar!([V: [const] F2Scalar] F2<V>);
 impl_empty_comb_eq_scalar!([] int);
 impl_empty_comb_eq_scalar!([const N: int] Int<N>);
 

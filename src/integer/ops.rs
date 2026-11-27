@@ -49,9 +49,9 @@
 
 use core::marker::ConstParamTy;
 
-use crate::{NoodleCuteError, NoodleCuteResult, Result, integer::uint};
+use crate::{NoodleCuteError, NoodleCuteResult, Result};
 
-use super::{Int, Integer, int, uint_to_int};
+use super::{Int, Integer, int, uint, uint_to_int};
 
 const fn checked_neg(a: int) -> Result<int> {
     a.checked_neg()
@@ -261,7 +261,7 @@ const fn checked_gcd(a: int, b: int) -> Result<int> {
     uint_to_int(ua)
 }
 
-pub(crate) const fn checked_lcm(a: int, b: int) -> Result<int> {
+const fn checked_lcm(a: int, b: int) -> Result<int> {
     if a == 0 || b == 0 {
         return Ok(0);
     }
@@ -273,9 +273,22 @@ pub(crate) const fn checked_lcm(a: int, b: int) -> Result<int> {
     uint_to_int(prod)
 }
 
+/// Returns the signed product, or `None` on overflow.
+pub(crate) const fn mul_maybe_overflows(a: int, b: int) -> Option<int> {
+    a.checked_mul(b)
+}
+
+/// Returns the least common multiple, or `None` on overflow.
+pub(crate) const fn lcm_maybe_overflows(a: int, b: int) -> Option<int> {
+    match checked_lcm(a, b) {
+        Ok(value) => Some(value),
+        Err(_) => None,
+    }
+}
+
 /// Returns `true` iff `l * s == r` mathematically without overflowing `int`.
 pub(crate) const fn integer_product_eq(l: int, s: int, r: int) -> bool {
-    matches!(l.checked_mul(s), Some(p) if p == r)
+    matches!(mul_maybe_overflows(l, s), Some(p) if p == r)
 }
 
 /// Returns `true` iff `divisor` divides `p * factor` (for positive inputs) without wider types.
@@ -288,6 +301,17 @@ pub(crate) const fn divides_product(divisor: int, p: int, factor: int) -> bool {
 pub(crate) const fn bit_length_non_neg(a: int) -> int {
     assert!(a >= 0, "bit_length requires a non-negative integer");
     (uint::BITS - (a as uint).leading_zeros()) as int
+}
+
+/// Tests whether `a` is a positive power of two.
+pub(crate) const fn is_pow2(a: int) -> bool {
+    a > 0 && (a as uint).is_power_of_two()
+}
+
+/// Returns the largest power of two no greater than `a`, or zero when `a` is zero.
+pub(crate) const fn bit_floor(a: int) -> int {
+    let bits = bit_length_non_neg(a);
+    if bits == 0 { 0 } else { 1 << (bits - 1) }
 }
 
 const fn checked_shl_u(a: int, k: uint) -> Result<int> {
@@ -356,58 +380,6 @@ pub(crate) const fn carry_free_mask(extent: int, stride: int) -> Option<uint> {
         bit <<= 1;
     }
     Some(mask)
-}
-
-/// Carry-less (polynomial over GF(2)) multiplication for non-negative `int` operands.
-pub(crate) const fn checked_clmul(a: int, b: int) -> Result<int> {
-    assert!(
-        a >= 0 && b >= 0,
-        "carry-less multiplication requires non-negative operands"
-    );
-    if a == 0 || b == 0 {
-        return Ok(0);
-    }
-    let deg_a = bit_length_non_neg(a) - 1;
-    let deg_b = bit_length_non_neg(b) - 1;
-    if deg_a + deg_b >= (uint::BITS as int - 1) {
-        return Err(NoodleCuteError::ArithmeticOverflow);
-    }
-    let mut res: uint = 0;
-    let mut c: uint = a as uint;
-    let mut v: uint = b as uint;
-    while v != 0 {
-        if (v & 1) != 0 {
-            res ^= c;
-        }
-        v >>= 1;
-        if v != 0 {
-            c <<= 1;
-        }
-    }
-    uint_to_int(res)
-}
-
-/// Carry-less (polynomial over GF(2)) Euclidean division for non-negative `a` and positive `d`.
-pub(crate) const fn checked_cldivmod(a: int, d: int) -> Result<(int, int)> {
-    assert!(a >= 0, "carry-less division requires non-negative dividend");
-    if d == 0 {
-        return Err(NoodleCuteError::DivisionByZero);
-    }
-    assert!(d > 0, "carry-less division requires positive divisor");
-    let deg_d = bit_length_non_neg(d) - 1;
-    let ud = d as uint;
-    let mut q: uint = 0;
-    let mut r: uint = a as uint;
-    while r != 0 {
-        let deg_r = (uint::BITS - r.leading_zeros()) as int - 1;
-        if deg_r < deg_d {
-            break;
-        }
-        let shift = (deg_r - deg_d) as uint;
-        q ^= 1u32 << shift;
-        r ^= ud << shift;
-    }
-    Ok((q as int, r as int))
 }
 
 const fn checked_op(a: int, b: int, op: ArithOp) -> Result<int> {
@@ -1147,42 +1119,3 @@ impl_ops!(
     BitOr bitor BitOr,
     BitXor bitxor BitXor
 );
-
-/// Row-echelon basis for binary-polynomial offsets paired with their domain preimages.
-#[doc(hidden)]
-pub struct BinaryPreimages {
-    offsets: [int; 31],
-    indices: [int; 31],
-}
-impl BinaryPreimages {
-    pub(crate) const fn new() -> Self {
-        Self {
-            offsets: [0; 31],
-            indices: [0; 31],
-        }
-    }
-    pub(crate) const fn insert(&mut self, mut y: int, mut x: int) {
-        while y != 0 {
-            let k = (int::BITS - 1 - y.leading_zeros()) as usize;
-            if self.offsets[k] == 0 {
-                self.offsets[k] = y;
-                self.indices[k] = x;
-                return;
-            }
-            y ^= self.offsets[k];
-            x ^= self.indices[k];
-        }
-    }
-    pub(crate) const fn solve(&self, mut y: int) -> Option<int> {
-        let mut x = 0;
-        while y != 0 {
-            let k = (int::BITS - 1 - y.leading_zeros()) as usize;
-            if self.offsets[k] == 0 {
-                return None;
-            }
-            y ^= self.offsets[k];
-            x ^= self.indices[k];
-        }
-        Some(x)
-    }
-}

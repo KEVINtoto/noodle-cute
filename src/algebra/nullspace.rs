@@ -64,6 +64,7 @@
 //! ```
 
 use crate::basis::{BasisCoeff, BasisCombination, BasisPath, BasisTerm, BasisTuple};
+use crate::f2::{F2, F2Scalar};
 use crate::integer::{ArithMul, Int, Integer, Product, int, mul};
 use crate::layout::{Layout, Tiler, tiler_to_layout};
 use crate::shape::{Shape, ShapeScalar};
@@ -98,6 +99,10 @@ pub const trait NullspaceStrideLeaf: Leaf {
 
 const impl<I: Integer> NullspaceStrideLeaf for I {
     const IS_STATIC_ZERO: bool = matches!(I::STATIC_VALUE, Some(0));
+}
+
+const impl<V: [const] F2Scalar> NullspaceStrideLeaf for F2<V> {
+    const IS_STATIC_ZERO: bool = matches!(V::STATIC_VALUE, Some(0));
 }
 
 const impl<V: BasisCoeff, P: BasisPath> NullspaceStrideLeaf for BasisTerm<V, P> {

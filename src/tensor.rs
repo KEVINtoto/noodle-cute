@@ -149,11 +149,11 @@ use crate::basis::{
     BasisCombination, BasisTerm, BasisTuple, MakeBasisLikeOutput, MakeBasisLikeTopProfile,
     make_basis_like,
 };
+use crate::f2::F2;
 use crate::integer::{IS_NON_NEG, Int, add, int};
 use crate::layout::{Coprofile, IsLayout, Layout};
 use crate::shape::{Shape, ValidShapeExtent};
 use crate::stride::{Coshape, LinearBounds, PrefixProduct, Stride};
-use crate::swizzle::F2;
 use crate::tuple::{Get, GetOutput, Item, Nil, Til, Tuple};
 
 pub mod accessor;

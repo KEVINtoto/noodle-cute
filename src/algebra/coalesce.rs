@@ -94,8 +94,8 @@ use crate::basis::{
     BasisCoeff, BasisCombination, BasisPath, BasisTerm, BasisTuple, CoeffAlgebra, ComparePath,
     ModeEnd,
 };
-use crate::integer::ops::{checked_clmul, integer_product_eq};
-use crate::integer::{ArithMul, Int, Product, int, mul, uint};
+use crate::f2::clmul_maybe_overflows;
+use crate::integer::{ArithMul, Int, Product, int, integer_product_eq, is_pow2, mul};
 use crate::layout::Layout;
 use crate::shape::{Shape, ShapeScalar};
 use crate::stride::{Stride, same_path};
@@ -123,9 +123,8 @@ const fn static_coeff_product_eq<S: ShapeScalar, L: BasisCoeff, R: BasisCoeff>()
         // of two and clmul(l, s) == r (avoiding 2 * s - 1 overflow).
         (CoeffAlgebra::F2, CoeffAlgebra::F2) => {
             (l == 0 && r == 0)
-                || (s > 0
-                    && (s as uint).is_power_of_two()
-                    && matches!(checked_clmul(l, s), Ok(p) if p == r))
+                || (is_pow2(s)
+                    && matches!(clmul_maybe_overflows(l, s), Some(product) if product == r))
         }
         (CoeffAlgebra::Integer, CoeffAlgebra::F2) | (CoeffAlgebra::F2, CoeffAlgebra::Integer) => {
             l == 0 && r == 0

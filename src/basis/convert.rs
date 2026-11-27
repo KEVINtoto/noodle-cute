@@ -40,6 +40,7 @@
 //! - [`as_tuple`] zero-pads omitted lower modes with [`Int<0>`] and collapses empty
 //!   combinations to [`Int<0>`], while leaving plain scalars and [`Nil`] unchanged.
 
+use crate::f2::{F2, F2Scalar};
 use crate::integer::{INCREASE, Int, Integer, int};
 use crate::tuple::{
     Append, FlatTuple, Item, LeafProfile, Mode, ModeEnd, Nil, NilProfile, Til, Tuple, TupleProfile,
@@ -624,6 +625,13 @@ const impl AsTuple for Nil {
 const impl<I: [const] Integer> AsTuple for I {
     type Output = I;
     fn as_tuple(self) -> I {
+        self
+    }
+}
+
+const impl<V: [const] F2Scalar> AsTuple for F2<V> {
+    type Output = Self;
+    fn as_tuple(self) -> Self {
         self
     }
 }
