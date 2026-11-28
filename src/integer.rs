@@ -72,7 +72,7 @@
 
 use core::fmt::{Display, Formatter};
 
-use crate::{NoodleCuteError, Result};
+use crate::{NoodleCuteError, Result, StaticValue};
 
 pub mod cmp;
 pub mod ops;
@@ -132,6 +132,9 @@ mod sealed {
 pub const trait Integer: sealed::SealedInteger + Copy + [const] Ord {
     /// The compile-time constant value if `Self` is static (`Some(N)` for [`Int<N>`], `None` for [`int`]).
     const STATIC_VALUE: Option<int>;
+    /// The value itself when determined by the integer type.
+    #[doc(hidden)]
+    const STATIC_INSTANCE: Option<Self> = None;
 
     /// `true` iff `Self` is a compile-time static integer (`STATIC_VALUE.is_some()`).
     const IS_STATIC: bool = Self::STATIC_VALUE.is_some();
@@ -149,6 +152,7 @@ const impl Integer for int {
 
 const impl<const N: int> Integer for Int<N> {
     const STATIC_VALUE: Option<int> = Some(N);
+    const STATIC_INSTANCE: Option<Self> = Some(Int);
     fn value(self) -> int {
         N
     }
@@ -161,6 +165,10 @@ pub const trait StaticInteger: [const] Integer {
 }
 const impl<const N: int> StaticInteger for Int<N> {
     const VALUE: int = N;
+}
+
+const impl<const N: int> StaticValue for Int<N> {
+    const VALUE: Self = Int;
 }
 
 /// Compile-time dispatch flag: `true` when both `A` and `B` are static `Int<N>`.

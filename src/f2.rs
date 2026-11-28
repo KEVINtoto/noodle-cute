@@ -42,7 +42,7 @@ use core::fmt::{Display, Formatter};
 use crate::integer::{
     BOTH_STATIC, IS_NON_NEG, Int, Integer, bit_length_non_neg, bitor, bitxor, cmp, eq, int, uint,
 };
-use crate::{NoodleCuteError, NoodleCuteResult, Result};
+use crate::{NoodleCuteError, NoodleCuteResult, Result, StaticValue};
 
 /// Compile-time guard restricting static [`F2`] values to non-negative integers (`VALID == true`).
 #[doc(hidden)]
@@ -113,13 +113,28 @@ impl<V: F2Scalar + Default> Default for F2<V> {
 /// Type alias for a compile-time static [`F2`] value (`F2<Int<N>>`).
 pub type StaticF2<const N: int> = F2<Int<N>>;
 
+impl<V: F2Scalar> F2<V> {
+    /// The unique value when `V` is a static `Int<N>` (guaranteed non-negative by [`F2Scalar`]).
+    pub(crate) const STATIC_INSTANCE: Option<Self> = match V::STATIC_INSTANCE {
+        Some(v) => Some(Self(v)),
+        None => None,
+    };
+}
+
+const impl<const N: int> StaticValue for F2<Int<N>>
+where
+    (): ValidF2Value<{ IS_NON_NEG::<N> }>,
+{
+    const VALUE: Self = Self(Int);
+}
+
 impl<V> F2<V> {
     /// Constructs a validated [`F2`] value, panicking if a dynamic [`int`] is negative.
     pub const fn new(value: V) -> Self
     where
         V: [const] F2Scalar,
     {
-        assert!(value.value() >= 0, "F2 value must be non-negative");
+        NoodleCuteError::InvalidShape.check_with(value.value() >= 0, "F2 value must be non-negative");
         Self(value)
     }
 

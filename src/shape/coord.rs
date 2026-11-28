@@ -1,5 +1,5 @@
-//! Coordinate-index conversions (`crd2idx`, `idx2crd`), bounds checking (`in_bounds`),
-//! and colexicographical coordinate iteration (`coordinates`).
+//! Coordinate-index conversions (`crd2idx`, `idx2crd`, `crd2crd`), bounds checking
+//! (`in_bounds`, `elem_less`), and colexicographical coordinate iteration (`coordinates`).
 //!
 //! # Main Interfaces
 //!
@@ -7,8 +7,12 @@
 //!   coordinates to a 1D linear index in colexicographical order.
 //! - [`IndexToCoord`] / [`index_to_coord`] / [`idx2crd`]: Unpacks a 1D linear index or
 //!   basis coordinate into a natural coordinate matching a [`Shape`].
+//! - [`Crd2Crd`] / [`crd2crd`]: Converts a coordinate between two shapes (mode-by-mode when
+//!   ranks match, or via colexicographical `idx2crd(crd2idx(c, src), dst)` otherwise).
 //! - [`InBounds`] / [`in_bounds`]: Checks whether a coordinate satisfies $0 \le c_i < s_i$
 //!   at every shape leaf.
+//! - [`ElemLess`] / [`elem_less`]: Elementwise strict less-than comparison `a < b` for
+//!   tail-tile predication.
 //! - [`Coordinates`] / [`coordinates`]: Iterates over all natural coordinates of a shape.
 //!
 //! # Usage
@@ -1061,3 +1065,232 @@ where
 
 impl<S: Shape> ExactSizeIterator for Coordinates<S> where int: IndexToCoord<S> {}
 impl<S: Shape> FusedIterator for Coordinates<S> where int: IndexToCoord<S> {}
+
+// ------------------------------------------------------------------
+// Coordinate-to-coordinate conversion: Crd2Crd / crd2crd
+// ------------------------------------------------------------------
+
+/// Compile-time check whether two shapes have equal top-level rank.
+#[doc(hidden)]
+pub const SAME_RANK<S: Item, D: Item>: bool = S::RANK == D::RANK;
+
+/// Dispatches tuple-to-tuple [`Crd2Crd`] between rank-matched mode-wise conversion
+/// (`SAME = true`) and flat colexicographical repack (`SAME = false`).
+#[doc(hidden)]
+pub const trait Crd2CrdTuple<S: Shape, D: Shape, const SAME: bool>: Copy {
+    type Output: Copy;
+    fn crd2crd_tuple(self, src: &S, dst: &D) -> Self::Output;
+}
+
+const impl<CH, CT, SH, ST, DH, DT> Crd2CrdTuple<Til<SH, ST>, Til<DH, DT>, true> for Til<CH, CT>
+where
+    CH: [const] Crd2Crd<SH, DH>,
+    CT: [const] Crd2Crd<ST, DT>,
+    SH: Shape,
+    ST: Tuple + Shape,
+    DH: Shape,
+    DT: Tuple + Shape,
+{
+    type Output = Til<CH::Output, CT::Output>;
+
+    fn crd2crd_tuple(self, src: &Til<SH, ST>, dst: &Til<DH, DT>) -> Self::Output {
+        Til(
+            self.0.crd2crd(&src.0, &dst.0),
+            self.1.crd2crd(&src.1, &dst.1),
+        )
+    }
+}
+
+const impl<CH, CT, SH, ST, DH, DT> Crd2CrdTuple<Til<SH, ST>, Til<DH, DT>, false> for Til<CH, CT>
+where
+    CH: Copy,
+    CT: Copy,
+    SH: Shape,
+    ST: Tuple + Shape,
+    DH: Shape,
+    DT: Tuple + Shape,
+    Self: [const] CoordToIndex<Til<SH, ST>>,
+    <Self as CoordToIndex<Til<SH, ST>>>::Output: [const] IndexToCoord<Til<DH, DT>>,
+{
+    type Output = <<Self as CoordToIndex<Til<SH, ST>>>::Output as IndexToCoord<Til<DH, DT>>>::Output;
+
+    fn crd2crd_tuple(self, src: &Til<SH, ST>, dst: &Til<DH, DT>) -> Self::Output {
+        self.coord_to_index(src).index_to_coord(dst)
+    }
+}
+
+/// Converts a coordinate from shape `S` into shape `D` (CuTe `crd2crd(c, src, dst)`).
+///
+/// - Scalar integer coordinates unpack into `D` via [`idx2crd`].
+/// - Tuple coordinates converting into a scalar shape pack via [`crd2idx`].
+/// - Tuple-to-tuple conversions recurse mode-by-mode when `S::RANK == D::RANK`, and
+///   repack via `idx2crd(crd2idx(c, src), dst)` when ranks differ.
+///
+/// # Examples
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::shape::crd2crd;
+///
+/// let src = int_tuple![Int::<2>, Int::<6>];
+/// let dst = int_tuple![Int::<2>, (Int::<2>, Int::<3>)];
+/// assert_eq!(
+///     crd2crd(int_tuple![1i32, 5i32], &src, &dst),
+///     int_tuple![1i32, (1i32, 2i32)]
+/// );
+/// assert_eq!(
+///     crd2crd(int_tuple![1i32, (1i32, 2i32)], &dst, &int_tuple![Int::<1>, Int::<1>]),
+///     int_tuple![1i32, 5i32]
+/// );
+/// ```
+pub const trait Crd2Crd<S: Shape, D: Shape>: Copy {
+    /// Resulting coordinate type in shape `D`.
+    type Output: Copy;
+    /// Converts `self` from `src` to `dst`.
+    fn crd2crd(self, src: &S, dst: &D) -> Self::Output;
+}
+
+const impl<C, S, D> Crd2Crd<S, D> for C
+where
+    C: [const] Integer + [const] IndexToCoord<D>,
+    S: Shape,
+    D: Shape,
+{
+    type Output = C::Output;
+
+    fn crd2crd(self, _: &S, dst: &D) -> Self::Output {
+        self.index_to_coord(dst)
+    }
+}
+
+const impl Crd2Crd<Nil, Nil> for Nil {
+    type Output = Nil;
+
+    fn crd2crd(self, _: &Nil, _: &Nil) -> Nil {
+        Nil
+    }
+}
+
+macro_rules! impl_crd2crd_tuple_to_scalar {
+    ([$($g:tt)*] $D:ty) => {
+        const impl<CH, CT, SH, ST, $($g)*> Crd2Crd<Til<SH, ST>, $D> for Til<CH, CT>
+        where
+            CH: Copy,
+            CT: Copy,
+            SH: Shape,
+            ST: Tuple + Shape,
+            $D: Shape,
+            Self: [const] CoordToIndex<Til<SH, ST>>,
+        {
+            type Output = <Self as CoordToIndex<Til<SH, ST>>>::Output;
+
+            fn crd2crd(self, src: &Til<SH, ST>, _: &$D) -> Self::Output {
+                self.coord_to_index(src)
+            }
+        }
+    };
+}
+
+impl_crd2crd_tuple_to_scalar!([] int);
+impl_crd2crd_tuple_to_scalar!([const N: int] Int<N>);
+
+const impl<CH, CT, SH, ST, DH, DT> Crd2Crd<Til<SH, ST>, Til<DH, DT>> for Til<CH, CT>
+where
+    CH: Copy,
+    CT: Copy,
+    SH: Shape,
+    ST: Tuple + Shape,
+    DH: Shape,
+    DT: Tuple + Shape,
+    Self: [const] Crd2CrdTuple<Til<SH, ST>, Til<DH, DT>, { SAME_RANK::<Til<SH, ST>, Til<DH, DT>> }>,
+{
+    type Output = <Self as Crd2CrdTuple<
+        Til<SH, ST>,
+        Til<DH, DT>,
+        { SAME_RANK::<Til<SH, ST>, Til<DH, DT>> },
+    >>::Output;
+
+    fn crd2crd(self, src: &Til<SH, ST>, dst: &Til<DH, DT>) -> Self::Output {
+        self.crd2crd_tuple(src, dst)
+    }
+}
+
+/// Converts `coord` from shape `src` to shape `dst` (CuTe `crd2crd`).
+pub const fn crd2crd<C: [const] Crd2Crd<S, D>, S: Shape, D: Shape>(
+    coord: C,
+    src: &S,
+    dst: &D,
+) -> C::Output {
+    coord.crd2crd(src, dst)
+}
+
+// ------------------------------------------------------------------
+// Elementwise strict comparison: ElemLess / elem_less
+// ------------------------------------------------------------------
+
+/// Elementwise "all strictly less than" comparison (CuTe `elem_less(a, b)`).
+///
+/// Integers compare with `<`. Tuples compare mode by mode; modes of `a` beyond the rank
+/// of `b` return `false`, while extra modes of `b` are ignored.
+///
+/// # Examples
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::shape::elem_less;
+///
+/// let extent = int_tuple![Int::<4>, (Int::<2>, 3i32)];
+/// assert!(elem_less(&int_tuple![3i32, (1i32, 2i32)], &extent));
+/// assert!(!elem_less(&int_tuple![3i32, (1i32, 3i32)], &extent));
+/// ```
+pub const trait ElemLess<R>: Copy {
+    /// Returns `true` iff every coordinate leaf in `self` is strictly less than its counterpart in `rhs`.
+    fn elem_less(&self, rhs: &R) -> bool;
+}
+
+const impl<A: [const] Integer, B: [const] Integer> ElemLess<B> for A {
+    fn elem_less(&self, rhs: &B) -> bool {
+        lt(*self, *rhs)
+    }
+}
+
+const impl ElemLess<Nil> for Nil {
+    fn elem_less(&self, _: &Nil) -> bool {
+        true
+    }
+}
+
+const impl<BH: Copy, BT: Copy> ElemLess<Til<BH, BT>> for Nil {
+    fn elem_less(&self, _: &Til<BH, BT>) -> bool {
+        true
+    }
+}
+
+const impl<AH: Copy, AT: Copy> ElemLess<Nil> for Til<AH, AT> {
+    fn elem_less(&self, _: &Nil) -> bool {
+        false
+    }
+}
+
+const impl<AH, AT, BH, BT> ElemLess<Til<BH, BT>> for Til<AH, AT>
+where
+    AH: [const] ElemLess<BH>,
+    AT: [const] ElemLess<BT>,
+    BH: Copy,
+    BT: Copy,
+{
+    fn elem_less(&self, rhs: &Til<BH, BT>) -> bool {
+        self.0.elem_less(&rhs.0) && self.1.elem_less(&rhs.1)
+    }
+}
+
+/// Returns `true` iff every mode of `a` is strictly less than the corresponding mode of `b`.
+pub const fn elem_less<A: [const] ElemLess<B>, B>(a: &A, b: &B) -> bool {
+    a.elem_less(b)
+}

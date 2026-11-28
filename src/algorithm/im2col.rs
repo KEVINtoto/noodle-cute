@@ -137,18 +137,35 @@
 //!   `1 + floor_div(size(D_i) + lo_i + hi_i - ((T_i - 1) * s_i + 1), u_i)`.
 //! - `lower_trs`, negative `stride_trs`, and explicit `shape_zpq` support reversed
 //!   stencils such as `dgrad`.
+//! - Offset views require independent position, tap, and origin offsets to add to the
+//!   activation offset at their summed coordinate. A blocked or F2 axis can violate this
+//!   condition. Use the coordinate or padded view for such windows. Affine integer axes
+//!   need no checks; other axes are verified once at construction, or at compile time
+//!   for statically known parameters.
+//!
+//! ```compile_fail,E0080
+//! # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+//! # #![allow(incomplete_features)]
+//! use noodle_cute::{algorithm::{Im2ColOptions, im2col_layout_with}, int_tuple, integer::Int, layout::Layout};
+//! let a = Layout::new(int_tuple![Int::<1>, (Int::<2>, Int::<4>), Int::<1>],
+//!                     int_tuple![Int::<32>, (Int::<1>, Int::<8>), Int::<1>]);
+//! let _ = im2col_layout_with(a, Int::<2>, Im2ColOptions::new().shape_zpq(Int::<2>));
+//! ```
+//!
 //! - Static invalid extents (`<= 0`) fail at compile time; dynamic invalid extents panic at
 //!   runtime.
 
+use crate::NoodleCuteError;
+use crate::algebra::coalesce::CoalesceTarget;
 use crate::algebra::composition::Composition;
 use crate::basis::{MakeTopBasisLikeOutput, MakeTopBasisLikeProfile, make_top_basis_like};
 use crate::integer::{
     ArithAdd, ArithFloorDiv, ArithMul, ArithSub, Difference, FloorQuotient, Int, Integer, Product,
-    Sum, add, floor_div, int, mul, sub,
+    Sum, add, div, floor_div, floor_rem, gcd, int, min, mul, sub,
 };
 use crate::layout::{Layout, make_layout};
 use crate::shape::{IndexToCoord, Shape, ShapeScalar};
-use crate::stride::{InnerProduct, PrefixProduct, Stride, StrideScalar};
+use crate::stride::{Accumulate, ContainsF2, InnerProduct, PrefixProduct, Stride, StrideScalar};
 use crate::tensor::{AccessorBase, AccessorOffset, ImplicitAccessor, OutOfBoundsAccessor, Tensor};
 use crate::tuple::{Item, Nil, Til, Tuple, TupleProduct, Wrap};
 
@@ -805,6 +822,141 @@ where
 // Core primitive: Im2ColLayout
 // ------------------------------------------------------------------
 
+const fn validate_window_axis<S, D, Offset, Pair, SumOffset>(
+    axis: Layout<S, D>,
+    mut positions: int,
+    traversal: int,
+    mut taps: int,
+    dilation: int,
+    origin: int,
+) where
+    S: const Shape,
+    D: Stride<S> + ContainsF2,
+    Layout<S, D>: [const] Fn<(int,), Output = Offset>,
+    Offset: [const] Accumulate<Offset, Output = Pair> + [const] PartialEq<SumOffset>,
+    Pair: [const] Accumulate<Offset, Output = SumOffset>,
+    SumOffset: Copy,
+{
+    // Across an entire inner block an integer layout translates by a constant.
+    // Only distinct residues of the two progressions can introduce a new carry.
+    if !D::HAS_F2 {
+        let mut period = 1;
+        let mut i = 0;
+        while i < sub(S::LEAVES, 1) {
+            period = mul(
+                period,
+                axis.shape
+                    .integer_leaf(i)
+                    .expect("expected integer shape extent"),
+            );
+            i = add(i, 1);
+        }
+        if period > 0 {
+            positions = min(
+                positions,
+                div(period, gcd(period, floor_rem(traversal, period))),
+            );
+            taps = min(taps, div(period, gcd(period, floor_rem(dilation, period))));
+            if (positions == 1 || taps == 1) && floor_rem(origin, period) == 0 {
+                return;
+            }
+        }
+    }
+    let base = axis(origin);
+    let mut z = 0;
+    while z < positions {
+        let p = mul(z, traversal);
+        let zp = base.accumulate(axis(p));
+        let mut t = 0;
+        while t < taps {
+            let q = mul(t, dilation);
+            NoodleCuteError::Unsupported.check_with(
+                axis(add(add(origin, p), q)) == zp.accumulate(axis(q)),
+                "im2col: spatial offsets are not separable; use im2col_padded or im2col_coord",
+            );
+            t = add(t, 1);
+        }
+        z = add(z, 1);
+    }
+}
+
+/// Verifies that position, tap, and origin offsets can be added independently on each axis.
+#[doc(hidden)]
+pub const trait WindowSeparable<Positions, Taps, Corner>: Copy {
+    /// Checks all spatial modes against their position and tap tilers and logical origin.
+    fn check_window(self, pos: Positions, tap: Taps, corner: Corner);
+}
+
+const impl WindowSeparable<Nil, Nil, Til<Int<0>, Nil>> for Layout<Nil, Nil> {
+    fn check_window(self, _: Nil, _: Nil, _: Til<Int<0>, Nil>) {}
+}
+
+const impl<S, D, ST, DT, Z, U, T, V, C, ZT, TT, CT, Offset, Pair, SumOffset, CS, CD>
+    WindowSeparable<Til<Layout<Z, U>, ZT>, Til<Layout<T, V>, TT>, Til<C, CT>>
+    for Layout<Til<S, ST>, Til<D, DT>>
+where
+    S: const Shape,
+    CS: Shape,
+    CD: Stride<CS>,
+    Layout<S, D>: CoalesceTarget<true, Output = Layout<CS, CD>>,
+    D: Stride<S> + ContainsF2,
+    ST: Tuple + Shape,
+    DT: Tuple + Stride<ST>,
+    Z: [const] ShapeScalar,
+    T: [const] ShapeScalar,
+    U: [const] Integer + Stride<Z>,
+    V: [const] Integer + Stride<T>,
+    C: [const] Integer,
+    CT: Tuple,
+    ZT: Tuple,
+    TT: Tuple,
+    Layout<ST, DT>: [const] WindowSeparable<ZT, TT, CT>,
+    Layout<S, D>: const Fn<(int,), Output = Offset>,
+    Offset: const Accumulate<Offset, Output = Pair> + const PartialEq<SumOffset>,
+    Pair: const Accumulate<Offset, Output = SumOffset>,
+    SumOffset: Copy,
+{
+    fn check_window(
+        self,
+        pos: Til<Layout<Z, U>, ZT>,
+        tap: Til<Layout<T, V>, TT>,
+        corner: Til<C, CT>,
+    ) {
+        let checked = const {
+            if CS::DEPTH == 0 && !D::HAS_F2 {
+                true
+            } else {
+                match (
+                    S::STATIC_ITEM,
+                    D::STATIC_ITEM,
+                    Z::STATIC_SIZE,
+                    U::STATIC_VALUE,
+                    T::STATIC_SIZE,
+                    V::STATIC_VALUE,
+                    C::STATIC_VALUE,
+                ) {
+                    (Some(s), Some(d), Some(z), Some(u), Some(t), Some(v), Some(c)) => {
+                        validate_window_axis(Layout::new(s, d), z, u, t, v, c);
+                        true
+                    }
+                    _ => false,
+                }
+            }
+        };
+        if !checked {
+            validate_window_axis(
+                Layout::new(self.shape.0, self.stride.0),
+                pos.0.shape.size(),
+                pos.0.stride.value(),
+                tap.0.shape.size(),
+                tap.0.stride.value(),
+                corner.0.value(),
+            );
+        }
+        Layout::new(self.shape.1, self.stride.1).check_window(pos.1, tap.1, corner.1);
+    }
+}
+
 /// Computes the `((N, (Z, P, Q)), ((T, R, S), C))` `im2col` [`Layout`] and corner `origin`
 /// shift for an activation layout `Self` of shape `(N, [D,] [H,] [W,] C)`.
 ///
@@ -894,12 +1046,15 @@ where
             Output = ZpqW,
         >,
     ZpqW: [const] ZipToLayouts<StDW, Output = TilerZpq>,
+    TilerZpq: Copy,
+    TilerTrs: Copy,
     StW: [const] ZipToLayouts<StTW, Output = TilerTrs>,
     Layout<
         <Self as SplitActivationLayout>::SpatialShape,
         <Self as SplitActivationLayout>::SpatialStride,
     >: [const] Composition<TilerZpq, Output = Layout<PosS, PosD>>
-        + [const] Composition<TilerTrs, Output = Layout<TapS, TapD>>,
+        + [const] Composition<TilerTrs, Output = Layout<TapS, TapD>>
+        + [const] WindowSeparable<TilerZpq, TilerTrs, CornerTail>,
     PosS: Shape,
     PosD: Stride<PosS>,
     TapS: Shape,
@@ -943,6 +1098,9 @@ where
         let tiler_zpq = shape_zpq_w.zip_to_layouts(stride_dhw_w);
         let tiler_trs = stencil_w.zip_to_layouts(stride_trs_w);
 
+        let spatial_corner = lower_trs_w.sub_spatial_with_trail(lower_dhw_w);
+        a_dhw.check_window(tiler_zpq, tiler_trs, spatial_corner);
+
         let pos = a_dhw.composition(tiler_zpq);
         let tap = a_dhw.composition(tiler_trs);
 
@@ -950,7 +1108,7 @@ where
         let k_layout = make_layout(Til(tap, Til(c_layout, Nil)));
         let layout = make_layout(Til(m_layout, Til(k_layout, Nil)));
 
-        let corner = Til(Int::<0>, lower_trs_w.sub_spatial_with_trail(lower_dhw_w));
+        let corner = Til(Int::<0>, spatial_corner);
         let origin = self.call(corner);
 
         (layout, origin)

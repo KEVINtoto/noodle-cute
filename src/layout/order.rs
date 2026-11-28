@@ -455,3 +455,91 @@ where
 pub const fn make_layout_like<L: [const] MakeLayoutLike>(layout: &L) -> L::Output {
     layout.make_layout_like()
 }
+
+/// Compile-time flag: `true` iff order key `K` is statically zero.
+#[doc(hidden)]
+pub const KEY_IS_STATIC_ZERO<K: OrderKey>: bool = K::IS_STATIC_ZERO;
+
+/// Maps static-zero order keys (`ZERO == true`) to `Int<0>` and all other order keys to `Int<1>`.
+#[doc(hidden)]
+pub const trait LeftFilterKey<const ZERO: bool> {
+    type Output: OrderKey;
+    fn left_filter_key() -> Self::Output;
+}
+
+const impl LeftFilterKey<true> for () {
+    type Output = Int<0>;
+
+    fn left_filter_key() -> Int<0> {
+        Int::<0>
+    }
+}
+
+const impl LeftFilterKey<false> for () {
+    type Output = Int<1>;
+
+    fn left_filter_key() -> Int<1> {
+        Int::<1>
+    }
+}
+
+/// Normalizes a stride tree into `Int<0>` (for static-zero leaves) and `Int<1>` (otherwise),
+/// preserving hierarchy so [`MakeLayoutLike`] builds a left-major compact layout keeping zeros.
+#[doc(hidden)]
+pub const trait LeftFilterStride: Copy {
+    type Output: Copy;
+    fn left_filter_stride(self) -> Self::Output;
+}
+
+const impl LeftFilterStride for Nil {
+    type Output = Nil;
+
+    fn left_filter_stride(self) -> Nil {
+        Nil
+    }
+}
+
+const impl<K: OrderKey> LeftFilterStride for K
+where
+    (): [const] LeftFilterKey<{ KEY_IS_STATIC_ZERO::<K> }>,
+{
+    type Output = <() as LeftFilterKey<{ KEY_IS_STATIC_ZERO::<K> }>>::Output;
+
+    fn left_filter_stride(self) -> Self::Output {
+        <() as LeftFilterKey<{ KEY_IS_STATIC_ZERO::<K> }>>::left_filter_key()
+    }
+}
+
+const impl<H, T> LeftFilterStride for Til<H, T>
+where
+    H: [const] LeftFilterStride,
+    T: [const] LeftFilterStride,
+{
+    type Output = Til<H::Output, T::Output>;
+
+    fn left_filter_stride(self) -> Self::Output {
+        Til(self.0.left_filter_stride(), self.1.left_filter_stride())
+    }
+}
+
+/// Builds a compact left-major [`Layout`] with the same shape as `layout`, preserving
+/// static stride-0 leaves as `Int<0>` (used by `make_fragment_like` for mode 0).
+#[doc(hidden)]
+pub const trait MakeLayoutLeftFiltered: Copy {
+    type Output;
+    fn make_layout_left_filtered(&self) -> Self::Output;
+}
+
+const impl<S, D> MakeLayoutLeftFiltered for Layout<S, D>
+where
+    S: Shape,
+    D: Stride<S> + [const] LeftFilterStride,
+    D::Output: Stride<S>,
+    Layout<S, D::Output>: [const] MakeLayoutLike,
+{
+    type Output = <Layout<S, D::Output> as MakeLayoutLike>::Output;
+
+    fn make_layout_left_filtered(&self) -> Self::Output {
+        Layout::new(self.shape, self.stride.left_filter_stride()).make_layout_like()
+    }
+}

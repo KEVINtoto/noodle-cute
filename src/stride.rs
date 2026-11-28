@@ -182,6 +182,11 @@ const impl StrideScalar for BasisCombination<Nil> {
 ///     &Til::new(1i32, Til::new(2i32, Nil)),
 /// );
 /// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid stride for shape `{S}`",
+    label = "stride structure must match shape `{S}`",
+    note = "use congruent integer, F2, or basis leaves matching the shape hierarchy"
+)]
 pub const trait Stride<S: Shape>: [const] Item<Profile = S::Profile> {}
 const impl Stride<Nil> for Nil {}
 const impl<D: [const] Leaf, S: ShapeScalar> Stride<S> for D {}

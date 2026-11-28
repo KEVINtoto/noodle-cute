@@ -1,5 +1,10 @@
 //! Optimized COPY with three-stage layout analysis (Whitepaper §2.6.1, §3.4.2).
 //!
+//! Before planning, every destination address must identify a single source address.
+//! Integer layouts with separated strides are certified from their axes (including
+//! matching broadcast axes). Remaining layouts are checked exactly by comparing pairs of
+//! indices, using constant storage and worst-case quadratic time in the domain size.
+//!
 //! Reshapes the iteration space of [`reference::copy`] before
 //! dispatching, establishing one algebraic invariant at each stage:
 //!
@@ -82,6 +87,30 @@
 //! copy(src, &mut dst);
 //! ```
 //!
+//! Distinct source addresses collide for destination strides `(1, 1)`:
+//!
+//! ```compile_fail,E0080
+//! # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+//! # #![allow(incomplete_features)]
+//! use noodle_cute::{algorithm::copy_plan, integer::Int, int_tuple, layout::Layout, tensor::{Tensor, ImplicitAccessor}};
+//! let shape = int_tuple![Int::<2>, Int::<2>];
+//! let source = Tensor::new(ImplicitAccessor::new(0i32), Layout::new(shape, int_tuple![Int::<1>, Int::<2>]));
+//! let dest = Tensor::new(ImplicitAccessor::new(0i32), Layout::new(shape, int_tuple![Int::<1>, Int::<1>]));
+//! let _ = copy_plan(source, dest);
+//! ```
+//!
+//! Distinct source addresses collide for destination strides `(0, 0)`:
+//!
+//! ```compile_fail,E0080
+//! # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+//! # #![allow(incomplete_features)]
+//! use noodle_cute::{algorithm::copy_plan, integer::Int, int_tuple, layout::Layout, tensor::{Tensor, ImplicitAccessor}};
+//! let shape = int_tuple![Int::<2>, Int::<2>];
+//! let source = Tensor::new(ImplicitAccessor::new(0i32), Layout::new(shape, int_tuple![Int::<1>, Int::<-1>]));
+//! let dest = Tensor::new(ImplicitAccessor::new(0i32), Layout::new(shape, int_tuple![Int::<0>, Int::<0>]));
+//! let _ = copy_plan(source, dest);
+//! ```
+//!
 //! Statically mismatched copy sizes fail at compile time:
 //!
 //! ```compile_fail,E0277
@@ -100,18 +129,20 @@
 
 use core::ops::RangeFull;
 
+use crate::NoodleCuteError;
+use crate::algebra::common::LeadingVecSize;
 use crate::algebra::{
     CoalesceTarget, GreatestCommonDomain, LogicalDivide, LogicalDivideAt, Nullspace, RightInverse,
     coalesce, greatest_common_domain, logical_divide, logical_divide_at, nullspace, right_inverse,
 };
-use crate::basis::{BasisCoeff, BasisCombination, BasisTerm, BasisTuple};
-use crate::f2::F2;
-use crate::integer::{ArithSub, Difference, Int, Integer, add, int, sub};
+use crate::basis::{BasisCoeff, BasisCombination};
+use crate::integer::{ArithSub, Difference, Int, add, int, sub};
 use crate::layout::Layout;
+use crate::layout::alias::compatible_aliases;
 use crate::shape::{Shape, ShapeScalar};
 use crate::stride::Stride;
 use crate::tensor::{Tensor, TensorIndex, TensorSet};
-use crate::tuple::{Get, GetOutput, Mode, ModeEnd, Nil, Til, TupleProduct, tuple_product};
+use crate::tuple::{Get, GetOutput, Item, Mode, ModeEnd, Nil, Til, TupleProduct, tuple_product};
 
 use super::reference::{self, STATIC_SIZE_COMPAT, ValidSizeMatch};
 
@@ -160,95 +191,9 @@ const impl NullspaceOffsetValue for BasisCombination<Nil> {
 #[doc(hidden)]
 pub const OFFSET_IS_STATIC_NONZERO<V: NullspaceOffsetValue>: bool = V::IS_STATIC_NONZERO;
 
-/// Classifies whether a stride leaf is statically the integer constant `Int<1>` (excluding
-/// dynamic `int`, non-unit constants, `F2`, and basis strides).
-#[doc(hidden)]
-pub const trait StrideIsStaticUnitInt: Copy {
-    const IS_UNIT_INT: bool = false;
-}
-
-const impl<I: Integer> StrideIsStaticUnitInt for I {
-    const IS_UNIT_INT: bool = matches!(I::STATIC_VALUE, Some(1));
-}
-
-const impl<V: Copy> StrideIsStaticUnitInt for F2<V> {}
-const impl<V: Copy, P: Copy> StrideIsStaticUnitInt for BasisTerm<V, P> {}
-const impl<T: BasisTuple> StrideIsStaticUnitInt for BasisCombination<T> {}
-
-/// Compile-time flag: `true` iff vectorization width `S` is static `>= 2` and stride `D` is static `Int<1>`.
-#[doc(hidden)]
-pub const CAN_VECTORIZE<S: ShapeScalar, D: StrideIsStaticUnitInt>: bool =
-    D::IS_UNIT_INT && matches!(S::STATIC_VALUE, Some(n) if n > 1);
-
 /// Compile-time flag: `true` iff vector width `V` is statically `Int<1>`.
 #[doc(hidden)]
 pub const IS_SCALAR_VEC<V: ShapeScalar>: bool = matches!(V::STATIC_VALUE, Some(1));
-
-/// Selects leading extent `S` when `CAN_VEC == true`, or falls back to scalar `Int<1>`.
-#[doc(hidden)]
-pub const trait SelectVecWidth<S: [const] ShapeScalar, const CAN_VEC: bool> {
-    type Output: [const] ShapeScalar;
-    fn select_vec_width(shape: S) -> Self::Output;
-}
-
-const impl<S: [const] ShapeScalar> SelectVecWidth<S, true> for () {
-    type Output = S;
-
-    fn select_vec_width(shape: S) -> S {
-        shape
-    }
-}
-
-const impl<S: [const] ShapeScalar> SelectVecWidth<S, false> for () {
-    type Output = Int<1>;
-
-    fn select_vec_width(_: S) -> Int<1> {
-        Int::<1>
-    }
-}
-
-/// Extracts the maximal common contiguous vector width `V` from `coalesce(src_v.layout[0][0])`.
-#[doc(hidden)]
-pub const trait CopyVecSize: Copy {
-    type Output: [const] ShapeScalar;
-    fn copy_vec_size(self) -> Self::Output;
-}
-
-const impl CopyVecSize for Layout<Nil, Nil> {
-    type Output = Int<1>;
-
-    fn copy_vec_size(self) -> Int<1> {
-        Int::<1>
-    }
-}
-
-const impl<S, D> CopyVecSize for Layout<S, D>
-where
-    S: [const] ShapeScalar,
-    D: StrideIsStaticUnitInt,
-    (): [const] SelectVecWidth<S, { CAN_VECTORIZE::<S, D> }>,
-{
-    type Output = <() as SelectVecWidth<S, { CAN_VECTORIZE::<S, D> }>>::Output;
-
-    fn copy_vec_size(self) -> Self::Output {
-        <() as SelectVecWidth<S, { CAN_VECTORIZE::<S, D> }>>::select_vec_width(self.shape)
-    }
-}
-
-const impl<S0, ST, D0, DT> CopyVecSize for Layout<Til<S0, ST>, Til<D0, DT>>
-where
-    S0: [const] ShapeScalar,
-    ST: Copy,
-    D0: StrideIsStaticUnitInt,
-    DT: Copy,
-    (): [const] SelectVecWidth<S0, { CAN_VECTORIZE::<S0, D0> }>,
-{
-    type Output = <() as SelectVecWidth<S0, { CAN_VECTORIZE::<S0, D0> }>>::Output;
-
-    fn copy_vec_size(self) -> Self::Output {
-        <() as SelectVecWidth<S0, { CAN_VECTORIZE::<S0, D0> }>>::select_vec_width(self.shape.0)
-    }
-}
 
 /// Splits a Stage-3 tensor into `(V:1, Grid)`:
 /// - `SCALAR == true` (`V == Int<1>`): wraps `(Int<1>, layout)` directly without invoking
@@ -299,7 +244,7 @@ type Stage2Div<T, Null> = <T as LogicalDivideAt<Null, Mode0>>::Output;
 type Stage2Slice<T> = <T as TensorIndex<DropNullCoord>>::Output;
 type InvDst<DstN> = <GetOutput<DstN, 0> as RightInverse>::Output;
 type AlignedSrcLead<SrcV> = <GetOutput<GetOutput<SrcV, 0>, 0> as CoalesceTarget<false>>::Output;
-type VecWidth<SrcV> = <AlignedSrcLead<SrcV> as CopyVecSize>::Output;
+type VecWidth<SrcV> = <AlignedSrcLead<SrcV> as LeadingVecSize>::Output;
 
 /// Executes the three-stage COPY layout analysis (`greatest_common_domain` -> `nullspace` ->
 /// `right_inverse` + vectorization) to produce `(V:1, Grid)` source and destination views.
@@ -321,6 +266,8 @@ const impl<
     AD,
     SD,
     DD,
+    SrcOff,
+    DstOff,
     SrcCL,
     DstCL,
     NullS,
@@ -346,6 +293,14 @@ where
     SD: [const] Shape,
     DD: [const] Stride<SD>,
     (): ValidSizeMatch<{ STATIC_SIZE_COMPAT::<SS, SD> }>,
+    Layout<SS, DS>: const Fn<(int,), Output = SrcOff>,
+    Layout<SD, DD>: const Fn<(int,), Output = DstOff>,
+    SrcOff: Copy + const PartialEq,
+    DstOff: Copy + const PartialEq,
+    SS: const Item,
+    DS: const Item,
+    SD: const Item,
+    DD: const Item,
     // Stage 1: greatest_common_domain & logical_divide -> (Compat, InCompat)
     Self: [const] GreatestCommonDomain<Tensor<AD, Layout<SD, DD>>>
         + [const] LogicalDivide<
@@ -400,7 +355,7 @@ where
     DstVL: Copy,
     GetOutput<SrcVL, 0>: [const] Get<0>,
     GetOutput<GetOutput<SrcVL, 0>, 0>: [const] CoalesceTarget<false>,
-    AlignedSrcLead<SrcVL>: [const] CopyVecSize,
+    AlignedSrcLead<SrcVL>: [const] LeadingVecSize,
     Tensor<SrcNA, SrcVL>: [const] LogicalDivide<VecWidth<SrcVL>>,
     Tensor<DstNA, DstVL>: [const] LogicalDivide<VecWidth<SrcVL>>,
 {
@@ -408,7 +363,40 @@ where
     type DstVec = <Tensor<DstNA, DstVL> as LogicalDivide<VecWidth<SrcVL>>>::Output;
 
     fn copy_plan(self, dst: Tensor<AD, Layout<SD, DD>>) -> (Self::SrcVec, Self::DstVec) {
-        assert!(self.size() == dst.size(), "copy: size mismatch");
+        NoodleCuteError::SizeMismatch
+            .check_with(self.size() == dst.size(), "copy: size mismatch");
+
+        let checked_statically = const {
+            if let (Some(ss), Some(ds), Some(sd), Some(dd), Some(n)) = (
+                SS::STATIC_ITEM,
+                DS::STATIC_ITEM,
+                SD::STATIC_ITEM,
+                DD::STATIC_ITEM,
+                SS::STATIC_SIZE,
+            ) {
+                let src = Layout {
+                    shape: ss,
+                    stride: ds,
+                };
+                let dst = Layout {
+                    shape: sd,
+                    stride: dd,
+                };
+                NoodleCuteError::NonInjective.check_with(
+                    compatible_aliases(src, dst, n),
+                    "Write-after-write error detected in dst",
+                );
+                true
+            } else {
+                false
+            }
+        };
+        if !checked_statically {
+            NoodleCuteError::NonInjective.check_with(
+                compatible_aliases(self.layout, dst.layout, self.size()),
+                "Write-after-write error detected in dst",
+            );
+        }
 
         // Stage 1: Extract domain-compatible portions (Compat, InCompat)
         let common_domain = greatest_common_domain(self, dst);
@@ -447,7 +435,7 @@ where
         let dst_v: Tensor<DstNA, DstVL> = logical_divide_at::<Mode0, _, _>(dst_n, inv_dst);
 
         let aligned_src = Get::<0>::get(&Get::<0>::get(&src_v.layout));
-        let vec_size = coalesce(aligned_src).copy_vec_size();
+        let vec_size = coalesce(aligned_src).leading_vec_size();
         let src_v = logical_divide(src_v, vec_size);
         let dst_v = logical_divide(dst_v, vec_size);
 
@@ -469,7 +457,7 @@ where
 /// Reshapes `src` and `dst` via [`copy_plan`] (common domain, nullspace deduplication &
 /// write-after-write rejection, destination-memory alignment, and maximal common contiguous
 /// vectorization), then dispatches every grid slice to [`reference::copy`].
-pub const fn copy<
+pub fn copy<
     Src,
     Dst,
     SrcVA,
@@ -492,7 +480,7 @@ pub const fn copy<
     dst: &mut Dst,
 ) where
     Dst: Copy,
-    Src: [const] CopyPlan<
+    Src: CopyPlan<
             Dst,
             SrcVec = Tensor<SrcVA, Layout<SrcVS, SrcVD>>,
             DstVec = Tensor<
@@ -505,24 +493,21 @@ pub const fn copy<
     SrcVD: Stride<SrcVS>,
     DstVA: Copy,
     DstVT: Shape,
-    DstVG: [const] Shape,
+    DstVG: Shape,
     DstVDT: Stride<DstVT>,
     DstVDG: Stride<DstVG>,
-    Tensor<SrcVA, Layout<SrcVS, SrcVD>>: [const] TensorIndex<VecSliceCoord, Output = Tensor<SrcSliceA, Layout<SrcSliceS, SrcSliceD>>>,
+    Tensor<SrcVA, Layout<SrcVS, SrcVD>>:
+        TensorIndex<VecSliceCoord, Output = Tensor<SrcSliceA, Layout<SrcSliceS, SrcSliceD>>>,
     Tensor<DstVA, Layout<Til<DstVT, Til<DstVG, Nil>>, Til<DstVDT, Til<DstVDG, Nil>>>>:
-        [const] TensorIndex<
-                VecSliceCoord,
-                Output = Tensor<DstSliceA, Layout<DstSliceS, DstSliceD>>,
-            >,
-    SrcSliceA: Copy,
-    SrcSliceS: [const] Shape,
-    SrcSliceD: [const] Stride<SrcSliceS>,
-    DstSliceA: Copy,
-    DstSliceS: [const] Shape,
-    DstSliceD: [const] Stride<DstSliceS>,
+        TensorIndex<VecSliceCoord, Output = Tensor<DstSliceA, Layout<DstSliceS, DstSliceD>>>,
+    SrcSliceS: Shape,
+    SrcSliceD: Stride<SrcSliceS>,
+    DstSliceS: Shape,
+    DstSliceD: Stride<DstSliceS>,
+    T: Copy,
     (): ValidSizeMatch<{ STATIC_SIZE_COMPAT::<SrcSliceS, DstSliceS> }>,
-    Tensor<SrcSliceA, Layout<SrcSliceS, SrcSliceD>>: [const] TensorIndex<int, Output = T>,
-    Tensor<DstSliceA, Layout<DstSliceS, DstSliceD>>: [const] TensorSet<int, Item = T>,
+    Tensor<SrcSliceA, Layout<SrcSliceS, SrcSliceD>>: TensorIndex<int, Output = T>,
+    Tensor<DstSliceA, Layout<DstSliceS, DstSliceD>>: TensorSet<int, Item = T>,
 {
     let (src_v, dst_v) = copy_plan(src, *dst);
     let grid = dst_v.layout.shape.1.0.size();

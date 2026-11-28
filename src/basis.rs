@@ -53,6 +53,7 @@ use core::cmp::Ordering;
 use core::fmt::{Display, Formatter};
 use core::marker::{ConstParamTy, PhantomData};
 
+use crate::StaticValue;
 use crate::f2::{F2, F2Scalar};
 use crate::integer::{
     Int, Integer, cmp as scalar_cmp, eq as scalar_eq, int, static_cmp, static_cmp_of, static_eq_of,
@@ -99,6 +100,9 @@ pub const trait BasisCoeff: Copy {
     const STATIC_VALUE: Option<int> = None;
     /// Algebraic ring tag distinguishing integer arithmetic from `F2` and custom rings.
     const ALGEBRA: CoeffAlgebra = CoeffAlgebra::Other;
+    /// The coefficient value when encoded entirely by the type.
+    #[doc(hidden)]
+    const STATIC_COEFF: Option<Self> = None;
     /// Multiplicative identity type in this coefficient's algebra.
     type Unit: [const] BasisCoeff;
 
@@ -130,6 +134,7 @@ const impl<I: [const] Integer> BasisCoeff for I {
     const STATIC_CMP_ZERO: Option<Ordering> = static_cmp_of::<I, Int<0>>();
     const STATIC_VALUE: Option<int> = I::STATIC_VALUE;
     const ALGEBRA: CoeffAlgebra = CoeffAlgebra::Integer;
+    const STATIC_COEFF: Option<Self> = I::STATIC_INSTANCE;
     type Unit = Int<1>;
 
     fn is_zero(&self) -> bool {
@@ -155,6 +160,7 @@ const impl<V: [const] F2Scalar> BasisCoeff for F2<V> {
     const STATIC_CMP_ZERO: Option<Ordering> = static_cmp_of::<V, Int<0>>();
     const STATIC_VALUE: Option<int> = V::STATIC_VALUE;
     const ALGEBRA: CoeffAlgebra = CoeffAlgebra::F2;
+    const STATIC_COEFF: Option<Self> = Self::STATIC_INSTANCE;
     type Unit = F2<Int<1>>;
 
     fn is_zero(&self) -> bool {
@@ -202,6 +208,10 @@ const impl<V: BasisCoeff, P: BasisPath> Item for BasisTerm<V, P> {
     const DEPTH: int = 0;
     const LEAVES: int = 1;
     const IS_STATIC: bool = V::IS_STATIC;
+    const STATIC_ITEM: Option<Self> = match V::STATIC_COEFF {
+        Some(v) => Some(Self::new(v)),
+        None => None,
+    };
     type Profile = LeafProfile;
 }
 
@@ -297,6 +307,10 @@ const impl<T: BasisTuple> Item for BasisCombination<T> {
     const DEPTH: int = 0;
     const LEAVES: int = 1;
     const IS_STATIC: bool = T::IS_STATIC;
+    const STATIC_ITEM: Option<Self> = match T::STATIC_ITEM {
+        Some(t) => Some(Self(t)),
+        None => None,
+    };
     type Profile = LeafProfile;
 }
 
@@ -480,6 +494,14 @@ where
     T: [const] SortedBasisTail<P>,
     (): [const] ValidBasisTerm<{ COEFF_IS_STATIC_ZERO::<V> }>,
 {
+}
+
+const impl<V: BasisCoeff + StaticValue, P: BasisPath> StaticValue for BasisTerm<V, P> {
+    const VALUE: Self = Self::new(V::VALUE);
+}
+
+const impl<T: CanonicalBasisTuple + StaticValue> StaticValue for BasisCombination<T> {
+    const VALUE: Self = Self(T::VALUE);
 }
 
 /// Prepends `BasisTerm<V, P>` onto `Self` when `OMIT = false`, or drops static zeros when `OMIT = true`.

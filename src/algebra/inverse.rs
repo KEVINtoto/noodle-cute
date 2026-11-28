@@ -190,8 +190,8 @@ use crate::f2::{
     f2, f2_add,
 };
 use crate::integer::{
-    BOTH_STATIC, IS_NON_NEG, Int, Integer, bit_floor, bitxor, div, eq, int, is_pow2, mul,
-    mul_maybe_overflows, rem, sub,
+    BOTH_STATIC, IS_NON_NEG, Int, Integer, bit_floor, bit_length_non_neg, bitxor, carry_free_mask,
+    div, eq, int, is_pow2, mul, mul_maybe_overflows, rem, sub, uint,
 };
 use crate::layout::{Coprofile, Layout, LayoutBase, ScaleIfNotOne, Tiler, tiler_to_layout};
 use crate::shape::{
@@ -1301,7 +1301,8 @@ pub const trait InvertSortedAxis<
 {
     type Shape: Shape;
     type Stride: Stride<Self::Shape>;
-    fn invert_sorted_axis(self) -> Layout<Self::Shape, Self::Stride>;
+    fn invert_sorted_axis(self, domain_tail_size: Option<int>)
+    -> Layout<Self::Shape, Self::Stride>;
 }
 
 const impl<M> InvertSortedAxis<true, { AxisAlgebra::Integer }> for M
@@ -1319,7 +1320,7 @@ where
         <M as RightInverseFold<Int<1>>>::Stride,
     > as FinalizeRightAxis>::Stride;
 
-    fn invert_sorted_axis(self) -> Layout<Self::Shape, Self::Stride> {
+    fn invert_sorted_axis(self, _: Option<int>) -> Layout<Self::Shape, Self::Stride> {
         self.right_inverse_fold(Int).finalize_right_axis()
     }
 }
@@ -1341,7 +1342,7 @@ where
         <M as LeftInverseFold<Int<1>, Int<1>, Int<0>>>::Stride,
     > as FinalizeLeftAxis>::Stride;
 
-    fn invert_sorted_axis(self) -> Layout<Self::Shape, Self::Stride> {
+    fn invert_sorted_axis(self, _: Option<int>) -> Layout<Self::Shape, Self::Stride> {
         let raw = self.left_inverse_fold(Int, Int, Int);
         raw.finalize_left_axis()
     }
@@ -2081,15 +2082,31 @@ const impl<H: Leaf, J: Leaf, K: Leaf, T: FlatTuple> InverseRadix for Til<H, Til<
         self
     }
 }
-/// Adds each independent coordinate bit of a sorted mode to the binary basis.
+/// Candidate trailing mode `(shape, stride, pps)` on a sorted F2 axis.
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub struct F2TailMode {
+    shape: int,
+    stride: int,
+    pps: int,
+}
+
+/// Adds each independent coordinate bit of a sorted mode to the binary basis
+/// and identifies the highest-weight active mode on the axis.
 #[doc(hidden)]
 pub const trait InsertInverseBits: FlatTuple {
     const STATIC_BINARY: bool;
-    fn insert_bits(self, basis: &mut BinaryPreimages);
+    /// Inserts independent coordinate bits for every active mode whose positional weight differs from `skip_p`.
+    fn insert_bits(self, basis: &mut BinaryPreimages, skip_p: int);
+    /// Returns the active mode (`shape > 1, stride != 0`) with the largest positional weight `pps`.
+    fn max_pps_mode(self, best: Option<F2TailMode>) -> Option<F2TailMode>;
 }
 const impl InsertInverseBits for Nil {
     const STATIC_BINARY: bool = true;
-    fn insert_bits(self, _: &mut BinaryPreimages) {}
+    fn insert_bits(self, _: &mut BinaryPreimages, _: int) {}
+    fn max_pps_mode(self, best: Option<F2TailMode>) -> Option<F2TailMode> {
+        best
+    }
 }
 const impl<
     S: [const] ShapeScalar,
@@ -2098,15 +2115,15 @@ const impl<
     T: [const] InsertInverseBits,
 > InsertInverseBits for Til<ModeTriple<S, F2<D>, P>, T>
 {
-    const STATIC_BINARY: bool = matches!(S::STATIC_VALUE,Some(s) if is_pow2(s))
-        && matches!(P::STATIC_VALUE,Some(p) if is_pow2(p))
+    const STATIC_BINARY: bool = matches!(S::STATIC_VALUE, Some(s) if is_pow2(s))
+        && matches!(P::STATIC_VALUE, Some(p) if is_pow2(p))
         && T::STATIC_BINARY;
 
-    fn insert_bits(self, basis: &mut BinaryPreimages) {
+    fn insert_bits(self, basis: &mut BinaryPreimages, skip_p: int) {
         let s = self.0.shape.value();
         let d = self.0.stride.value();
         let p = self.0.pps.value();
-        if d != 0 && s > 1 {
+        if d != 0 && s > 1 && p != skip_p {
             // Only the complete low binary field can be varied independently.
             let mut k = 1;
             while k <= s / 2 {
@@ -2114,7 +2131,26 @@ const impl<
                 k = mul(k, 2);
             }
         }
-        self.1.insert_bits(basis);
+        self.1.insert_bits(basis, skip_p);
+    }
+
+    fn max_pps_mode(self, best: Option<F2TailMode>) -> Option<F2TailMode> {
+        let s = self.0.shape.value();
+        let d = self.0.stride.value();
+        let p = self.0.pps.value();
+        let next = if d != 0 && s > 1 {
+            match best {
+                Some(curr) if curr.pps >= p => best,
+                _ => Some(F2TailMode {
+                    shape: s,
+                    stride: d,
+                    pps: p,
+                }),
+            }
+        } else {
+            best
+        };
+        self.1.max_pps_mode(next)
     }
 }
 
@@ -2123,7 +2159,7 @@ const impl<
 pub const trait InvertF2Axis<const BINARY: bool>: FlatTuple {
     type Shape: Shape;
     type Stride: Stride<Self::Shape>;
-    fn invert_f2_axis(self) -> Layout<Self::Shape, Self::Stride>;
+    fn invert_f2_axis(self, domain_tail_size: Option<int>) -> Layout<Self::Shape, Self::Stride>;
 }
 const impl<M> InvertF2Axis<false> for M
 where
@@ -2143,7 +2179,7 @@ where
         <M::Modes as F2RightInverseFold<Int<1>, Layout<Nil, Nil>>>::Stride,
     > as FinalizeRightAxis>::Stride;
 
-    fn invert_f2_axis(self) -> Layout<Self::Shape, Self::Stride> {
+    fn invert_f2_axis(self, _: Option<int>) -> Layout<Self::Shape, Self::Stride> {
         self.inverse_radix()
             .f2_right_inverse_fold(Int, Layout::new(Nil, Nil))
             .finalize_right_axis()
@@ -2164,12 +2200,69 @@ const fn eight<V: [const] Item>(a: &[V; 32], i: usize) -> Bits8<V> {
 const fn binary_tuple<V: [const] Item>(a: &[V; 32]) -> Bits32<V> {
     crate::tuple![eight(a, 0), eight(a, 8), eight(a, 16), eight(a, 24)]
 }
+
+/// Extends a solved binary prefix `0..C` (`C = 2^b`) with the full trailing non-power-of-two mode
+/// when its stride is `F2(C)` and its preimage bit field is disjoint from the prefix preimages.
+const fn trailing_tail_inverse<M: [const] InsertInverseBits>(
+    modes: M,
+    domain_tail_size: Option<int>,
+    binary_bits: usize,
+) -> Option<Layout<Bits32<int>, Bits32<F2<int>>>> {
+    let Some(total_size) = domain_tail_size else {
+        return None;
+    };
+    let Some(tail) = modes.max_pps_mode(None) else {
+        return None;
+    };
+    if tail.shape <= 1 || is_pow2(tail.shape) {
+        return None;
+    }
+    if tail.stride <= 0 || !is_pow2(tail.stride) || tail.pps <= 0 || !is_pow2(tail.pps) {
+        return None;
+    }
+    if !matches!(mul_maybe_overflows(tail.pps, tail.shape), Some(end) if end == total_size) {
+        return None;
+    }
+    let Some(tail_p_mask) = carry_free_mask(tail.shape, tail.pps) else {
+        return None;
+    };
+    let Some(extended_size) = mul_maybe_overflows(tail.stride, tail.shape) else {
+        return None;
+    };
+    if binary_bits >= 31 || extended_size <= (1i32 << binary_bits) {
+        return None;
+    }
+
+    let prefix_bits = (bit_length_non_neg(tail.stride) - 1) as usize;
+    let mut prefix_basis = BinaryPreimages::new();
+    modes.insert_bits(&mut prefix_basis, tail.pps);
+    let mut shape = [1; 32];
+    let mut stride = [f2(0i32); 32];
+    let mut prefix_mask: uint = 0;
+    let mut j = 0;
+    while j < prefix_bits {
+        let Some(x) = prefix_basis.solve(1 << j) else {
+            return None;
+        };
+        shape[j] = 2;
+        stride[j] = f2(x);
+        prefix_mask |= x as uint;
+        j += 1;
+    }
+    if prefix_mask >= tail.pps as uint || (prefix_mask & tail_p_mask) != 0 {
+        return None;
+    }
+    shape[prefix_bits] = tail.shape;
+    stride[prefix_bits] = f2(tail.pps);
+    Some(Layout::new(binary_tuple(&shape), binary_tuple(&stride)))
+}
+
 const impl<M: [const] InsertInverseBits> InvertF2Axis<true> for M {
     type Shape = Bits32<int>;
     type Stride = Bits32<F2<int>>;
-    fn invert_f2_axis(self) -> Layout<Self::Shape, Self::Stride> {
+    fn invert_f2_axis(self, domain_tail_size: Option<int>) -> Layout<Self::Shape, Self::Stride> {
         let mut basis = BinaryPreimages::new();
-        self.insert_bits(&mut basis);
+        self.insert_bits(&mut basis, 0);
         let mut shape = [1; 32];
         let mut stride = [f2(0i32); 32];
         let mut k = 0;
@@ -2181,6 +2274,9 @@ const impl<M: [const] InsertInverseBits> InvertF2Axis<true> for M {
             stride[k] = f2(x);
             k += 1;
         }
+        if let Some(extended) = trailing_tail_inverse(self, domain_tail_size, k) {
+            return extended;
+        }
         Layout::new(binary_tuple(&shape), binary_tuple(&stride))
     }
 }
@@ -2191,8 +2287,8 @@ where
 {
     type Shape = <M as InvertF2Axis<{ USE_BINARY_BASIS::<M> }>>::Shape;
     type Stride = <M as InvertF2Axis<{ USE_BINARY_BASIS::<M> }>>::Stride;
-    fn invert_sorted_axis(self) -> Layout<Self::Shape, Self::Stride> {
-        self.invert_f2_axis()
+    fn invert_sorted_axis(self, domain_tail_size: Option<int>) -> Layout<Self::Shape, Self::Stride> {
+        self.invert_f2_axis(domain_tail_size)
     }
 }
 /// Validates a single-mode `F2` axis for `left_inverse` (`gap == 1`, i.e. stride == `F2(1)`).
@@ -2217,7 +2313,7 @@ where
     type Shape = S;
     type Stride = P;
 
-    fn invert_sorted_axis(self) -> Layout<S, P> {
+    fn invert_sorted_axis(self, _: Option<int>) -> Layout<S, P> {
         let d = self.0.stride.value();
         assert!(
             d == 1,
@@ -2238,8 +2334,13 @@ pub const trait BuildInverse<const RIGHT: bool, FS: FlatTuple, FD: FlatTuple, FP
 {
     type Shape: Shape;
     type Stride: Stride<Self::Shape>;
-    fn build_inverse(self, flat_s: FS, flat_d: FD, flat_p: FP)
-    -> Layout<Self::Shape, Self::Stride>;
+    fn build_inverse(
+        self,
+        flat_s: FS,
+        flat_d: FD,
+        flat_p: FP,
+        domain_tail_size: Option<int>,
+    ) -> Layout<Self::Shape, Self::Stride>;
 }
 
 const impl<const RIGHT: bool, FS: FlatTuple, FD: FlatTuple, FP: FlatTuple>
@@ -2248,7 +2349,7 @@ const impl<const RIGHT: bool, FS: FlatTuple, FD: FlatTuple, FP: FlatTuple>
     type Shape = Nil;
     type Stride = Nil;
 
-    fn build_inverse(self, _: FS, _: FD, _: FP) -> Layout<Nil, Nil> {
+    fn build_inverse(self, _: FS, _: FD, _: FP, _: Option<int>) -> Layout<Nil, Nil> {
         Layout::new(Nil, Nil)
     }
 }
@@ -2276,11 +2377,12 @@ where
         flat_s: FS,
         flat_d: FD,
         flat_p: FP,
+        domain_tail_size: Option<int>,
     ) -> Layout<Self::Shape, Self::Stride> {
         flat_s
             .filter_inverse_modes(flat_d, flat_p)
             .sort_inverse_modes()
-            .invert_sorted_axis()
+            .invert_sorted_axis(domain_tail_size)
     }
 }
 
@@ -2309,11 +2411,12 @@ where
         flat_s: FS,
         flat_d: FD,
         flat_p: FP,
+        domain_tail_size: Option<int>,
     ) -> Layout<Self::Shape, Self::Stride> {
         flat_s
             .filter_inverse_modes(flat_d, flat_p)
             .sort_inverse_modes()
-            .invert_sorted_axis()
+            .invert_sorted_axis(domain_tail_size)
     }
 }
 
@@ -2335,9 +2438,10 @@ where
         flat_s: FS,
         flat_d: FD,
         flat_p: FP,
+        domain_tail_size: Option<int>,
     ) -> Layout<Self::Shape, Self::Stride> {
-        let head = self.0.build_inverse(flat_s, flat_d, flat_p);
-        let tail = self.1.build_inverse(flat_s, flat_d, flat_p);
+        let head = self.0.build_inverse(flat_s, flat_d, flat_p, domain_tail_size);
+        let tail = self.1.build_inverse(flat_s, flat_d, flat_p, domain_tail_size);
         Layout::new(Til(head.shape, tail.shape), Til(head.stride, tail.stride))
     }
 }
@@ -2383,6 +2487,7 @@ type BuiltInverseLayout<const RIGHT: bool, S, D> = Layout<
 
 const fn invert_layout<const RIGHT: bool, S, D>(
     layout: Layout<S, D>,
+    domain_tail_size: Option<int>,
 ) -> BuiltInverseLayout<RIGHT, S, D>
 where
     S: Shape + [const] Flatten,
@@ -2409,7 +2514,7 @@ where
     let flat_s = coalesced.shape().flatten();
     let flat_d = coalesced.stride().flatten();
     let flat_p = prefix_product_with(flat_s, Int::<1>);
-    bases.build_inverse(flat_s, flat_d, flat_p)
+    bases.build_inverse(flat_s, flat_d, flat_p, domain_tail_size)
 }
 
 /// Verifies that an F2 preimage can be decoded by the original domain shape.
@@ -2474,10 +2579,11 @@ where
                 "mixed inverse needs disjoint binary domain fields"
             );
         }
+        let domain_tail_size = self.shape.leading_binary_size();
         <BuiltInverseLayout<true, S, D> as ScaleIfNotOne<
             F2<Int<1>>,
             { KEEP_INVERSE::<BuiltInverseLayout<true, S, D>, S> },
-        >>::scale_if_not_one(invert_layout::<true, S, D>(self), f2(Int::<1>))
+        >>::scale_if_not_one(invert_layout::<true, S, D>(self, domain_tail_size), f2(Int::<1>))
     }
 }
 
@@ -2504,7 +2610,7 @@ where
     type Output = BuiltInverseLayout<false, S, D>;
 
     fn left_inverse(self) -> Self::Output {
-        invert_layout::<false, S, D>(self)
+        invert_layout::<false, S, D>(self, None)
     }
 }
 

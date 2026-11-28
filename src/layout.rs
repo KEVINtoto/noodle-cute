@@ -49,19 +49,26 @@
 //! - `PartialEq` checks structural shape and stride equality via [`LayoutItemEq`] (supporting
 //!   mixed static/dynamic integers) rather than functional equivalence.
 
-use crate::basis::{BasisCoeff, BasisCombination, BasisPath, BasisTerm, BasisTuple};
+use crate::StaticValue;
+use crate::basis::{
+    BasisCoeff, BasisCombination, BasisPath, BasisTerm, BasisTuple, MakeBasisLikeOutput,
+    MakeBasisLikeTopProfile, make_basis_like,
+};
 use crate::f2::{F2, F2Scalar};
 use crate::integer::{Int, eq, int};
-use crate::shape::{IndexToCoord, Shape};
+use crate::shape::{Crd2Crd, IndexToCoord, Shape, crd2crd};
 use crate::slice::Slice;
 use crate::stride::{
-    Coshape, InnerProduct, LinearBounds, PrefixProduct, Stride, inner_product, prefix_product,
-    prefix_product_with, same_path,
+    Coshape, Idx2CrdWithStride, InnerProduct, LinearBounds, PrefixProduct, Stride, SuffixProduct,
+    idx2crd_with_stride, inner_product, prefix_product, prefix_product_with, same_path,
+    suffix_product, suffix_product_with,
 };
 use crate::tuple::{
-    Flatten, Get, GetOutput, Item, LeafProfile, Nil, SliceBy, SliceRange, Til, Wrap, slice_by,
+    Append, DiceBy, Flatten, Get, GetOutput, Group, Item, LeafProfile, Nil, RepeatModes, Select,
+    SliceBy, SliceRange, Til, Wrap, Zip2, slice_by,
 };
 
+pub(crate) mod alias;
 pub mod order;
 pub mod recast;
 pub mod tiler;
@@ -107,6 +114,12 @@ pub const fn is_layout<T: IsLayout>(_: &T) -> bool {
     T::IS_LAYOUT
 }
 
+/// Resulting layout type of [`Layout::append`].
+pub type AppendedLayout<S, D, S2, D2> = Layout<
+    <<S as Wrap>::Wrapped as Append<Til<S2, Nil>>>::Output,
+    <<D as Wrap>::Wrapped as Append<Til<D2, Nil>>>::Output,
+>;
+
 /// A CuTe layout mapping coordinates in `shape` to offsets via `stride`.
 ///
 /// Note on [`Item`] vs inherent queries: `Layout<S, D>` implements [`Item`] as an atomic
@@ -144,6 +157,85 @@ const impl<S: Item, D: Item> Item for Layout<S, D> {
     const LEAVES: int = 1;
     const IS_STATIC: bool = S::IS_STATIC && D::IS_STATIC;
     type Profile = LeafProfile;
+}
+
+const impl<S: Shape + StaticValue, D: Stride<S> + StaticValue> StaticValue for Layout<S, D> {
+    const VALUE: Self = Layout {
+        shape: S::VALUE,
+        stride: D::VALUE,
+    };
+}
+
+const impl<S, D> Zip2 for Layout<S, D>
+where
+    S: [const] Zip2,
+    D: [const] Zip2,
+    S::Output: Shape,
+    D::Output: Stride<S::Output>,
+{
+    type Output = Layout<S::Output, D::Output>;
+
+    fn zip2(self) -> Self::Output {
+        Layout::new(self.shape.zip2(), self.stride.zip2())
+    }
+}
+
+/// Unpacks a linear index into a flat (top-level rank) coordinate of a compact layout
+/// (CuTe `layout.get_flat_coord(idx)`).
+pub const trait GetFlatCoord<I>: Copy {
+    /// Flat coordinate type (one integer per top-level mode of `Self`).
+    type Output: Copy;
+    /// Evaluates `crd2crd(idx2crd_with_stride(index, shape, stride), shape, repeat_modes(1, shape))`.
+    fn get_flat_coord(&self, index: I) -> Self::Output;
+}
+
+const impl<S, D, I> GetFlatCoord<I> for Layout<S, D>
+where
+    S: [const] Shape + [const] RepeatModes<Int<1>>,
+    D: Stride<S>,
+    <S as RepeatModes<Int<1>>>::Output: Shape,
+    I: [const] Idx2CrdWithStride<S, D>,
+    <I as Idx2CrdWithStride<S, D>>::Output: [const] Crd2Crd<S, <S as RepeatModes<Int<1>>>::Output>,
+{
+    type Output = <<I as Idx2CrdWithStride<S, D>>::Output as Crd2Crd<
+        S,
+        <S as RepeatModes<Int<1>>>::Output,
+    >>::Output;
+
+    fn get_flat_coord(&self, index: I) -> Self::Output {
+        let crd = idx2crd_with_stride(index, &self.shape, &self.stride);
+        let target = S::repeat_modes(Int::<1>);
+        crd2crd(crd, &self.shape, &target)
+    }
+}
+
+/// Unpacks `index` into a flat top-level coordinate for compact `layout` (CuTe `get_flat_coord`).
+pub const fn get_flat_coord<L: [const] GetFlatCoord<I>, I>(layout: &L, index: I) -> L::Output {
+    layout.get_flat_coord(index)
+}
+
+/// Constructs the identity layout mapping every coordinate in `shape` to itself via basis strides.
+///
+/// # Examples
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::basis::as_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::layout::make_identity_layout;
+/// use noodle_cute::int_tuple;
+///
+/// let id = make_identity_layout(int_tuple![Int::<3>, Int::<4>]);
+/// assert_eq!(as_tuple(id(1i32, 2i32)), int_tuple![1i32, 2i32]);
+/// ```
+pub const fn make_identity_layout<S>(shape: S) -> Layout<S, MakeBasisLikeOutput<S>>
+where
+    S: [const] Shape,
+    S::Profile: [const] MakeBasisLikeTopProfile,
+    MakeBasisLikeOutput<S>: Stride<S>,
+{
+    Layout::new(shape, make_basis_like(shape))
 }
 
 const impl<S: Shape, D: Stride<S>> LayoutBase for Layout<S, D> {
@@ -414,6 +506,104 @@ impl<S, D> Layout<S, D> {
         }
     }
 
+    /// Selects top-level modes according to type-level index path `Indices` (`mode![...]`).
+    pub const fn select<Indices>(
+        &self,
+    ) -> Layout<<S as Select<Indices>>::Output, <D as Select<Indices>>::Output>
+    where
+        S: [const] Select<Indices>,
+        D: [const] Select<Indices>,
+    {
+        Layout {
+            shape: self.shape.select(),
+            stride: self.stride.select(),
+        }
+    }
+
+    /// Groups top-level modes in `[B, E)` into a single nested mode (wrapping scalar layouts first).
+    pub const fn group<const B: int, const E: int>(
+        &self,
+    ) -> Layout<<S::Wrapped as Group<B, E>>::Output, <D::Wrapped as Group<B, E>>::Output>
+    where
+        S: [const] Wrap,
+        D: [const] Wrap,
+        S::Wrapped: [const] Group<B, E>,
+        D::Wrapped: [const] Group<B, E>,
+    {
+        Layout {
+            shape: self.shape.wrap().group(),
+            stride: self.stride.wrap().group(),
+        }
+    }
+
+    /// Appends `mode` as a new last top-level mode (CuTe `append(layout, mode)`).
+    pub const fn append<S2, D2>(
+        &self,
+        mode: Layout<S2, D2>,
+    ) -> AppendedLayout<S, D, S2, D2>
+    where
+        S: [const] Wrap,
+        D: [const] Wrap,
+        S2: [const] Item,
+        D2: [const] Item,
+        S::Wrapped: [const] Append<Til<S2, Nil>>,
+        D::Wrapped: [const] Append<Til<D2, Nil>>,
+    {
+        Layout {
+            shape: self.shape.wrap().append(Til(mode.shape, Nil)),
+            stride: self.stride.wrap().append(Til(mode.stride, Nil)),
+        }
+    }
+
+    /// Prepends `mode` as a new first top-level mode (CuTe `prepend(layout, mode)`).
+    pub const fn prepend<S2, D2>(
+        &self,
+        mode: Layout<S2, D2>,
+    ) -> Layout<Til<S2, S::Wrapped>, Til<D2, D::Wrapped>>
+    where
+        S: [const] Wrap,
+        D: [const] Wrap,
+        S2: Copy,
+        D2: Copy,
+    {
+        Layout {
+            shape: Til(mode.shape, self.shape.wrap()),
+            stride: Til(mode.stride, self.stride.wrap()),
+        }
+    }
+
+    /// Keeps the modes of `self` whose counterpart in `proj` is not `..` (CuTe `dice(proj, layout)`).
+    pub const fn dice<P>(
+        &self,
+        proj: &P,
+    ) -> Layout<<P as DiceBy<S>>::Output, <P as DiceBy<D>>::Output>
+    where
+        S: [const] Item,
+        D: [const] Item,
+        P: [const] DiceBy<S> + [const] DiceBy<D>,
+    {
+        Layout {
+            shape: proj.dice_by(&self.shape),
+            stride: proj.dice_by(&self.stride),
+        }
+    }
+
+    /// Transposes a layout of paired modes `((a_0, b_0), ...)` into `((a_0, ...), (b_0, ...))`.
+    pub const fn zip2(self) -> <Self as Zip2>::Output
+    where
+        Self: [const] Zip2,
+    {
+        Zip2::zip2(self)
+    }
+
+    /// Unpacks `index` into a flat top-level coordinate for a compact integer layout.
+    pub const fn get_flat_coord<I>(&self, index: I) -> <Self as GetFlatCoord<I>>::Output
+    where
+        Self: [const] GetFlatCoord<I>,
+    {
+        GetFlatCoord::get_flat_coord(self, index)
+    }
+
     /// Builds a compact layout with the same shape whose strides follow `self.stride`'s order.
     pub const fn make_layout_like(&self) -> <Self as MakeLayoutLike>::Output
     where
@@ -432,6 +622,16 @@ impl<S, D> Layout<S, D> {
     {
         Recast::recast(self, scale)
     }
+
+    /// Rescales this layout from `Old` element units to `New` element units (CuTe `recast_layout<Old, New>`).
+    pub const fn recast_layout<Old, New>(
+        &self,
+    ) -> <Self as Recast<RecastTypeScale<Old, New>>>::Output
+    where
+        Self: [const] Recast<RecastTypeScale<Old, New>>,
+    {
+        recast_layout::<Old, New, Self>(self)
+    }
 }
 
 impl<S: Shape> Layout<S, <S as PrefixProduct>::Stride>
@@ -445,6 +645,34 @@ where
         S: [const] PrefixProduct,
     {
         let stride = prefix_product(shape);
+        Self::new(shape, stride)
+    }
+}
+
+impl<S: Shape> Layout<S, <S as SuffixProduct>::Stride>
+where
+    S: SuffixProduct,
+    <S as SuffixProduct>::Stride: Stride<S>,
+{
+    /// Creates a compact row-major layout from `shape` using `suffix_product(shape)` (CuTe `LayoutRight`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+    /// # #![allow(incomplete_features)]
+    /// use noodle_cute::int_tuple;
+    /// use noodle_cute::integer::Int;
+    /// use noodle_cute::layout::Layout;
+    ///
+    /// let l = Layout::from_shape_right(int_tuple![Int::<3>, (Int::<2>, Int::<4>)]);
+    /// assert_eq!(l.stride, int_tuple![Int::<8>, (Int::<4>, Int::<1>)]);
+    /// ```
+    pub const fn from_shape_right(shape: S) -> Self
+    where
+        S: [const] SuffixProduct,
+    {
+        let stride = suffix_product(shape);
         Self::new(shape, stride)
     }
 }
@@ -463,6 +691,19 @@ impl<S> Layout<S, S> {
         <S as PrefixProduct<Init>>::Stride: Stride<S>,
     {
         let stride = prefix_product_with(shape, init);
+        Layout::new(shape, stride)
+    }
+
+    /// Creates a row-major layout from `shape` seeded by `init` (`suffix_product_with`).
+    pub const fn from_shape_right_with<Init>(
+        shape: S,
+        init: Init,
+    ) -> Layout<S, <S as SuffixProduct<Init>>::Stride>
+    where
+        S: Shape + [const] SuffixProduct<Init>,
+        <S as SuffixProduct<Init>>::Stride: Stride<S>,
+    {
+        let stride = suffix_product_with(shape, init);
         Layout::new(shape, stride)
     }
 }

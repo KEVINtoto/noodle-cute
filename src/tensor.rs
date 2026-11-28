@@ -20,12 +20,14 @@
 //!
 //! - [`mod@accessor`]: Accessor traits ([`LinearOffset`], [`AccessorOffset`], [`Accessor`],
 //!   [`MutableAccessor`], [`IntoLinearAccessor`]) and pure `#![no_std]` backends
-//!   ([`SliceAccessor`], [`CellAccessor`], [`Ptr`], [`ImplicitAccessor`], [`TransformAccessor`],
-//!   [`OutOfBoundsAccessor`]).
+//!   ([`SliceAccessor`], [`CellAccessor`], [`ArrayEngine`], [`Ptr`], [`ImplicitAccessor`],
+//!   [`TransformAccessor`], [`OutOfBoundsAccessor`]).
 //! - [`mod@ops`]: Indexing/slicing ([`TensorIndex`], [`TensorSet`]), layout-algebra
-//!   pass-through, and block tiling ([`local_tile`]).
+//!   pass-through, [`domain_offset`], and partitioning ([`inner_partition`], [`outer_partition`],
+//!   [`local_tile`], [`local_tile_proj`], [`local_partition`], [`local_partition_proj`]).
 //! - **Tensor core**: [`Tensor`], [`IsTensor`], [`is_tensor`], [`identity_tensor`],
-//!   [`IntoTensorLayout`], and [`make_tensor`].
+//!   [`IntoTensorLayout`], [`make_tensor`], [`OwnedStorage`], [`make_owned_tensor`],
+//!   [`make_owned_tensor_with`], [`make_tensor_like`], and [`make_fragment_like`].
 //!
 //! # Usage
 //!
@@ -145,13 +147,17 @@
 use core::fmt::{self, Display, Formatter};
 use core::ops::RangeFull;
 
+use crate::NoodleCuteError;
+use crate::StaticValue;
+use crate::algebra::common::FragmentLike;
 use crate::basis::{
     BasisCombination, BasisTerm, BasisTuple, MakeBasisLikeOutput, MakeBasisLikeTopProfile,
-    make_basis_like,
 };
 use crate::f2::F2;
 use crate::integer::{IS_NON_NEG, Int, add, int};
-use crate::layout::{Coprofile, IsLayout, Layout};
+use crate::layout::{
+    Coprofile, IsLayout, Layout, MakeLayoutLike, OffsetAndSlice, make_identity_layout,
+};
 use crate::shape::{Shape, ValidShapeExtent};
 use crate::stride::{Coshape, LinearBounds, PrefixProduct, Stride};
 use crate::tuple::{Get, GetOutput, Item, Nil, Til, Tuple};
@@ -391,6 +397,88 @@ impl<'a, T, S, D> Tensor<CellAccessor<'a, T>, Layout<S, D>> {
     }
 }
 
+impl<T, const N: usize, S, D> Tensor<ArrayEngine<T, N>, Layout<S, D>> {
+    /// Borrows a read-only view tensor backed by [`SliceAccessor`] (zero-copy, `const`, zero `unsafe`).
+    pub const fn view(&self) -> Tensor<SliceAccessor<'_, T>, Layout<S, D>>
+    where
+        S: Copy,
+        D: Copy,
+    {
+        Tensor {
+            accessor: self.accessor.slice_accessor(),
+            layout: self.layout,
+        }
+    }
+
+    /// Borrows a safe, `Copy` read/write view tensor backed by [`CellAccessor`] (zero `unsafe`).
+    pub fn view_mut(&mut self) -> Tensor<CellAccessor<'_, T>, Layout<S, D>>
+    where
+        S: Copy,
+        D: Copy,
+    {
+        Tensor {
+            accessor: self.accessor.cell_accessor(),
+            layout: self.layout,
+        }
+    }
+
+    /// Borrows the owned backing array as an immutable slice.
+    pub const fn as_slice(&self) -> &[T] {
+        self.accessor.as_slice()
+    }
+
+    /// Borrows the owned backing array as a mutable slice.
+    pub const fn as_mut_slice(&mut self) -> &mut [T] {
+        self.accessor.as_mut_slice()
+    }
+
+    /// Borrows the element at complete coordinate `coord` with bounds checking.
+    pub const fn get_ref<C>(&self, coord: C) -> &T
+    where
+        S: [const] Shape,
+        D: [const] Stride<S>,
+        Layout<S, D>: [const] OffsetAndSlice<C, SlicedShape = Nil, SlicedStride = Nil>,
+        <Layout<S, D> as OffsetAndSlice<C>>::Offset: [const] LinearOffset,
+    {
+        let (offset, _) = self.layout.offset_and_slice(coord);
+        self.accessor.get_ref(offset)
+    }
+
+    /// Mutably borrows the element at complete coordinate `coord` with bounds checking.
+    pub const fn get_mut<C>(&mut self, coord: C) -> &mut T
+    where
+        S: [const] Shape,
+        D: [const] Stride<S>,
+        Layout<S, D>: [const] OffsetAndSlice<C, SlicedShape = Nil, SlicedStride = Nil>,
+        <Layout<S, D> as OffsetAndSlice<C>>::Offset: [const] LinearOffset,
+    {
+        let (offset, _) = self.layout.offset_and_slice(coord);
+        self.accessor.get_mut(offset)
+    }
+}
+
+const impl<A: Copy, S, D> MakeLayoutLike for Tensor<A, Layout<S, D>>
+where
+    Layout<S, D>: [const] MakeLayoutLike,
+{
+    type Output = <Layout<S, D> as MakeLayoutLike>::Output;
+
+    fn make_layout_like(&self) -> Self::Output {
+        self.layout.make_layout_like()
+    }
+}
+
+const impl<A: Copy, S, D> FragmentLike for Tensor<A, Layout<S, D>>
+where
+    Layout<S, D>: [const] FragmentLike,
+{
+    type Output = <Layout<S, D> as FragmentLike>::Output;
+
+    fn make_fragment_like(&self) -> Self::Output {
+        self.layout.make_fragment_like()
+    }
+}
+
 const impl<A1, L1, A2, L2> PartialEq<Tensor<A2, L2>> for Tensor<A1, L1>
 where
     A1: [const] PartialEq<A2>,
@@ -442,8 +530,7 @@ where
     S::Profile: [const] MakeBasisLikeTopProfile,
     MakeBasisLikeOutput<S>: Stride<S>,
 {
-    let stride = make_basis_like(shape);
-    Tensor::new(ImplicitAccessor::new(Int::<0>), Layout::new(shape, stride))
+    Tensor::new(ImplicitAccessor::new(Int::<0>), make_identity_layout(shape))
 }
 
 /// Promotes a [`Layout`] or [`Shape`] into a [`Layout`] for tensor construction.
@@ -579,10 +666,259 @@ where
     if let Some((min_off, max_off)) = layout.linear_bounds() {
         let lo = add(base_offset, min_off);
         let hi = add(base_offset, max_off);
-        assert!(
+        NoodleCuteError::AddressOutOfBounds.check_with(
             lo >= 0 && (hi as usize) < total_len,
-            "layout codomain exceeds backing storage bounds"
+            "layout codomain exceeds backing storage bounds",
         );
     }
     Tensor::new(accessor, layout)
+}
+
+// ------------------------------------------------------------------
+// Owned register / stack tensors (make_owned_tensor, make_tensor_like, make_fragment_like)
+// ------------------------------------------------------------------
+
+/// Static backing element capacity for an owning [`ArrayEngine`] over `Layout<S, D>`.
+///
+/// Computes exact reachable linear bounds `[min_offset, max_offset]` at compile time:
+/// - Empty domains (`linear_bounds() == None`) allocate `0` elements.
+/// - Non-empty domains require `min_offset >= 0` (rejecting negative reachable offsets at
+///   compile time) and allocate `(max_offset + 1) as usize` elements.
+pub const OWNED_STORAGE_LEN<S, D>: usize = match S::VALUE.linear_bounds(D::VALUE) {
+    None => 0,
+    Some((min_off, max_off)) => {
+        NoodleCuteError::AddressOutOfBounds.check_with(
+            min_off >= 0,
+            "owned tensor layout reaches negative offsets",
+        );
+        add(max_off, 1) as usize
+    }
+} where
+    S: const Shape + StaticValue + const LinearBounds<D>,
+    D: Stride<S> + StaticValue;
+
+/// Static layout capable of sizing default-initialized owned storage ([`ArrayEngine`]).
+///
+/// Implemented for static linear [`Layout<S, D>`] types whose reachable offsets are
+/// non-negative (`min_offset >= 0`). Dynamic layouts, coordinate-basis layouts, and
+/// layouts reaching negative offsets fail at compile time.
+#[diagnostic::on_unimplemented(
+    message = "cannot allocate static owned storage for `{Self}`",
+    label = "layout does not have statically sized non-negative storage",
+    note = "owned tensors require a static linear layout with non-negative reachable offsets"
+)]
+pub trait OwnedStorage<T>: Copy {
+    /// Sized owning engine (`ArrayEngine<T, N>`).
+    type Engine: AccessorBase;
+
+    /// Allocates default-initialized stack storage for `Self`.
+    fn storage() -> Self::Engine;
+}
+
+impl<T: Copy + Default, S, D> OwnedStorage<T> for Layout<S, D>
+where
+    S: const Shape + StaticValue + const LinearBounds<D>,
+    D: Stride<S> + StaticValue,
+{
+    type Engine = ArrayEngine<T, { OWNED_STORAGE_LEN::<S, D> }>;
+
+    fn storage() -> Self::Engine {
+        ArrayEngine::default()
+    }
+}
+
+/// Static layout capable of sizing `const`-initialized owned storage filled with a value.
+pub const trait OwnedStorageFilled<T: Copy>: Copy {
+    /// Sized owning engine (`ArrayEngine<T, N>`).
+    type Engine: AccessorBase;
+
+    /// Allocates stack storage filled with copies of `value`.
+    fn storage_filled(value: T) -> Self::Engine;
+}
+
+const impl<T: Copy, S, D> OwnedStorageFilled<T> for Layout<S, D>
+where
+    S: const Shape + StaticValue + const LinearBounds<D>,
+    D: Stride<S> + StaticValue,
+{
+    type Engine = ArrayEngine<T, { OWNED_STORAGE_LEN::<S, D> }>;
+
+    fn storage_filled(value: T) -> Self::Engine {
+        ArrayEngine::splat(value)
+    }
+}
+
+/// Owning [`Tensor`] type returned by [`make_owned_tensor`].
+pub type OwnedTensor<T, L> = Tensor<
+    <Layout<<L as IntoTensorLayout>::Shape, <L as IntoTensorLayout>::Stride> as OwnedStorage<T>>::Engine,
+    Layout<<L as IntoTensorLayout>::Shape, <L as IntoTensorLayout>::Stride>,
+>;
+
+/// Owning [`Tensor`] type returned by [`make_owned_tensor_with`].
+pub type OwnedTensorFilled<T, L> = Tensor<
+    <Layout<<L as IntoTensorLayout>::Shape, <L as IntoTensorLayout>::Stride> as OwnedStorageFilled<T>>::Engine,
+    Layout<<L as IntoTensorLayout>::Shape, <L as IntoTensorLayout>::Stride>,
+>;
+
+/// Constructs an owning [`Tensor`] backed by a 16-byte-aligned [`ArrayEngine`] sized by
+/// the static layout's codomain upper bound `max_offset + 1` (CuTe `make_tensor<T>(layout)`).
+///
+/// Accepts either a static [`Layout`] or a static [`Shape`] (promoted to column-major via
+/// [`IntoTensorLayout`]).
+///
+/// # Examples
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::layout::Layout;
+/// use noodle_cute::tensor::{ArrayEngine, make_owned_tensor};
+///
+/// let layout = Layout::new(int_tuple![Int::<2>, Int::<3>], int_tuple![Int::<1>, Int::<4>]);
+/// let mut owned = make_owned_tensor::<i32, _>(layout);
+/// let _: &ArrayEngine<i32, 10> = &owned.accessor;
+/// *owned.get_mut(int_tuple![1i32, 2i32]) = 7;
+/// assert_eq!(owned(5i32), 7);
+/// assert_eq!(owned.as_slice()[9], 7);
+/// ```
+///
+/// Layouts reaching negative offsets fail at compile time:
+///
+/// ```compile_fail,E0080
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::layout::Layout;
+/// use noodle_cute::tensor::make_owned_tensor;
+///
+/// let _ = make_owned_tensor::<i32, _>(Layout::new(Int::<4>, Int::<-1>));
+/// ```
+///
+/// Dynamic layouts fail at compile time:
+///
+/// ```compile_fail,E0277
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::layout::Layout;
+/// use noodle_cute::tensor::make_owned_tensor;
+///
+/// let _ = make_owned_tensor::<i32, _>(Layout::new(4i32, Int::<1>));
+/// ```
+///
+/// Slicing an owning tensor directly by value is rejected at compile time (borrow via
+/// [`Tensor::view`] or [`Tensor::view_mut`] first):
+///
+/// ```compile_fail,E0277
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::tensor::make_owned_tensor;
+///
+/// let owned = make_owned_tensor::<i32, _>(int_tuple![Int::<2>, Int::<3>]);
+/// let _ = owned(.., 1i32);
+/// ```
+pub fn make_owned_tensor<T, L>(layout: L) -> OwnedTensor<T, L>
+where
+    L: IntoTensorLayout,
+    Layout<L::Shape, L::Stride>: OwnedStorage<T>,
+{
+    let layout = layout.into_tensor_layout();
+    Tensor {
+        accessor: <Layout<L::Shape, L::Stride> as OwnedStorage<T>>::storage(),
+        layout,
+    }
+}
+
+/// `const`-evaluable variant of [`make_owned_tensor`] filling the backing [`ArrayEngine`]
+/// with copies of `value`.
+pub const fn make_owned_tensor_with<T: Copy, L>(layout: L, value: T) -> OwnedTensorFilled<T, L>
+where
+    L: [const] IntoTensorLayout,
+    Layout<L::Shape, L::Stride>: [const] OwnedStorageFilled<T>,
+{
+    let layout = layout.into_tensor_layout();
+    Tensor {
+        accessor: <Layout<L::Shape, L::Stride> as OwnedStorageFilled<T>>::storage_filled(value),
+        layout,
+    }
+}
+
+/// Constructs an owning [`Tensor`] with the shape and compact stride order of `like`
+/// (accepts either a [`Layout`] or a [`Tensor`]): CuTe `make_tensor_like<T>`.
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::layout::Layout;
+/// use noodle_cute::tensor::{ArrayEngine, make_tensor_like};
+///
+/// let reference = Layout::new(
+///     int_tuple![Int::<2>, Int::<2>, Int::<2>, Int::<2>],
+///     int_tuple![Int::<0>, Int::<2>, Int::<4>, Int::<1>],
+/// );
+/// let like = make_tensor_like::<f32, _>(&reference);
+/// assert_eq!(like.layout, reference);
+/// let _: &ArrayEngine<f32, 8> = &like.accessor;
+/// ```
+pub fn make_tensor_like<T, L>(
+    like: &L,
+) -> Tensor<<L::Output as OwnedStorage<T>>::Engine, L::Output>
+where
+    L: MakeLayoutLike,
+    L::Output: OwnedStorage<T>,
+{
+    let layout = like.make_layout_like();
+    Tensor {
+        accessor: <L::Output as OwnedStorage<T>>::storage(),
+        layout,
+    }
+}
+
+/// Constructs an owning register fragment [`Tensor`] shaped like `like` (accepts either a
+/// [`Layout`] or a [`Tensor`]): CuTe `make_fragment_like<T>`.
+///
+/// Uses [`crate::algebra::make_fragment_like`] to build the compact fragment layout (mode 0
+/// left-major keeping static zeros, remaining modes ordered by stride via `tiled_product`)
+/// and backs it with a 16-byte-aligned [`ArrayEngine`].
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::layout::Layout;
+/// use noodle_cute::tensor::{ArrayEngine, make_fragment_like};
+///
+/// let partition = Layout::new(
+///     int_tuple![(Int::<2>, Int::<2>), Int::<4>, Int::<2>],
+///     int_tuple![(Int::<0>, Int::<1>), Int::<64>, Int::<8>],
+/// );
+/// let frag = make_fragment_like::<f32, _>(&partition);
+/// assert_eq!(
+///     frag.layout,
+///     Layout::new(
+///         int_tuple![(Int::<2>, Int::<2>), Int::<4>, Int::<2>],
+///         int_tuple![(Int::<0>, Int::<1>), Int::<4>, Int::<2>],
+///     )
+/// );
+/// let _: &ArrayEngine<f32, 16> = &frag.accessor;
+/// ```
+pub fn make_fragment_like<T, L>(
+    like: &L,
+) -> Tensor<<L::Output as OwnedStorage<T>>::Engine, L::Output>
+where
+    L: FragmentLike,
+    L::Output: OwnedStorage<T>,
+{
+    let layout = like.make_fragment_like();
+    Tensor {
+        accessor: <L::Output as OwnedStorage<T>>::storage(),
+        layout,
+    }
 }

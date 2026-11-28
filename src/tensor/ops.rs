@@ -1,15 +1,25 @@
-//! Tensor indexing, slicing, layout-algebra pass-through, and [`local_tile`].
+//! Tensor indexing, slicing, layout-algebra pass-through, [`domain_offset`], and partitioning.
 //!
 //! # Main Interfaces
 //!
 //! - **Indexing & slicing**: [`TensorIndex`] (`Tensor::at` and `const` `Fn` call syntax for
 //!   1–6 arguments) and [`TensorSet`] (`Tensor::set`).
 //! - **Layout-algebra pass-through**: `Tensor` implementations of
-//!   [`CoalesceTarget`], [`CoalesceExtended`], [`Composition`], [`LogicalDivide`],
-//!   [`LogicalDivideAt`], and [`IntoGcdShape`] (with [`ZippedDivide`] and [`ZippedDivideAt`]
-//!   inherited automatically via blanket implementations).
-//! - **Block tiling**: [`local_tile`] (`zipped_divide(tensor, tiler).at(tuple!(.., coord))`
-//!   with compile-time [`WeaklyCongruent`] grid validation).
+//!   [`CoalesceTarget`], [`CoalesceExtended`], [`Composition`], [`ComposeTile`],
+//!   [`LogicalDivide`], [`LogicalDivideAt`], and [`IntoGcdShape`] (with [`ZippedDivide`],
+//!   [`ZippedDivideAt`], [`TiledDivide`], and
+//!   [`FlatDivide`] inherited automatically via blanket impls).
+//! - **Origin shift**: [`domain_offset`] / [`Tensor::domain_offset`].
+//! - **Partitioning & tiling**:
+//!   - [`local_tile`] / [`Tensor::local_tile`] (`zipped_divide(tensor, tiler).at(tuple!(.., coord))`,
+//!     keeping mode 0 grouped as `Tile` per PyCuTe);
+//!   - [`inner_partition`] / [`Tensor::inner_partition`] (unpacks `Tile` modes and pads shorter
+//!     tuple `coord` with `..` per CuTe `tensor_impl.hpp`);
+//!   - [`outer_partition`] / [`Tensor::outer_partition`] (slices `Tile` at `coord` and unpacks
+//!     `Rest` modes);
+//!   - [`local_tile_proj`] / [`Tensor::local_tile_proj`] (`dice_by` projection + [`inner_partition`]);
+//!   - [`local_partition`] / [`Tensor::local_partition`] and [`local_partition_proj`] /
+//!     [`Tensor::local_partition_proj`] (thread-layout partitioning via [`outer_partition`]).
 //!
 //! # Notes
 //!
@@ -22,15 +32,19 @@
 use core::ops::RangeFull;
 
 use crate::algebra::coalesce::{CoalesceExtended, CoalesceProfile, CoalesceTarget};
-use crate::algebra::composition::Composition;
+use crate::algebra::composition::{ComposeTile, Composition};
 use crate::algebra::greatest_common_domain::IntoGcdShape;
 use crate::algebra::logical_divide::{
-    LogicalDivide, LogicalDivideAt, ZippedDivide, ZippedDivideAt,
+    FlatDivide, LogicalDivide, LogicalDivideAt, RegroupFlat, RegroupTiled, TiledDivide,
+    ZippedDivide, ZippedDivideAt,
 };
-use crate::layout::{Layout, OffsetAndSlice};
+use crate::layout::{GetFlatCoord, Layout, OffsetAndSlice};
 use crate::shape::Shape;
 use crate::stride::Stride;
-use crate::tuple::{Get, GetOutput, Item, Nil, Til, Tuple, WeaklyCongruent, Wrap};
+use crate::tuple::{
+    DiceBy, Get, GetOutput, Item, Nil, PadCoord, ProductEach, RepeatModes, Til, Tuple,
+    WeaklyCongruent, Wrap, dice_by, product_each,
+};
 
 use super::Tensor;
 use super::accessor::{Accessor, AccessorOffset, MutableAccessor};
@@ -332,6 +346,48 @@ where
     }
 }
 
+const impl<A: Copy, S: Copy, D: Copy, T> ComposeTile<T> for Tensor<A, Layout<S, D>>
+where
+    Layout<S, D>: [const] ComposeTile<T>,
+{
+    type Output = Tensor<A, <Layout<S, D> as ComposeTile<T>>::Output>;
+
+    fn compose_tile(self, tile: T) -> Self::Output {
+        Tensor {
+            accessor: self.accessor,
+            layout: self.layout.compose_tile(tile),
+        }
+    }
+}
+
+const impl<A: Copy, S: Copy, D: Copy> RegroupTiled for Tensor<A, Layout<S, D>>
+where
+    Layout<S, D>: [const] RegroupTiled,
+{
+    type Output = Tensor<A, <Layout<S, D> as RegroupTiled>::Output>;
+
+    fn regroup_tiled(self) -> Self::Output {
+        Tensor {
+            accessor: self.accessor,
+            layout: self.layout.regroup_tiled(),
+        }
+    }
+}
+
+const impl<A: Copy, S: Copy, D: Copy> RegroupFlat for Tensor<A, Layout<S, D>>
+where
+    Layout<S, D>: [const] RegroupFlat,
+{
+    type Output = Tensor<A, <Layout<S, D> as RegroupFlat>::Output>;
+
+    fn regroup_flat(self) -> Self::Output {
+        Tensor {
+            accessor: self.accessor,
+            layout: self.layout.regroup_flat(),
+        }
+    }
+}
+
 const impl<A: Copy, S: Copy, D: Copy, B> LogicalDivide<B> for Tensor<A, Layout<S, D>>
 where
     Layout<S, D>: [const] LogicalDivide<B>,
@@ -441,6 +497,14 @@ impl<A, L> Tensor<A, L> {
         Composition::composition(self, b)
     }
 
+    /// Composes the tensor's layout mode by mode with tuple tile `tile`, keeping `..` modes.
+    pub const fn compose_tile<T>(self, tile: T) -> <Self as ComposeTile<T>>::Output
+    where
+        Self: [const] ComposeTile<T>,
+    {
+        ComposeTile::compose_tile(self, tile)
+    }
+
     /// Logically divides the tensor's layout by `b` while keeping its accessor unchanged.
     pub const fn logical_divide<B>(self, b: B) -> <Self as LogicalDivide<B>>::Output
     where
@@ -469,6 +533,22 @@ impl<A, L> Tensor<A, L> {
         ZippedDivide::zipped_divide(self, b)
     }
 
+    /// Divides the tensor into `(Tile, Rest_0, ...)` while keeping its accessor unchanged.
+    pub const fn tiled_divide<B>(self, b: B) -> <Self as TiledDivide<B>>::Output
+    where
+        Self: [const] TiledDivide<B>,
+    {
+        TiledDivide::tiled_divide(self, b)
+    }
+
+    /// Divides the tensor into `(Tile_0, ..., Rest_0, ...)` while keeping its accessor unchanged.
+    pub const fn flat_divide<B>(self, b: B) -> <Self as FlatDivide<B>>::Output
+    where
+        Self: [const] FlatDivide<B>,
+    {
+        FlatDivide::flat_divide(self, b)
+    }
+
     /// Promotes `b` and zipped-divides only the sub-mode at `Path` (`mode![...]`).
     pub const fn zipped_divide_at<Path, B>(self, b: B) -> <Self as ZippedDivideAt<B, Path>>::Output
     where
@@ -478,9 +558,477 @@ impl<A, L> Tensor<A, L> {
     }
 }
 
+impl<A, S, D> Tensor<A, Layout<S, D>> {
+    /// Moves the tensor's origin to complete coordinate `coord`, keeping `self.layout` unchanged
+    /// (CuTe `domain_offset`).
+    pub const fn domain_offset<C>(self, coord: C) -> DomainOffsetOutput<A, S, D, C>
+    where
+        S: [const] Shape,
+        D: [const] Stride<S>,
+        Layout<S, D>: [const] OffsetAndSlice<C, SlicedShape = Nil, SlicedStride = Nil>,
+        A: [const] AccessorOffset<<Layout<S, D> as OffsetAndSlice<C>>::Offset>,
+    {
+        domain_offset(self, coord)
+    }
+
+    /// Returns the tile of `self` at `coord` (forwarding to [`local_tile`]).
+    pub const fn local_tile<B, C, TS, TD>(self, tiler: B, coord: C) -> LocalTileOutput<A, TS, TD, C>
+    where
+        A: Copy,
+        S: Shape,
+        D: Stride<S>,
+        Self: [const] ZippedDivide<B, Output = Tensor<A, Layout<TS, TD>>>,
+        TS: Shape + [const] Wrap,
+        TD: Stride<TS>,
+        TS::Wrapped: [const] Get<1>,
+        C: Item + WeaklyCongruent<GetOutput<TS::Wrapped, 1>>,
+        Tensor<A, Layout<TS, TD>>: [const] TensorIndex<LocalTileCoord<C>>,
+    {
+        local_tile(self, tiler, coord)
+    }
+
+    /// CuTe `inner_partition(self, tiler, coord)`: selects tile `coord` with unpacked tile modes
+    /// and `..`-padded trailing rest modes.
+    pub const fn inner_partition<B, C, TS, TD>(
+        self,
+        tiler: B,
+        coord: C,
+    ) -> InnerPartitionOutput<A, TS, TD, C>
+    where
+        A: Copy,
+        S: Shape,
+        D: Stride<S>,
+        Self: [const] ZippedDivide<B, Output = Tensor<A, Layout<TS, TD>>>,
+        TS: Shape + [const] InnerCoord<C>,
+        TD: Stride<TS>,
+        Tensor<A, Layout<TS, TD>>: [const] TensorIndex<<TS as InnerCoord<C>>::Output>,
+    {
+        inner_partition(self, tiler, coord)
+    }
+
+    /// CuTe `outer_partition(self, tiler, coord)`: selects element `coord` of every tile with
+    /// unpacked rest modes.
+    pub const fn outer_partition<B, C, TS, TD>(
+        self,
+        tiler: B,
+        coord: C,
+    ) -> OuterPartitionOutput<A, TS, TD, C>
+    where
+        A: Copy,
+        S: Shape,
+        D: Stride<S>,
+        Self: [const] ZippedDivide<B, Output = Tensor<A, Layout<TS, TD>>>,
+        TS: Shape + [const] OuterCoord<C>,
+        TD: Stride<TS>,
+        Tensor<A, Layout<TS, TD>>: [const] TensorIndex<<TS as OuterCoord<C>>::Output>,
+    {
+        outer_partition(self, tiler, coord)
+    }
+
+    /// CuTe `local_tile(self, tiler, coord, proj)`: dices `tiler` and `coord` with `proj`, then
+    /// delegates to [`inner_partition`].
+    pub const fn local_tile_proj<B, C, P, TS, TD>(
+        self,
+        tiler: B,
+        coord: C,
+        proj: P,
+    ) -> InnerPartitionOutput<A, TS, TD, <P as DiceBy<C>>::Output>
+    where
+        A: Copy,
+        S: Shape,
+        D: Stride<S>,
+        B: [const] Item,
+        C: [const] Item,
+        P: [const] DiceBy<B> + [const] DiceBy<C>,
+        Self: [const] ZippedDivide<<P as DiceBy<B>>::Output, Output = Tensor<A, Layout<TS, TD>>>,
+        TS: Shape + [const] InnerCoord<<P as DiceBy<C>>::Output>,
+        TD: Stride<TS>,
+        Tensor<A, Layout<TS, TD>>:
+            [const] TensorIndex<<TS as InnerCoord<<P as DiceBy<C>>::Output>>::Output>,
+    {
+        local_tile_proj(self, tiler, coord, proj)
+    }
+
+    /// CuTe `local_partition(self, thr_layout, index)`: returns the strided share of thread `index`.
+    pub const fn local_partition<LS, LD, X, TS, TD>(
+        self,
+        thr_layout: &Layout<LS, LD>,
+        index: X,
+    ) -> LocalPartitionOutput<A, LS, LD, X, TS, TD>
+    where
+        A: Copy,
+        S: Shape,
+        D: Stride<S>,
+        LS: Shape + [const] ProductEach,
+        LD: Stride<LS>,
+        Layout<LS, LD>: [const] GetFlatCoord<X>,
+        Self: [const] ZippedDivide<
+                <LS as ProductEach>::Output,
+                Output = Tensor<A, Layout<TS, TD>>,
+            >,
+        TS: Shape + [const] OuterCoord<<Layout<LS, LD> as GetFlatCoord<X>>::Output>,
+        TD: Stride<TS>,
+        Tensor<A, Layout<TS, TD>>:
+            [const] TensorIndex<<TS as OuterCoord<<Layout<LS, LD> as GetFlatCoord<X>>::Output>>::Output>,
+    {
+        local_partition(self, thr_layout, index)
+    }
+
+    /// CuTe `local_partition(self, thr_layout, index, proj)`: dices `thr_layout` with `proj`, then
+    /// delegates to [`local_partition`].
+    pub const fn local_partition_proj<LS, LD, X, P, TS, TD>(
+        self,
+        thr_layout: &Layout<LS, LD>,
+        index: X,
+        proj: P,
+    ) -> LocalPartitionOutput<A, <P as DiceBy<LS>>::Output, <P as DiceBy<LD>>::Output, X, TS, TD>
+    where
+        A: Copy,
+        S: Shape,
+        D: Stride<S>,
+        LS: [const] Item,
+        LD: [const] Item,
+        P: [const] DiceBy<LS> + [const] DiceBy<LD>,
+        <P as DiceBy<LS>>::Output: Shape + [const] ProductEach,
+        <P as DiceBy<LD>>::Output: Stride<<P as DiceBy<LS>>::Output>,
+        Layout<<P as DiceBy<LS>>::Output, <P as DiceBy<LD>>::Output>: [const] GetFlatCoord<X>,
+        Self: [const] ZippedDivide<
+                <<P as DiceBy<LS>>::Output as ProductEach>::Output,
+                Output = Tensor<A, Layout<TS, TD>>,
+            >,
+        TS: Shape
+            + [const] OuterCoord<
+                <Layout<<P as DiceBy<LS>>::Output, <P as DiceBy<LD>>::Output> as GetFlatCoord<X>>::Output,
+            >,
+        TD: Stride<TS>,
+        Tensor<A, Layout<TS, TD>>: [const] TensorIndex<
+                <TS as OuterCoord<
+                    <Layout<<P as DiceBy<LS>>::Output, <P as DiceBy<LD>>::Output> as GetFlatCoord<X>>::Output,
+                >>::Output,
+            >,
+    {
+        local_partition_proj(self, thr_layout, index, proj)
+    }
+}
+
 // ------------------------------------------------------------------
-// local_tile
+// domain_offset
 // ------------------------------------------------------------------
+
+/// Resulting shifted [`Tensor`] type of [`domain_offset`].
+pub type DomainOffsetOutput<A, S, D, C> =
+    Tensor<<A as AccessorOffset<<Layout<S, D> as OffsetAndSlice<C>>::Offset>>::Output, Layout<S, D>>;
+
+/// Shifts `tensor`'s accessor origin by `tensor.layout(coord)` while keeping `tensor.layout`
+/// unchanged (CuTe `domain_offset`).
+///
+/// Requires a complete coordinate `coord` (coordinates containing `..` fail at compile time).
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::tensor::{domain_offset, make_tensor};
+///
+/// let data: [i32; 12] = core::array::from_fn(|i| i as i32);
+/// let t = make_tensor(&data, int_tuple![Int::<3>, Int::<4>]);
+/// let shifted = domain_offset(t, int_tuple![1i32, 1i32]);
+/// assert_eq!(shifted.layout, t.layout);
+/// assert_eq!(shifted(0i32, 0i32), 4);
+/// assert_eq!(shifted(1i32, 2i32), 11);
+/// ```
+///
+/// Partial slicing coordinates containing `..` fail at compile time:
+///
+/// ```compile_fail,E0271
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::tensor::{domain_offset, make_tensor};
+/// use noodle_cute::{int_tuple, tuple};
+///
+/// let data = [0i32; 12];
+/// let t = make_tensor(&data, int_tuple![Int::<3>, Int::<4>]);
+/// let _ = domain_offset(t, tuple![1i32, ..]);
+/// ```
+pub const fn domain_offset<A, S, D, C>(
+    tensor: Tensor<A, Layout<S, D>>,
+    coord: C,
+) -> DomainOffsetOutput<A, S, D, C>
+where
+    S: [const] Shape,
+    D: [const] Stride<S>,
+    Layout<S, D>: [const] OffsetAndSlice<C, SlicedShape = Nil, SlicedStride = Nil>,
+    A: [const] AccessorOffset<<Layout<S, D> as OffsetAndSlice<C>>::Offset>,
+{
+    let (offset, _) = tensor.layout.offset_and_slice(coord);
+    Tensor {
+        accessor: tensor.accessor.offset(offset),
+        layout: tensor.layout,
+    }
+}
+
+// ------------------------------------------------------------------
+// Partitioning: inner_partition, outer_partition, local_tile, local_tile_proj,
+//               local_partition, local_partition_proj
+// ------------------------------------------------------------------
+
+/// Constructs the slicing coordinate `(repeat_modes(.., Tile), pad_coord(coord, Rest))` for
+/// [`inner_partition`].
+#[doc(hidden)]
+pub const trait InnerCoord<C>: Copy {
+    type Output: Copy;
+    fn inner_coord(coord: C) -> Self::Output;
+}
+
+const impl<S0, S1, C> InnerCoord<C> for Til<S0, Til<S1, Nil>>
+where
+    S0: [const] RepeatModes<RangeFull>,
+    S1: [const] Item,
+    C: [const] PadCoord<S1>,
+{
+    type Output = Til<S0::Output, Til<C::Output, Nil>>;
+
+    fn inner_coord(coord: C) -> Self::Output {
+        Til(S0::repeat_modes(..), Til(coord.pad_coord(), Nil))
+    }
+}
+
+/// Constructs the slicing coordinate `(pad_coord(coord, Tile), repeat_modes(.., Rest))` for
+/// [`outer_partition`].
+#[doc(hidden)]
+pub const trait OuterCoord<C>: Copy {
+    type Output: Copy;
+    fn outer_coord(coord: C) -> Self::Output;
+}
+
+const impl<S0, S1, C> OuterCoord<C> for Til<S0, Til<S1, Nil>>
+where
+    S0: [const] Item,
+    S1: [const] RepeatModes<RangeFull>,
+    C: [const] PadCoord<S0>,
+{
+    type Output = Til<C::Output, Til<S1::Output, Nil>>;
+
+    fn outer_coord(coord: C) -> Self::Output {
+        Til(coord.pad_coord(), Til(S1::repeat_modes(..), Nil))
+    }
+}
+
+/// Output sub-[`Tensor`] type returned by [`inner_partition`] and [`local_tile_proj`].
+pub type InnerPartitionOutput<A, TS, TD, C> =
+    <Tensor<A, Layout<TS, TD>> as TensorIndex<<TS as InnerCoord<C>>::Output>>::Output;
+
+/// Output sub-[`Tensor`] type returned by [`outer_partition`].
+pub type OuterPartitionOutput<A, TS, TD, C> =
+    <Tensor<A, Layout<TS, TD>> as TensorIndex<<TS as OuterCoord<C>>::Output>>::Output;
+
+/// Output sub-[`Tensor`] type returned by [`local_partition`] and [`local_partition_proj`].
+pub type LocalPartitionOutput<A, LS, LD, X, TS, TD> =
+    OuterPartitionOutput<A, TS, TD, <Layout<LS, LD> as GetFlatCoord<X>>::Output>;
+
+/// CuTe `inner_partition(tensor, tiler, coord)`: selects tile `coord` with unpacked tile modes.
+///
+/// Splits `tensor` via [`zipped_divide`](crate::algebra::zipped_divide) into `(Tile, Rest)`
+/// and slices with `(repeat_modes(.., Tile), pad_coord(coord, Rest))`:
+/// - `Tile`'s top-level modes are unpacked directly into the output's leading modes;
+/// - a shorter tuple `coord` is padded with `..` so unspecified trailing rest modes are kept;
+/// - a scalar integer `coord` indexes the entire `Rest` mode colexicographically.
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::tensor::{inner_partition, make_tensor};
+///
+/// let data: [i32; 96] = core::array::from_fn(|i| i as i32);
+/// let t = make_tensor(&data, int_tuple![12i32, 8i32]);
+/// let tile = inner_partition(t, int_tuple![Int::<4>, Int::<2>], int_tuple![2i32, 3i32]);
+/// assert_eq!(tile.shape(), int_tuple![Int::<4>, Int::<2>]);
+/// assert_eq!(tile(1i32, 1i32), 9 + 7 * 12);
+/// ```
+pub const fn inner_partition<A, S, D, B, C, TS, TD>(
+    tensor: Tensor<A, Layout<S, D>>,
+    tiler: B,
+    coord: C,
+) -> InnerPartitionOutput<A, TS, TD, C>
+where
+    A: Copy,
+    S: Shape,
+    D: Stride<S>,
+    Tensor<A, Layout<S, D>>: [const] ZippedDivide<B, Output = Tensor<A, Layout<TS, TD>>>,
+    TS: Shape + [const] InnerCoord<C>,
+    TD: Stride<TS>,
+    Tensor<A, Layout<TS, TD>>: [const] TensorIndex<<TS as InnerCoord<C>>::Output>,
+{
+    let tiled = tensor.zipped_divide(tiler);
+    tiled.at(<TS as InnerCoord<C>>::inner_coord(coord))
+}
+
+/// CuTe `outer_partition(tensor, tiler, coord)`: selects element `coord` of every tile with
+/// unpacked rest modes.
+///
+/// Splits `tensor` via [`zipped_divide`](crate::algebra::zipped_divide) into `(Tile, Rest)`
+/// and slices with `(pad_coord(coord, Tile), repeat_modes(.., Rest))`.
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::tensor::{make_tensor, outer_partition};
+///
+/// let data: [i32; 96] = core::array::from_fn(|i| i as i32);
+/// let t = make_tensor(&data, int_tuple![12i32, 8i32]);
+/// let spread = outer_partition(t, int_tuple![Int::<4>, Int::<2>], int_tuple![1i32, 1i32]);
+/// assert_eq!(spread.shape(), int_tuple![3i32, 4i32]);
+/// assert_eq!(spread(2i32, 3i32), 9 + 7 * 12);
+/// ```
+pub const fn outer_partition<A, S, D, B, C, TS, TD>(
+    tensor: Tensor<A, Layout<S, D>>,
+    tiler: B,
+    coord: C,
+) -> OuterPartitionOutput<A, TS, TD, C>
+where
+    A: Copy,
+    S: Shape,
+    D: Stride<S>,
+    Tensor<A, Layout<S, D>>: [const] ZippedDivide<B, Output = Tensor<A, Layout<TS, TD>>>,
+    TS: Shape + [const] OuterCoord<C>,
+    TD: Stride<TS>,
+    Tensor<A, Layout<TS, TD>>: [const] TensorIndex<<TS as OuterCoord<C>>::Output>,
+{
+    let tiled = tensor.zipped_divide(tiler);
+    tiled.at(<TS as OuterCoord<C>>::outer_coord(coord))
+}
+
+/// CuTe `local_tile(tensor, tiler, coord, proj)`: projects `tiler` and `coord` with
+/// [`dice_by`] (`..` drops a mode, any non-wildcard keeps it) and delegates to [`inner_partition`].
+///
+/// Allows a single `(BLK_M, BLK_N, BLK_K)` tiler and `(bx, by, ..)` block coordinate to serve
+/// `A`, `B`, and `C` tensors uniformly.
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::tensor::{local_tile_proj, make_tensor};
+/// use noodle_cute::{int_tuple, tuple};
+///
+/// let a_data = [0f32; 64 * 32];
+/// let a = make_tensor(&a_data, int_tuple![64i32, 32i32]);
+/// let cta_tiler = int_tuple![Int::<16>, Int::<32>, Int::<8>];
+/// let cta_coord = tuple![1i32, 0i32, ..];
+/// let g_a = local_tile_proj(a, cta_tiler, cta_coord, tuple![Int::<1>, .., Int::<1>]);
+/// assert_eq!(g_a.shape(), int_tuple![Int::<16>, Int::<8>, 4i32]);
+/// ```
+pub const fn local_tile_proj<A, S, D, B, C, P, TS, TD>(
+    tensor: Tensor<A, Layout<S, D>>,
+    tiler: B,
+    coord: C,
+    proj: P,
+) -> InnerPartitionOutput<A, TS, TD, <P as DiceBy<C>>::Output>
+where
+    A: Copy,
+    S: Shape,
+    D: Stride<S>,
+    B: [const] Item,
+    C: [const] Item,
+    P: [const] DiceBy<B> + [const] DiceBy<C>,
+    Tensor<A, Layout<S, D>>:
+        [const] ZippedDivide<<P as DiceBy<B>>::Output, Output = Tensor<A, Layout<TS, TD>>>,
+    TS: Shape + [const] InnerCoord<<P as DiceBy<C>>::Output>,
+    TD: Stride<TS>,
+    Tensor<A, Layout<TS, TD>>:
+        [const] TensorIndex<<TS as InnerCoord<<P as DiceBy<C>>::Output>>::Output>,
+{
+    inner_partition(tensor, dice_by(&proj, &tiler), dice_by(&proj, &coord))
+}
+
+/// CuTe `local_partition(tensor, thr_layout, index)`: returns the strided elements owned by
+/// thread `index`.
+///
+/// Divides `tensor` by `product_each(&thr_layout.shape)` and slices the tile mode at
+/// `thr_layout.get_flat_coord(index)` via [`outer_partition`].
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::layout::Layout;
+/// use noodle_cute::tensor::{local_partition, make_tensor};
+///
+/// let data: [i32; 16 * 8] = core::array::from_fn(|i| i as i32);
+/// let tile = make_tensor(&data, int_tuple![Int::<16>, Int::<8>]);
+/// let threads = Layout::from_shape(int_tuple![Int::<4>, Int::<2>]);
+/// let mine = local_partition(tile, &threads, 5i32);
+/// assert_eq!(mine.shape(), int_tuple![Int::<4>, Int::<4>]);
+/// assert_eq!(mine(2i32, 3i32), 9 + 7 * 16);
+/// ```
+pub const fn local_partition<A, S, D, LS, LD, X, TS, TD>(
+    tensor: Tensor<A, Layout<S, D>>,
+    thr_layout: &Layout<LS, LD>,
+    index: X,
+) -> LocalPartitionOutput<A, LS, LD, X, TS, TD>
+where
+    A: Copy,
+    S: Shape,
+    D: Stride<S>,
+    LS: Shape + [const] ProductEach,
+    LD: Stride<LS>,
+    Layout<LS, LD>: [const] GetFlatCoord<X>,
+    Tensor<A, Layout<S, D>>:
+        [const] ZippedDivide<<LS as ProductEach>::Output, Output = Tensor<A, Layout<TS, TD>>>,
+    TS: Shape + [const] OuterCoord<<Layout<LS, LD> as GetFlatCoord<X>>::Output>,
+    TD: Stride<TS>,
+    Tensor<A, Layout<TS, TD>>:
+        [const] TensorIndex<<TS as OuterCoord<<Layout<LS, LD> as GetFlatCoord<X>>::Output>>::Output>,
+{
+    outer_partition(
+        tensor,
+        product_each(&thr_layout.shape),
+        thr_layout.get_flat_coord(index),
+    )
+}
+
+/// CuTe `local_partition(tensor, thr_layout, index, proj)`: projects `thr_layout` with
+/// [`Layout::dice`] and delegates to [`local_partition`].
+pub const fn local_partition_proj<A, S, D, LS, LD, X, P, TS, TD>(
+    tensor: Tensor<A, Layout<S, D>>,
+    thr_layout: &Layout<LS, LD>,
+    index: X,
+    proj: P,
+) -> LocalPartitionOutput<A, <P as DiceBy<LS>>::Output, <P as DiceBy<LD>>::Output, X, TS, TD>
+where
+    A: Copy,
+    S: Shape,
+    D: Stride<S>,
+    LS: [const] Item,
+    LD: [const] Item,
+    P: [const] DiceBy<LS> + [const] DiceBy<LD>,
+    <P as DiceBy<LS>>::Output: Shape + [const] ProductEach,
+    <P as DiceBy<LD>>::Output: Stride<<P as DiceBy<LS>>::Output>,
+    Layout<<P as DiceBy<LS>>::Output, <P as DiceBy<LD>>::Output>: [const] GetFlatCoord<X>,
+    Tensor<A, Layout<S, D>>: [const] ZippedDivide<
+            <<P as DiceBy<LS>>::Output as ProductEach>::Output,
+            Output = Tensor<A, Layout<TS, TD>>,
+        >,
+    TS: Shape
+        + [const] OuterCoord<
+            <Layout<<P as DiceBy<LS>>::Output, <P as DiceBy<LD>>::Output> as GetFlatCoord<X>>::Output,
+        >,
+    TD: Stride<TS>,
+    Tensor<A, Layout<TS, TD>>: [const] TensorIndex<
+            <TS as OuterCoord<
+                <Layout<<P as DiceBy<LS>>::Output, <P as DiceBy<LD>>::Output> as GetFlatCoord<X>>::Output,
+            >>::Output,
+        >,
+{
+    local_partition(tensor, &thr_layout.dice(&proj), index)
+}
 
 /// Slicing coordinate `(.., coord)` used internally by [`local_tile`].
 #[doc(hidden)]

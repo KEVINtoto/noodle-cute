@@ -81,6 +81,15 @@
 //! let _ = layout_add(a, b);
 //! ```
 //!
+//! ```compile_fail,E0277
+//! # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+//! # #![allow(incomplete_features)]
+//! use noodle_cute::{algebra::layout_add, f2::f2, integer::Int, layout::Layout, int_tuple, tuple};
+//! let a = Layout::new(int_tuple![Int::<3>, Int::<3>], tuple![f2(Int::<2>), f2(Int::<4>)]);
+//! let b = Layout::new(Int::<9>, f2(Int::<1>));
+//! let _ = layout_add(a, b);
+//! ```
+//!
 //! Size mismatch is rejected at compile time for static shapes:
 //!
 //! ```compile_fail,E0277
@@ -176,7 +185,7 @@
 //! let _ = layout_add_with_profile(a, a, int_tuple![(1, 1), 1]);
 //! ```
 
-use crate::integer::{div, int, is_pow2};
+use crate::integer::{div, int, is_pow2, rem};
 use crate::layout::Layout;
 use crate::shape::{AssertPositiveShape, IndexToCoord, Shape, ShapeScalar};
 use crate::stride::{Accumulate, ContainsF2, InnerProduct, Stride};
@@ -306,6 +315,8 @@ where
         }
         if weight < n {
             Layout::<H, D>::valid_boundary(head, weight)
+        } else if rem(weight, n) != 0 {
+            Some(false)
         } else {
             Layout::<T, R>::valid_boundary(tail, div(weight, n))
         }
@@ -325,6 +336,10 @@ const VALID_BOUNDARY<L: const RefinementBoundary, W: ShapeScalar>: bool =
 
 /// Allows a generator whose radix is compatible with the original F2 mode.
 #[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "layout_add refinement carries in a nonzero F2 mode",
+    note = "splitting an F2 mode across a common domain requires power-of-two sub-mode radices"
+)]
 pub trait ValidRefinementBoundary<const VALID: bool> {}
 impl ValidRefinementBoundary<true> for () {}
 

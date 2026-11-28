@@ -18,6 +18,8 @@
 //!
 //! - [`LogicalDivide`] / [`logical_divide`] / [`Layout::logical_divide`]
 //! - [`ZippedDivide`] / [`zipped_divide`] / [`Layout::zipped_divide`]
+//! - [`TiledDivide`] / [`tiled_divide`] / [`Layout::tiled_divide`]
+//! - [`FlatDivide`] / [`flat_divide`] / [`Layout::flat_divide`]
 //! - [`LogicalDivideAt`] / [`logical_divide_at`] / [`Layout::logical_divide_at`]
 //! - [`ZippedDivideAt`] / [`zipped_divide_at`] / [`Layout::zipped_divide_at`]
 //!
@@ -61,17 +63,24 @@
 //!   overflows fail at compile time for static operands and panic at runtime for dynamic
 //!   operands.
 
+use core::ops::RangeFull;
+
 use crate::basis::{BasisPath, Mode, ModeEnd};
 use crate::integer::{Int, int};
 use crate::layout::{Layout, LayoutBase, MakeLayout, Tiler, tiler_to_layout};
 use crate::shape::Shape;
 use crate::stride::Stride;
-use crate::tuple::{Get, Item, Lift, Nil, ReplaceAt, Til, Tuple, Wrap, lift};
+use crate::tuple::{Append, Get, Item, Lift, Nil, ReplaceAt, Til, Tuple, Wrap, lift};
 
 use super::complement::{Complement, ComplementWith};
 use super::composition::Composition;
 
 /// Splits layout or tensor `self` by tiler `B`: $A \oslash B = A \circ (B, B^*)$.
+#[diagnostic::on_unimplemented(
+    message = "cannot logically divide `{Self}` by `{B}`",
+    label = "incompatible tiler for logical division",
+    note = "use a tiler compatible with the layout's modes"
+)]
 pub const trait LogicalDivide<B>: Copy {
     /// Resulting divided [`Layout`], [`Tensor`](crate::tensor::Tensor), or [`Nil`].
     type Output: Copy;
@@ -87,6 +96,86 @@ pub const trait ZippedDivide<B>: Copy {
 
     /// Computes zipped division, panicking on dynamic failure or overflow.
     fn zipped_divide(self, b: B) -> Self::Output;
+}
+
+/// Divides `self` by tiler `B` into `(Tile, Rest_0, Rest_1, ...)`, keeping tile modes grouped
+/// in mode 0 and unpacking grid modes by one level.
+pub const trait TiledDivide<B>: Copy {
+    /// Resulting `(Tile, Rest_0, ...)` layout.
+    type Output: Copy;
+
+    /// Computes tiled division, panicking on dynamic failure or overflow.
+    fn tiled_divide(self, b: B) -> Self::Output;
+}
+
+/// Divides `self` by tiler `B` into `(Tile_0, ..., Rest_0, ...)`, unpacking both tile and grid
+/// modes by one level.
+pub const trait FlatDivide<B>: Copy {
+    /// Resulting `(Tile_0, ..., Rest_0, ...)` layout.
+    type Output: Copy;
+
+    /// Computes flat division, panicking on dynamic failure or overflow.
+    fn flat_divide(self, b: B) -> Self::Output;
+}
+
+/// Unpacks the rest (mode 1) of a canonical `(Tile, Rest)` layout into `(Tile, Rest_0, ...)`.
+#[doc(hidden)]
+pub const trait RegroupTiled: Copy {
+    type Output: Copy;
+    fn regroup_tiled(self) -> Self::Output;
+}
+
+const impl<TS, RS, TD, RD> RegroupTiled for Layout<Til<TS, Til<RS, Nil>>, Til<TD, Til<RD, Nil>>>
+where
+    TS: Shape,
+    RS: Shape + [const] Wrap,
+    RS::Wrapped: Tuple + Shape,
+    TD: Stride<TS>,
+    RD: Stride<RS> + [const] Wrap,
+    RD::Wrapped: Tuple + Stride<RS::Wrapped>,
+{
+    type Output = Layout<Til<TS, RS::Wrapped>, Til<TD, RD::Wrapped>>;
+
+    fn regroup_tiled(self) -> Self::Output {
+        Layout::new(
+            Til(self.shape.0, self.shape.1.0.wrap()),
+            Til(self.stride.0, self.stride.1.0.wrap()),
+        )
+    }
+}
+
+/// Unpacks both modes of a canonical `(Tile, Rest)` layout into `(Tile_0, ..., Rest_0, ...)`.
+#[doc(hidden)]
+pub const trait RegroupFlat: Copy {
+    type Output: Copy;
+    fn regroup_flat(self) -> Self::Output;
+}
+
+const impl<TS, RS, TD, RD> RegroupFlat for Layout<Til<TS, Til<RS, Nil>>, Til<TD, Til<RD, Nil>>>
+where
+    TS: Shape + [const] Wrap,
+    RS: Shape + [const] Wrap,
+    TS::Wrapped: [const] Tuple + [const] Append<RS::Wrapped>,
+    RS::Wrapped: [const] Tuple,
+    <TS::Wrapped as Append<RS::Wrapped>>::Output: Shape,
+    TD: Stride<TS> + [const] Wrap,
+    RD: Stride<RS> + [const] Wrap,
+    TD::Wrapped: [const] Tuple + [const] Append<RD::Wrapped>,
+    RD::Wrapped: [const] Tuple,
+    <TD::Wrapped as Append<RD::Wrapped>>::Output:
+        Stride<<TS::Wrapped as Append<RS::Wrapped>>::Output>,
+{
+    type Output = Layout<
+        <TS::Wrapped as Append<RS::Wrapped>>::Output,
+        <TD::Wrapped as Append<RD::Wrapped>>::Output,
+    >;
+
+    fn regroup_flat(self) -> Self::Output {
+        Layout::new(
+            self.shape.0.wrap().append(self.shape.1.0.wrap()),
+            self.stride.0.wrap().append(self.stride.1.0.wrap()),
+        )
+    }
 }
 
 /// Applies [`LogicalDivide`] only to the sub-mode selected by type-level `Path` ([`Mode`] / [`ModeEnd`]).
@@ -226,6 +315,14 @@ const impl LogicalDivide<Nil> for Nil {
     }
 }
 
+const impl LogicalDivide<RangeFull> for Nil {
+    type Output = Nil;
+
+    fn logical_divide(self, _: RangeFull) -> Nil {
+        Nil
+    }
+}
+
 macro_rules! impl_nil_logical_divide_leaf {
     ([$($g:tt)*] $B:ty) => {
         const impl<$($g)*> LogicalDivide<$B> for Nil
@@ -259,6 +356,11 @@ where
 }
 
 /// By-mode tuple division helper zipping wrapped `A` modes against tuple tiler `B`.
+#[diagnostic::on_unimplemented(
+    message = "tiler `{B}` cannot divide layout `{Self}` mode-by-mode",
+    label = "tiler has more modes than the target layout",
+    note = "ensure the tiler's rank does not exceed the layout's rank"
+)]
 #[doc(hidden)]
 pub const trait LogicalDivideTuple<B>: Copy {
     type Shape: Tuple + Shape;
@@ -304,6 +406,14 @@ const impl<SA: Shape, DA: Stride<SA>> LogicalDivide<Nil> for Layout<SA, DA> {
     type Output = Self;
 
     fn logical_divide(self, _: Nil) -> Self {
+        self
+    }
+}
+
+const impl<SA: Shape, DA: Stride<SA>> LogicalDivide<RangeFull> for Layout<SA, DA> {
+    type Output = Self;
+
+    fn logical_divide(self, _: RangeFull) -> Self {
         self
     }
 }
@@ -404,6 +514,30 @@ where
 
     fn zipped_divide(self, b: B) -> Self::Output {
         self.logical_divide(tiler_to_layout(b))
+    }
+}
+
+const impl<A, B> TiledDivide<B> for A
+where
+    A: [const] ZippedDivide<B>,
+    A::Output: [const] RegroupTiled,
+{
+    type Output = <A::Output as RegroupTiled>::Output;
+
+    fn tiled_divide(self, b: B) -> Self::Output {
+        self.zipped_divide(b).regroup_tiled()
+    }
+}
+
+const impl<A, B> FlatDivide<B> for A
+where
+    A: [const] ZippedDivide<B>,
+    A::Output: [const] RegroupFlat,
+{
+    type Output = <A::Output as RegroupFlat>::Output;
+
+    fn flat_divide(self, b: B) -> Self::Output {
+        self.zipped_divide(b).regroup_flat()
     }
 }
 
@@ -577,6 +711,22 @@ impl<S, D> Layout<S, D> {
         ZippedDivide::zipped_divide(self, b)
     }
 
+    /// Divides `self` by `b`, keeping tile modes in mode 0 and unpacking grid modes by one level.
+    pub const fn tiled_divide<B>(self, b: B) -> <Self as TiledDivide<B>>::Output
+    where
+        Self: [const] TiledDivide<B>,
+    {
+        TiledDivide::tiled_divide(self, b)
+    }
+
+    /// Divides `self` by `b`, unpacking both tile modes and grid modes by one level.
+    pub const fn flat_divide<B>(self, b: B) -> <Self as FlatDivide<B>>::Output
+    where
+        Self: [const] FlatDivide<B>,
+    {
+        FlatDivide::flat_divide(self, b)
+    }
+
     /// Promotes `b` via [`tiler_to_layout`] and divides only the sub-mode selected by `Path`.
     pub const fn zipped_divide_at<Path, B>(self, b: B) -> <Self as ZippedDivideAt<B, Path>>::Output
     where
@@ -626,6 +776,22 @@ where
     A: [const] ZippedDivide<B>,
 {
     a.zipped_divide(b)
+}
+
+/// Computes [`zipped_divide`] and unpacks the grid (mode 1) by one level: `(Tile, Rest_0, ...)`.
+pub const fn tiled_divide<A, B>(a: A, b: B) -> <A as TiledDivide<B>>::Output
+where
+    A: [const] TiledDivide<B>,
+{
+    a.tiled_divide(b)
+}
+
+/// Computes [`zipped_divide`] and unpacks both tile and grid modes by one level: `(Tile_0, ..., Rest_0, ...)`.
+pub const fn flat_divide<A, B>(a: A, b: B) -> <A as FlatDivide<B>>::Output
+where
+    A: [const] FlatDivide<B>,
+{
+    a.flat_divide(b)
 }
 
 /// Computes [`zipped_divide`] at the sub-mode selected by `Path` (`mode![...]`).

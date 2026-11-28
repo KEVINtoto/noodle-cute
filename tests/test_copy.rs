@@ -19,7 +19,7 @@ use noodle_cute::shape::Shape;
 use noodle_cute::stride::Stride;
 use noodle_cute::tensor::{
     Accessor, AccessorBase, AccessorOffset, CellAccessor, ImplicitAccessor, LinearOffset,
-    MutableAccessor, Tensor, TensorIndex, TensorSet, make_tensor,
+    MutableAccessor, Tensor, TensorIndex, TensorSet, make_owned_tensor, make_tensor,
 };
 use noodle_cute::{int_tuple, tuple};
 
@@ -68,7 +68,7 @@ where
 
 impl<'a, T: Copy, Off: LinearOffset> Accessor<Off> for LoggingAccessor<'a, T>
 where
-    CellAccessor<'a, T>: Accessor<Off, Item = T, Output = CellAccessor<'a, T>>,
+    CellAccessor<'a, T>: Accessor<Off, Item = T>,
 {
     type Item = T;
 
@@ -79,7 +79,7 @@ where
 
 impl<'a, T: Copy, Off: LinearOffset> MutableAccessor<Off> for LoggingAccessor<'a, T>
 where
-    CellAccessor<'a, T>: MutableAccessor<Off, Item = T, Output = CellAccessor<'a, T>>,
+    CellAccessor<'a, T>: MutableAccessor<Off, Item = T>,
 {
     fn store(&mut self, offset: Off, value: Self::Item) {
         self.log
@@ -263,6 +263,26 @@ fn test_copy_ref_dynamic_size_mismatch_panics() {
         copy_ref(src, &mut dst);
     }));
     assert!(res.is_err());
+}
+
+#[test]
+fn test_copy_ref_owned_and_empty() {
+    let mut src = make_owned_tensor::<i32, _>(int_tuple![Int::<2>, Int::<3>]);
+    let mut dst = make_owned_tensor::<i32, _>(Layout::from_shape_right(int_tuple![Int::<2>, Int::<3>]));
+    src.as_mut_slice()
+        .iter_mut()
+        .enumerate()
+        .for_each(|(i, x)| *x = (i + 1) as i32);
+    copy_ref(src, &mut dst);
+    for i in 0..6 {
+        assert_eq!(dst.at(i), src.at(i));
+    }
+
+    let empty_src: [i32; 0] = [];
+    let mut empty_dst: [i32; 0] = [];
+    let s0 = make_tensor(&empty_src[..], Layout::new(0i32, Int::<1>));
+    let mut d0 = make_tensor(&mut empty_dst[..], Layout::new(0i32, Int::<1>));
+    copy_ref(s0, &mut d0);
 }
 
 // ------------------------------------------------------------------
@@ -730,4 +750,36 @@ fn test_copy_plan_const_eval() {
 
     const VEC: int = const_vec_width();
     assert_eq!(VEC, 8);
+}
+
+#[test]
+fn conflicting_nonzero_strides_are_rejected_before_writing() {
+    let sh = int_tuple![Int::<2>, Int::<2>];
+    let src = Tensor::new(
+        ImplicitAccessor::new(10i32),
+        Layout::new(sh, int_tuple![1i32, 2i32]),
+    );
+    let mut out = [77; 3];
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut dst = make_tensor(&mut out, Layout::new(sh, int_tuple![Int::<1>, Int::<1>]));
+        copy(src, &mut dst);
+    }));
+    assert!(result.is_err());
+    assert_eq!(out, [77; 3]);
+}
+
+#[test]
+fn opposing_source_strides_in_broadcast_are_rejected_before_writing() {
+    let sh = int_tuple![Int::<2>, Int::<2>];
+    let src = Tensor::new(
+        ImplicitAccessor::new(10i32),
+        Layout::new(sh, int_tuple![1i32, -1i32]),
+    );
+    let mut out = [77];
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut dst = make_tensor(&mut out, Layout::new(sh, int_tuple![Int::<0>, Int::<0>]));
+        copy(src, &mut dst);
+    }));
+    assert!(result.is_err());
+    assert_eq!(out, [77]);
 }

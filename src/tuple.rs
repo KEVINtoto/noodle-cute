@@ -65,6 +65,7 @@
 
 use core::marker::PhantomData;
 
+use crate::StaticValue;
 use crate::f2::{F2, F2Scalar};
 use crate::integer::{Integer, add, int, max, sub};
 
@@ -239,14 +240,32 @@ pub const trait Item: Copy {
     ///
     /// Defaults to `false` for custom user items.
     const IS_STATIC: bool = false;
+    /// The unique value of a built-in fully static item, used for compile-time layout validation.
+    #[doc(hidden)]
+    const STATIC_ITEM: Option<Self> = None;
     /// `true` iff this item is a slicing wildcard (`..` / [`core::ops::RangeFull`]).
     const IS_WILDCARD: bool = false;
+    /// Indicates whether all leaves store ordinary integers.
+    #[doc(hidden)]
+    const INTEGER_LEAVES: bool = false;
 
     /// The nested structure, including empty heads and the terminal tail.
     ///
     /// Built-in profiles depend on leaf positions and nesting, independently of
     /// leaf values and integer types.
     type Profile;
+
+    /// Reads a flattened integer leaf from a value, or its type when statically known.
+    #[doc(hidden)]
+    fn known_integer_leaf(_value: Option<Self>, _index: int) -> Option<int> {
+        None
+    }
+
+    /// Returns an ordinary integer leaf at the given flattened position, if present.
+    #[doc(hidden)]
+    fn integer_leaf(&self, position: int) -> Option<int> {
+        Self::known_integer_leaf(Some(*self), position)
+    }
 
     /// Returns [`Item::RANK`].
     fn rank(&self) -> int {
@@ -271,6 +290,8 @@ const impl Item for Nil {
     const DEPTH: int = 1;
     const LEAVES: int = 0;
     const IS_STATIC: bool = true;
+    const STATIC_ITEM: Option<Self> = Some(Nil);
+    const INTEGER_LEAVES: bool = true;
     type Profile = NilProfile;
 }
 
@@ -279,7 +300,19 @@ const impl<I: [const] Integer> Item for I {
     const DEPTH: int = 0;
     const LEAVES: int = 1;
     const IS_STATIC: bool = I::IS_STATIC;
+    const STATIC_ITEM: Option<Self> = I::STATIC_INSTANCE;
+    const INTEGER_LEAVES: bool = true;
     type Profile = LeafProfile;
+
+    fn known_integer_leaf(value: Option<Self>, index: int) -> Option<int> {
+        if index != 0 {
+            return None;
+        }
+        match value {
+            Some(v) => Some(v.value()),
+            None => I::STATIC_VALUE,
+        }
+    }
 }
 
 const impl<V: [const] F2Scalar> Item for F2<V> {
@@ -287,6 +320,7 @@ const impl<V: [const] F2Scalar> Item for F2<V> {
     const DEPTH: int = 0;
     const LEAVES: int = 1;
     const IS_STATIC: bool = V::IS_STATIC;
+    const STATIC_ITEM: Option<Self> = Self::STATIC_INSTANCE;
     type Profile = LeafProfile;
 }
 
@@ -304,7 +338,24 @@ const impl<H: [const] Item, T: [const] Tuple> Item for Til<H, T> {
     const DEPTH: int = add(1, max(H::DEPTH, sub(T::DEPTH, 1)));
     const LEAVES: int = add(H::LEAVES, T::LEAVES);
     const IS_STATIC: bool = H::IS_STATIC && T::IS_STATIC;
+    const STATIC_ITEM: Option<Self> = match (H::STATIC_ITEM, T::STATIC_ITEM) {
+        (Some(h), Some(t)) => Some(Til(h, t)),
+        _ => None,
+    };
+    const INTEGER_LEAVES: bool = H::INTEGER_LEAVES && T::INTEGER_LEAVES;
     type Profile = TupleProfile<H::Profile, T::Profile>;
+
+    fn known_integer_leaf(value: Option<Self>, index: int) -> Option<int> {
+        let (head, tail) = match value {
+            Some(v) => (Some(v.0), Some(v.1)),
+            None => (None, None),
+        };
+        if index < H::LEAVES {
+            H::known_integer_leaf(head, index)
+        } else {
+            T::known_integer_leaf(tail, sub(index, H::LEAVES))
+        }
+    }
 }
 
 /// Marker trait for scalar [`Item`] leaves (`Profile = LeafProfile`).
@@ -315,6 +366,18 @@ const impl<L: [const] Item<Profile = LeafProfile>> Leaf for L {}
 pub const trait Tuple: [const] Item {}
 const impl Tuple for Nil {}
 const impl<H: [const] Item, T: [const] Tuple> Tuple for Til<H, T> {}
+
+const impl StaticValue for Nil {
+    const VALUE: Self = Nil;
+}
+
+const impl StaticValue for core::ops::RangeFull {
+    const VALUE: Self = ..;
+}
+
+const impl<H: StaticValue, T: Tuple + StaticValue> StaticValue for Til<H, T> {
+    const VALUE: Self = Til(H::VALUE, T::VALUE);
+}
 
 /// Marker trait for flat tuples whose elements are all [`Leaf`] items.
 pub const trait FlatTuple: [const] Tuple {}

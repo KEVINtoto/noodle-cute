@@ -13,7 +13,7 @@ use noodle_cute::algorithm::reference::gemm;
 use noodle_cute::int_tuple;
 use noodle_cute::integer::{Int, int};
 use noodle_cute::layout::Layout;
-use noodle_cute::tensor::make_tensor;
+use noodle_cute::tensor::{make_owned_tensor, make_tensor};
 
 /// Direct `(M, K, L) x (N, K, L) -> (M, N, L)` oracle.
 fn gemm_oracle(
@@ -374,7 +374,7 @@ fn test_gemm_dynamic_dimension_mismatch_panics() {
         .is_err()
     );
 
-    // L mismatch (2 vs 3)
+    // L mismatch on B (2 vs 3) and on A (3 vs 2)
     assert!(
         catch_unwind(AssertUnwindSafe(|| {
             let a = make_tensor(&a_buf, Layout::from_shape(int_tuple![2i32, 2i32, 2i32]));
@@ -387,4 +387,97 @@ fn test_gemm_dynamic_dimension_mismatch_panics() {
         }))
         .is_err()
     );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            let a = make_tensor(&a_buf, Layout::from_shape(int_tuple![2i32, 2i32, 3i32]));
+            let b = make_tensor(&b_buf, Layout::from_shape(int_tuple![2i32, 2i32, 2i32]));
+            let mut c = make_tensor(
+                &mut c_buf[..],
+                Layout::from_shape(int_tuple![2i32, 2i32, 2i32]),
+            );
+            gemm(a, b, &mut c);
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn test_gemm_owned_array_engine_rank2_and_rank3() {
+    // Rank-2 owning ArrayEngine accumulator must be updated in place.
+    let mut a2 = make_owned_tensor::<i32, _>(int_tuple![Int::<2>, Int::<3>]);
+    let mut b2 = make_owned_tensor::<i32, _>(int_tuple![Int::<2>, Int::<3>]);
+    let mut c2 = make_owned_tensor::<i32, _>(int_tuple![Int::<2>, Int::<2>]);
+    for (i, v) in a2.as_mut_slice().iter_mut().enumerate() {
+        *v = (i + 1) as i32;
+    }
+    for (i, v) in b2.as_mut_slice().iter_mut().enumerate() {
+        *v = (i + 2) as i32;
+    }
+    c2.as_mut_slice().fill(10);
+    gemm(a2, b2, &mut c2);
+
+    for mi in 0..2 {
+        for ni in 0..2 {
+            let mut want = 10;
+            for ki in 0..3 {
+                want += a2.at(int_tuple![mi, ki]) * b2.at(int_tuple![ni, ki]);
+            }
+            assert_eq!(c2.at(int_tuple![mi, ni]), want);
+        }
+    }
+
+    // Rank-3 owning ArrayEngine accumulator must also be updated in place.
+    let mut a3 = make_owned_tensor::<i32, _>(int_tuple![Int::<2>, Int::<2>, Int::<2>]);
+    let mut b3 = make_owned_tensor::<i32, _>(int_tuple![Int::<3>, Int::<2>, Int::<2>]);
+    let mut c3 = make_owned_tensor::<i32, _>(int_tuple![Int::<2>, Int::<3>, Int::<2>]);
+    for (i, v) in a3.as_mut_slice().iter_mut().enumerate() {
+        *v = (i + 1) as i32;
+    }
+    for (i, v) in b3.as_mut_slice().iter_mut().enumerate() {
+        *v = (i + 1) as i32 * 2 - 5;
+    }
+    c3.as_mut_slice().fill(3);
+    gemm(a3, b3, &mut c3);
+
+    for mi in 0..2 {
+        for ni in 0..3 {
+            for li in 0..2 {
+                let mut want = 3;
+                for ki in 0..2 {
+                    want += a3.at(int_tuple![mi, ki, li]) * b3.at(int_tuple![ni, ki, li]);
+                }
+                assert_eq!(c3.at(int_tuple![mi, ni, li]), want);
+            }
+        }
+    }
+}
+
+#[test]
+fn test_gemm_zero_extent_and_empty_batch_mismatch() {
+    let empty: [i32; 0] = [];
+    let mut out = [5i32; 4];
+
+    // Zero K leaves C untouched.
+    let a = make_tensor(&empty[..], Layout::from_shape(int_tuple![2i32, 0i32]));
+    let b = make_tensor(&empty[..], Layout::from_shape(int_tuple![2i32, 0i32]));
+    let mut c = make_tensor(&mut out[..], Layout::from_shape(int_tuple![2i32, 2i32]));
+    gemm(a, b, &mut c);
+    assert_eq!(out, [5; 4]);
+
+    // Empty batch (L == 0) must still reject dynamic M, N, and K mismatches.
+    for (sa, sb, sc) in [
+        ([3i32, 2, 0], [2i32, 2, 0], [2i32, 2, 0]),
+        ([2i32, 2, 0], [3i32, 2, 0], [2i32, 2, 0]),
+        ([2i32, 3, 0], [2i32, 4, 0], [2i32, 2, 0]),
+    ] {
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let a0 = make_tensor(&empty[..], Layout::from_shape(int_tuple![sa[0], sa[1], sa[2]]));
+                let b0 = make_tensor(&empty[..], Layout::from_shape(int_tuple![sb[0], sb[1], sb[2]]));
+                let mut c0 = make_tensor(&mut out[..], Layout::from_shape(int_tuple![sc[0], sc[1], sc[2]]));
+                gemm(a0, b0, &mut c0);
+            }))
+            .is_err()
+        );
+    }
 }

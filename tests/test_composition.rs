@@ -410,3 +410,27 @@ fn composition_of_one_mode_preserves_its_siblings() {
         assert_eq!(result.get::<1>()(i), a.get::<1>()(b(i)));
     }
 }
+
+#[test]
+#[should_panic(expected = "carry")]
+fn dynamic_gap_rejects_cross_mode_carry() {
+    let a = Layout::new(int_tuple![Int::<3>, Int::<2>], int_tuple![Int::<1>, 8i32]);
+    let b = Layout::new(
+        int_tuple![Int::<2>, Int::<2>],
+        int_tuple![Int::<1>, Int::<2>],
+    );
+    let _ = composition(a, b);
+}
+
+#[test]
+fn dynamic_contiguous_boundary_allows_cross_mode_carry() {
+    let a = Layout::new(int_tuple![Int::<3>, Int::<2>], int_tuple![Int::<1>, 3i32]);
+    let b = Layout::new(
+        int_tuple![Int::<2>, Int::<2>],
+        int_tuple![Int::<1>, Int::<2>],
+    );
+    let composed = composition(a, b);
+    for i in 0..4 {
+        assert_eq!(composed(i), a(b(i)));
+    }
+}

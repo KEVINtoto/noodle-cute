@@ -14,6 +14,8 @@
 //!   - [`SliceAccessor`]: Read-only borrowed slice `&[T]` with flattened signed offset (`Copy`, `const`).
 //!   - [`CellAccessor`]: Safe, `#![no_std]`, `Copy` read/write view over `&[Cell<T>]` (created from
 //!     `&mut [T]` via [`CellAccessor::from_slice_mut`]), supporting simultaneous mutable sub-views.
+//!   - [`ArrayEngine`]: Owned 16-byte-aligned stack array `[T; N]` with bounds-checked element
+//!     access and zero-`unsafe` [`SliceAccessor`] / [`CellAccessor`] view borrowing.
 //!   - [`Ptr`]: Bounds-checked raw pointer `*mut T` into externally owned storage (`Copy`, `unsafe`
 //!     construction via [`Ptr::from_raw`]).
 //!   - [`F2OffsetAccessor`]: Preserves an $\mathbb{F}_2\[x\]$ slicing origin over a memory-backed
@@ -66,6 +68,7 @@ use core::cell::Cell;
 use core::fmt::{self, Debug, Display, Formatter};
 use core::ops::Add;
 
+use crate::NoodleCuteError;
 use crate::basis::{
     BasisCombination, IntoBasisCoord, IntoColexTerms, MergeEq, basis_eq, into_basis_coord,
 };
@@ -127,9 +130,9 @@ const fn resolve_linear_index<Off: [const] LinearOffset>(
     len: usize,
 ) -> usize {
     let idx = add(base_offset, delta.linear_offset());
-    assert!(idx >= 0, "accessor index is negative");
+    NoodleCuteError::AddressOutOfBounds.check_with(idx >= 0, "accessor index is negative");
     let uidx = idx as usize;
-    assert!(uidx < len, "accessor index out of bounds");
+    NoodleCuteError::AddressOutOfBounds.check_with(uidx < len, "accessor index out of bounds");
     uidx
 }
 
@@ -143,7 +146,7 @@ pub const trait AccessorOffset<Off>: AccessorBase {
 }
 
 /// Read-only random-access handle mapping a codomain offset `Off` to a value.
-pub const trait Accessor<Off>: [const] AccessorOffset<Off> {
+pub const trait Accessor<Off>: AccessorBase {
     /// Element type returned by [`load`](Self::load).
     type Item;
 
@@ -1187,5 +1190,112 @@ impl<T: Display, Fill: Debug, Origin: Display> Display for OutOfBoundsAccessor<T
             "OutOfBoundsAccessor({}, fill={:?}, origin={})",
             self.tensor, self.fill, self.origin
         )
+    }
+}
+
+// ------------------------------------------------------------------
+// ArrayEngine<T, N>
+// ------------------------------------------------------------------
+
+/// Owned 16-byte-aligned stack storage for `N` elements: CuTe `ArrayEngine`.
+///
+/// Alignment to 16 bytes matches upstream `array_aligned`, keeping register fragments
+/// naturally aligned for 128-bit vector loads/stores while remaining `#![no_std]` and
+/// completely safe (zero `unsafe`).
+///
+/// Implements [`Accessor`] and [`MutableAccessor`] for direct complete-coordinate element
+/// reads and writes, but intentionally does not implement [`AccessorOffset`] so slicing an
+/// owning tensor requires borrowing a zero-copy view via [`Tensor::view`](super::Tensor::view)
+/// or [`Tensor::view_mut`](super::Tensor::view_mut).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C, align(16))]
+pub struct ArrayEngine<T, const N: usize>(pub [T; N]);
+
+impl<T: Copy + Default, const N: usize> Default for ArrayEngine<T, N> {
+    fn default() -> Self {
+        Self([T::default(); N])
+    }
+}
+
+const impl<T: Copy, const N: usize> AccessorBase for ArrayEngine<T, N> {}
+
+impl<T, const N: usize> ArrayEngine<T, N> {
+    /// Wraps an existing fixed-size array `data`.
+    pub const fn new(data: [T; N]) -> Self {
+        Self(data)
+    }
+
+    /// Creates an engine filled with copies of `value`.
+    pub const fn splat(value: T) -> Self
+    where
+        T: Copy,
+    {
+        Self([value; N])
+    }
+
+    /// Returns the compile-time element capacity `N`.
+    pub const fn len(&self) -> usize {
+        N
+    }
+
+    /// Returns `true` iff `N == 0`.
+    pub const fn is_empty(&self) -> bool {
+        N == 0
+    }
+
+    /// Borrows the underlying array as an immutable slice.
+    pub const fn as_slice(&self) -> &[T] {
+        &self.0
+    }
+
+    /// Borrows the underlying array as a mutable slice.
+    pub const fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.0
+    }
+
+    /// Creates a read-only [`SliceAccessor`] viewing this engine's storage.
+    pub const fn slice_accessor(&self) -> SliceAccessor<'_, T> {
+        SliceAccessor::new(&self.0)
+    }
+
+    /// Creates a safe, `Copy` read/write [`CellAccessor`] viewing this engine's storage.
+    pub fn cell_accessor(&mut self) -> CellAccessor<'_, T> {
+        CellAccessor::from_slice_mut(&mut self.0)
+    }
+
+    /// Borrows the element at `offset` with bounds checking.
+    pub const fn get_ref<Off: [const] LinearOffset>(&self, offset: Off) -> &T {
+        let idx = resolve_linear_index(0, offset, N);
+        &self.0[idx]
+    }
+
+    /// Mutably borrows the element at `offset` with bounds checking.
+    pub const fn get_mut<Off: [const] LinearOffset>(&mut self, offset: Off) -> &mut T {
+        let idx = resolve_linear_index(0, offset, N);
+        &mut self.0[idx]
+    }
+}
+
+const impl<T: Copy, const N: usize, Off: [const] LinearOffset> Accessor<Off> for ArrayEngine<T, N> {
+    type Item = T;
+
+    fn load(&self, offset: Off) -> T {
+        let idx = resolve_linear_index(0, offset, N);
+        self.0[idx]
+    }
+}
+
+const impl<T: Copy, const N: usize, Off: [const] LinearOffset> MutableAccessor<Off>
+    for ArrayEngine<T, N>
+{
+    fn store(&mut self, offset: Off, value: T) {
+        let idx = resolve_linear_index(0, offset, N);
+        self.0[idx] = value;
+    }
+}
+
+impl<T, const N: usize> Display for ArrayEngine<T, N> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "ArrayEngine<{}, {}>", type_name::<T>(), N)
     }
 }

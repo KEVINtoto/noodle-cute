@@ -669,17 +669,115 @@ fn swizzled_rows_and_columns_each_span_eight_banks() {
 }
 
 #[test]
-#[ignore = "right_inverse currently reaches 32 of the 48 dense offsets"]
 fn right_inverse_covers_the_full_hierarchical_swizzle() {
     // test/test_inverse_right.py and docs/GPUMODE_114_PyCuTe.pdf, p. 89.
     let layout = Layout::new(
         int_tuple![Int::<4>, (Int::<4>, Int::<3>)],
         tuple![f2(Int::<1>), (f2(Int::<5>), f2(Int::<16>))],
     );
+    const {
+        let static_layout = Layout::new(
+            int_tuple![Int::<4>, (Int::<4>, Int::<3>)],
+            tuple![f2(Int::<1>), (f2(Int::<5>), f2(Int::<16>))],
+        );
+        let static_inv = right_inverse(static_layout);
+        assert!(static_inv.size() == 48);
+        assert!(static_layout(static_inv(47i32)).value() == 47);
+    }
     let inverse = right_inverse(layout);
-    assert_eq!(inverse.size(), layout.size());
+    assert_eq!(inverse.size(), 48);
     for i in 0..layout.size() {
         assert_eq!(layout(inverse(i)), f2(i));
+    }
+
+    let dynamic_layout = Layout::new(
+        int_tuple![4i32, (4i32, 3i32)],
+        tuple![f2(1i32), (f2(5i32), f2(16i32))],
+    );
+    let dynamic_inverse = right_inverse(dynamic_layout);
+    assert_eq!(dynamic_inverse.size(), 48);
+    for i in 0..dynamic_layout.size() {
+        assert_eq!(dynamic_layout(dynamic_inverse(i)), f2(i));
+    }
+
+    // Coalesced trailing non-power-of-two segment `(2, 3):(F2(16), F2(32)) -> 6:F2(16)`.
+    let coalesced_tail = Layout::new(
+        int_tuple![Int::<4>, Int::<4>, Int::<2>, Int::<3>],
+        tuple![f2(Int::<1>), f2(Int::<5>), f2(Int::<16>), f2(Int::<32>)],
+    );
+    let coalesced_inv = right_inverse(coalesced_tail);
+    assert_eq!(coalesced_inv.size(), 96);
+    for i in 0..coalesced_tail.size() {
+        assert_eq!(coalesced_tail(coalesced_inv(i)), f2(i));
+    }
+
+    // Multi-axis layout whose trailing non-power-of-two mode sits at the end of the domain.
+    let multi_axis = Layout::new(
+        int_tuple![Int::<2>, (Int::<4>, (Int::<4>, Int::<3>))],
+        tuple![
+            f2(Int::<1>) * e![1],
+            (
+                f2(Int::<1>) * e![0],
+                (f2(Int::<5>) * e![0], f2(Int::<16>) * e![0])
+            )
+        ],
+    );
+    let multi_inv = right_inverse(multi_axis);
+    assert_eq!(multi_inv.size(), 96);
+    for i0 in 0..48 {
+        for i1 in 0..2 {
+            assert_eq!(
+                multi_axis(multi_inv(int_tuple![i0, i1])),
+                f2(i0) * e![0] + f2(i1) * e![1]
+            );
+        }
+    }
+}
+
+#[test]
+fn right_inverse_preserves_partial_inverse_on_holes_and_non_trailing_modes() {
+    // Gap at 16 prevents extending into the trailing mode; keep the 0..16 partial inverse.
+    let with_hole = Layout::new(
+        int_tuple![Int::<4>, Int::<4>, Int::<3>],
+        tuple![f2(Int::<1>), f2(Int::<5>), f2(Int::<32>)],
+    );
+    let hole_inv = right_inverse(with_hole);
+    assert_eq!(hole_inv.size(), 16);
+    for i in 0..hole_inv.size() {
+        assert_eq!(with_hole(hole_inv(i)), f2(i));
+    }
+
+    // Trailing stride F2(17) != F2(16): fall back to the pure binary partial inverse (32).
+    let with_residue = Layout::new(
+        int_tuple![Int::<4>, Int::<4>, Int::<3>],
+        tuple![f2(Int::<1>), f2(Int::<5>), f2(Int::<17>)],
+    );
+    let residue_inv = right_inverse(with_residue);
+    assert_eq!(residue_inv.size(), 32);
+    for i in 0..residue_inv.size() {
+        assert_eq!(with_residue(residue_inv(i)), f2(i));
+    }
+
+    // Trailing broadcast leaf after non-power-of-two mode 3: idx2crd divides by 3,
+    // so only the binary prefix 0..32 is safely invertible.
+    let non_last_broadcast = Layout::new(
+        int_tuple![Int::<4>, Int::<4>, Int::<3>, Int::<2>],
+        tuple![f2(Int::<1>), f2(Int::<5>), f2(Int::<16>), f2(Int::<0>)],
+    );
+    let non_last_inv = right_inverse(non_last_broadcast);
+    assert_eq!(non_last_inv.size(), 32);
+    for i in 0..non_last_inv.size() {
+        assert_eq!(non_last_broadcast(non_last_inv(i)), f2(i));
+    }
+
+    let non_last_unit = Layout::new(
+        int_tuple![Int::<4>, Int::<4>, Int::<3>, Int::<1>],
+        tuple![f2(Int::<1>), f2(Int::<5>), f2(Int::<16>), f2(Int::<0>)],
+    );
+    let non_last_unit_inv = right_inverse(non_last_unit);
+    assert_eq!(non_last_unit_inv.size(), 32);
+    for i in 0..non_last_unit_inv.size() {
+        assert_eq!(non_last_unit(non_last_unit_inv(i)), f2(i));
     }
 }
 
@@ -689,22 +787,90 @@ fn layout_add_rejects_carry_in_the_common_f2_domain() {
     let a = Layout::new(9i32, f2(1i32));
     let b = Layout::new(int_tuple![3i32, 3i32], tuple![f2(2i32), f2(4i32)]);
     assert!(catch_unwind(|| layout_add(a, b)).is_err());
+    assert!(catch_unwind(|| layout_add(b, a)).is_err());
+
+    // Static shape with dynamic nonzero F2 stride also panics at runtime.
+    let mixed_nonzero = Layout::new(Int::<9>, f2(1i32));
+    let static_b = Layout::new(
+        int_tuple![Int::<3>, Int::<3>],
+        tuple![f2(Int::<2>), f2(Int::<4>)],
+    );
+    assert!(catch_unwind(|| layout_add(mixed_nonzero, static_b)).is_err());
+    assert!(catch_unwind(|| layout_add(static_b, mixed_nonzero)).is_err());
+
+    // Multi-mode F2 refinement that splits a nonzero extent-6 mode at radix 3.
+    let left = Layout::new(int_tuple![3i32, 6i32], tuple![f2(1i32), f2(4i32)]);
+    let right = Layout::new(int_tuple![6i32, 3i32], tuple![f2(2i32), f2(8i32)]);
+    assert!(catch_unwind(|| layout_add(left, right)).is_err());
 }
 
 #[test]
 fn layout_add_preserves_valid_f2_refinements() {
+    let a_static = Layout::new(
+        int_tuple![Int::<3>, Int::<3>],
+        tuple![f2(Int::<1>), f2(Int::<2>)],
+    );
+    let b_static = Layout::new(
+        int_tuple![Int::<3>, Int::<3>],
+        tuple![f2(Int::<2>), f2(Int::<4>)],
+    );
+    let sum_static = layout_add(a_static, b_static);
+    const {
+        let a = Layout::new(
+            int_tuple![Int::<3>, Int::<3>],
+            tuple![f2(Int::<1>), f2(Int::<2>)],
+        );
+        let b = Layout::new(
+            int_tuple![Int::<3>, Int::<3>],
+            tuple![f2(Int::<2>), f2(Int::<4>)],
+        );
+        let s = layout_add(a, b);
+        assert!(s(4i32).value() == (a(4i32) + b(4i32)).value());
+    }
+    assert_eq!(
+        sum_static,
+        Layout::new(
+            int_tuple![Int::<3>, Int::<3>],
+            tuple![f2(Int::<3>), f2(Int::<6>)],
+        )
+    );
+    for i in 0..9 {
+        assert_eq!(sum_static(i), a_static(i) + b_static(i));
+    }
+
+    let a_dyn = Layout::new(int_tuple![3i32, 3i32], tuple![f2(1i32), f2(2i32)]);
     let b = Layout::new(int_tuple![3i32, 3i32], tuple![f2(2i32), f2(4i32)]);
+    let sum_dyn = layout_add(a_dyn, b);
     let zero = Layout::new(9i32, f2(0i32));
     let broadcast_sum = layout_add(zero, b);
+    let mixed_zero = Layout::new(Int::<9>, f2(0i32));
+    let mixed_broadcast = layout_add(mixed_zero, b_static);
     let cancelled = layout_add(b, b);
     for i in 0..9 {
+        assert_eq!(sum_dyn(i), a_dyn(i) + b(i));
         assert_eq!(broadcast_sum(i), b(i));
+        assert_eq!(mixed_broadcast(i), b_static(i));
         assert_eq!(cancelled(i), f2(0i32));
     }
+
     let a = Layout::new(12i32, f2(3i32));
     let b = Layout::new(int_tuple![4i32, 3i32], tuple![f2(2i32), f2(4i32)]);
     let sum = layout_add(a, b);
     for i in 0..12 {
         assert_eq!(sum(i), a(i) + b(i));
+    }
+
+    // Splitting extent 6 into (2, 3) uses power-of-two sub-mode radix 2 and is carry-free.
+    let split_a = Layout::new(
+        int_tuple![Int::<6>, Int::<2>],
+        tuple![f2(Int::<1>), f2(Int::<8>)],
+    );
+    let split_b = Layout::new(
+        int_tuple![Int::<2>, Int::<3>, Int::<2>],
+        tuple![f2(Int::<2>), f2(Int::<4>), f2(Int::<16>)],
+    );
+    let split_sum = layout_add(split_a, split_b);
+    for i in 0..12 {
+        assert_eq!(split_sum(i), split_a(i) + split_b(i));
     }
 }

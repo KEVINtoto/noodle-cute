@@ -9,18 +9,24 @@
 //!   ([`Coalesce`], [`CoalesceExtended`], [`coalesce()`], [`coalesce_extended`]).
 //! - [`mod@nullspace`]: Kernel (zero-stride domain) extraction
 //!   ([`Nullspace`], [`nullspace()`]).
-//! - [`mod@composition`]: Functional composition $A \circ B$
-//!   ([`Composition`], [`composition()`]).
+//! - [`mod@composition`]: Functional composition $A \circ B$ and mode-wise tile composition
+//!   ([`Composition`], [`ComposeTile`], [`composition()`], [`compose_tile`]).
 //! - [`mod@complement`]: Free and extended codomain complement $A^*$
 //!   ([`Complement`], [`ComplementWith`], [`complement()`], [`complement_with`]).
 //! - [`mod@inverse`]: Right and left layout inverses $A^{-1}_R, A^{-1}_L$
 //!   ([`RightInverse`], [`LeftInverse`], [`right_inverse`], [`left_inverse`]).
-//! - [`mod@logical_divide`]: Logical and zipped tiling division $A \oslash B$
-//!   ([`LogicalDivide`], [`ZippedDivide`], [`LogicalDivideAt`], [`ZippedDivideAt`],
-//!   [`logical_divide()`], [`logical_divide_at`], [`zipped_divide`], [`zipped_divide_at`]).
-//! - [`mod@logical_product`]: Logical, blocked, and raked tiling products $A \otimes B$
-//!   ([`LogicalProduct`], [`LogicalProductAt`], [`BlockedProduct`], [`RakedProduct`],
-//!   [`logical_product()`], [`logical_product_at`], [`blocked_product`], [`raked_product`]).
+//! - [`mod@logical_divide`]: Logical, zipped, tiled, and flat division $A \oslash B$
+//!   ([`LogicalDivide`], [`ZippedDivide`], [`TiledDivide`], [`FlatDivide`],
+//!   [`LogicalDivideAt`], [`ZippedDivideAt`], [`logical_divide()`], [`logical_divide_at`],
+//!   [`zipped_divide`], [`zipped_divide_at`], [`tiled_divide`], [`flat_divide`]).
+//! - [`mod@logical_product`]: Logical, zipped, tiled, flat, blocked, and raked products $A \otimes B$
+//!   ([`LogicalProduct`], [`ZippedProduct`], [`TiledProduct`], [`FlatProduct`],
+//!   [`LogicalProductAt`], [`BlockedProduct`], [`RakedProduct`], [`logical_product()`],
+//!   [`logical_product_at`], [`zipped_product`], [`tiled_product`], [`flat_product`],
+//!   [`blocked_product`], [`raked_product`]).
+//! - [`mod@common`]: Common vectorization analysis, shape-targeted tiling, and fragment layouts
+//!   ([`MaxCommonVector`], [`MaxCommonLayout`], [`TileToShape`], [`FragmentLike`],
+//!   [`max_common_vector`], [`max_common_layout`], [`tile_to_shape`], [`make_fragment_like`]).
 //! - [`mod@greatest_common_domain`]: Greatest common domain factorization of two shapes or layouts
 //!   ([`IntoGcdShape`], [`GreatestCommonDomain`], [`greatest_common_domain()`]).
 //! - [`mod@layout_add`]: Coordinate-wise layout addition $A + B$
@@ -83,6 +89,7 @@
 //!   for dynamic operands.
 
 pub mod coalesce;
+pub mod common;
 pub mod complement;
 pub mod composition;
 pub mod greatest_common_domain;
@@ -96,17 +103,22 @@ pub use coalesce::{
     Coalesce, CoalesceExtended, CoalesceProfile, CoalesceTarget, coalesce, coalesce_extended,
     coalesce_with_profile, coalesce_z,
 };
+pub use common::{
+    FragmentLike, MaxCommonLayout, MaxCommonVector, TileToShape, make_fragment_like,
+    max_common_layout, max_common_vector, tile_to_shape,
+};
 pub use complement::{Complement, ComplementWith, complement, complement_with};
-pub use composition::{Composition, composition};
+pub use composition::{ComposeTile, Composition, compose_tile, composition};
 pub use greatest_common_domain::{GreatestCommonDomain, IntoGcdShape, greatest_common_domain};
 pub use inverse::{LeftInverse, RightInverse, left_inverse, right_inverse};
 pub use layout_add::{LayoutAdd, layout_add, layout_add_by, layout_add_with_profile};
 pub use logical_divide::{
-    LogicalDivide, LogicalDivideAt, ZippedDivide, ZippedDivideAt, logical_divide,
-    logical_divide_at, zipped_divide, zipped_divide_at,
+    FlatDivide, LogicalDivide, LogicalDivideAt, TiledDivide, ZippedDivide, ZippedDivideAt,
+    flat_divide, logical_divide, logical_divide_at, tiled_divide, zipped_divide, zipped_divide_at,
 };
 pub use logical_product::{
-    BlockedProduct, LogicalProduct, LogicalProductAt, RakedProduct, blocked_product,
-    logical_product, logical_product_at, raked_product,
+    BlockedProduct, FlatProduct, LogicalProduct, LogicalProductAt, RakedProduct, TiledProduct,
+    ZippedProduct, blocked_product, flat_product, logical_product, logical_product_at,
+    raked_product, tiled_product, zipped_product,
 };
 pub use nullspace::{Nullspace, nullspace};

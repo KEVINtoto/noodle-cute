@@ -1041,11 +1041,15 @@ where
     Self: Copy,
     S: [const] Flatten,
     D: [const] Flatten,
-    Layout<S::Output, D::Output>: [const] Coalesce<false>,
+    Layout<S::Output, D::Output>: [const] Coalesce<true>,
+    <Layout<S::Output, D::Output> as Coalesce<true>>::Output: [const] DropTrailingUnit,
 {
-    type Output = <Layout<S::Output, D::Output> as Coalesce<false>>::Output;
+    type Output = Layout<
+        <<Layout<S::Output, D::Output> as Coalesce<true>>::Output as DropTrailingUnit>::Shape,
+        <<Layout<S::Output, D::Output> as Coalesce<true>>::Output as DropTrailingUnit>::Stride,
+    >;
     fn coalesce_with_profile(self) -> Self::Output {
-        self.coalesce()
+        self.coalesce_extended().drop_trailing_unit()
     }
 }
 

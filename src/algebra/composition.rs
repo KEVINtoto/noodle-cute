@@ -8,8 +8,9 @@
 //! # Main Interfaces
 //!
 //! - [`Composition`] trait (`composition`)
-//! - [`Layout::composition`]
-//! - [`composition`] free function (supporting [`Layout`], [`Tiler`], and [`Nil`] operands)
+//! - [`ComposeTile`] trait (`compose_tile`) for mode-wise tuple tile composition (with `..` preserving modes)
+//! - [`Layout::composition`] and [`Layout::compose_tile`]
+//! - [`composition`] and [`compose_tile`] free functions (supporting [`Layout`], [`Tiler`], `..`, and [`Nil`] operands)
 //!
 //! # Multi-Stage Pipeline
 //!
@@ -52,6 +53,18 @@
 //! - Stride overflow follows [`crate::integer`] rules (compile-time error for static operands,
 //!   runtime panic for dynamic operands).
 //!
+//! Ordinary integer modes must combine without carrying across discontinuities
+//! of the left layout's linear index mapping.
+//!
+//! ```compile_fail,E0080
+//! # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+//! # #![allow(incomplete_features)]
+//! use noodle_cute::{algebra::composition, int_tuple, integer::Int, layout::Layout};
+//! let a = Layout::new(int_tuple![Int::<3>, Int::<2>], int_tuple![Int::<1>, Int::<8>]);
+//! let b = Layout::new(int_tuple![Int::<2>, Int::<2>], int_tuple![Int::<1>, Int::<2>]);
+//! let _ = composition(a, b);
+//! ```
+//!
 //! Integer RHS modes entering binary-polynomial strides must combine without
 //! carrying, both within each coordinate and between modes on the same axis.
 //!
@@ -64,12 +77,14 @@
 //! ```
 
 use core::marker::ConstParamTy;
+use core::ops::RangeFull;
 
+use crate::NoodleCuteError;
 use crate::basis::{BasisCoeff, ComparePath, ProjectByPath, SingleBasis};
 use crate::f2::{F2, F2Scalar};
 use crate::integer::{
-    ArithFloorDiv, FloorQuotient, IS_NON_NEG, Int, Integer, carry_free_mask, div, floor_div,
-    floor_rem, int, sub, uint,
+    ArithFloorDiv, FloorQuotient, IS_NON_NEG, Int, Integer, add, carry_free_mask, div, floor_div,
+    floor_rem, int, max_residue, mul, sub, uint,
 };
 use crate::layout::{Coprofile, Layout, Tiler, tiler_to_layout};
 use crate::shape::{IndexToCoord, Shape, ShapeScalar, ValidShapeExtent};
@@ -186,6 +201,86 @@ const NEEDS_MASK_CHECK<L: ContainsF2, D: CompositionMask<S>, S: Copy>: bool =
                 "integer carries in F2 composition");
         L::HAS_F2 && D::STATIC_MASK.is_none()
     };
+
+// The index decomposition changes slope at non-contiguous radix boundaries.
+// Independent RHS digits may be distributed exactly when their low parts
+// cannot carry across such a boundary. Their extrema are jointly attainable.
+const fn integer_carries<S: [const] Item, D: [const] Item, R: [const] Item, V: [const] Item>(
+    shape: Option<S>,
+    stride: Option<D>,
+    rhs_shape: Option<R>,
+    rhs_stride: Option<V>,
+) -> bool {
+    if !D::INTEGER_LEAVES || !V::INTEGER_LEAVES || S::LEAVES < 2 {
+        return false;
+    }
+    let mut j = 0;
+    let mut negative_rhs = false;
+    while j < R::LEAVES {
+        let size = R::known_integer_leaf(rhs_shape, j).unwrap();
+        if size == 0 {
+            return false;
+        }
+        negative_rhs |= size > 1 && V::known_integer_leaf(rhs_stride, j).unwrap() < 0;
+        j = add(j, 1);
+    }
+    let mut prefix = 1;
+    let mut prev_extent = 1;
+    let mut prev_stride = 0;
+    let mut i = 0;
+    while i < S::LEAVES {
+        let extent = S::known_integer_leaf(shape, i).unwrap();
+        let d = D::known_integer_leaf(stride, i).unwrap();
+        if extent == 0 {
+            return false;
+        }
+        // The outermost leaf remains active even at extent one (extended domain).
+        if extent > 1 || i == sub(S::LEAVES, 1) {
+            if prefix > 1 && (floor_rem(d, prev_extent) != 0 || div(d, prev_extent) != prev_stride)
+            {
+                let mut remaining = sub(prefix, 1);
+                let mut j = 0;
+                while j < R::LEAVES {
+                    let high = max_residue(
+                        R::known_integer_leaf(rhs_shape, j).unwrap(),
+                        V::known_integer_leaf(rhs_stride, j).unwrap(),
+                        prefix,
+                    );
+                    if high > remaining {
+                        return true;
+                    }
+                    remaining = sub(remaining, high);
+                    j = add(j, 1);
+                }
+            }
+            if i < sub(S::LEAVES, 1) {
+                // Every representable nonnegative RHS index fits below all later radices.
+                if prefix > div(int::MAX, extent) {
+                    return negative_rhs;
+                }
+                prefix = mul(prefix, extent);
+            }
+            prev_extent = extent;
+            prev_stride = d;
+        }
+        i = add(i, 1);
+    }
+    false
+}
+
+const CHECK_INTEGER_CARRIES<S: const Item, D: const Item, R: const Item, V: const Item>: bool = {
+    if !D::INTEGER_LEAVES || !V::INTEGER_LEAVES || S::LEAVES < 2 {
+        false
+    } else if S::IS_STATIC && D::IS_STATIC && R::IS_STATIC && V::IS_STATIC {
+        NoodleCuteError::Unsupported.check_with(
+            !integer_carries::<S, D, R, V>(None, None, None, None),
+            "cross-mode integer carry in composition",
+        );
+        false
+    } else {
+        true
+    }
+};
 
 /// Compile-time action when dividing out stride `M` from head mode `S0:D0`.
 #[doc(hidden)]
@@ -686,6 +781,13 @@ const impl ReplaceNilHead for Nil {
     }
 }
 
+const impl ReplaceNilHead for RangeFull {
+    type Output = Int<1>;
+    fn replace_nil_head(self) -> Int<1> {
+        Int
+    }
+}
+
 const impl ReplaceNilHead for int {
     type Output = int;
     fn replace_nil_head(self) -> int {
@@ -773,6 +875,11 @@ where
 }
 
 /// Layout (or tensor) composition algebra $A \circ B$.
+#[diagnostic::on_unimplemented(
+    message = "cannot compose `{Self}` with `{B}`",
+    label = "unsupported composition operands",
+    note = "check shape/stride compatibility, divisibility, and carry-free requirements"
+)]
 pub const trait Composition<B>: Copy {
     /// Resulting composed [`Layout`], [`Tensor`](crate::tensor::Tensor), or [`Nil`].
     type Output: Copy;
@@ -783,6 +890,13 @@ pub const trait Composition<B>: Copy {
 const impl Composition<Nil> for Nil {
     type Output = Nil;
     fn composition(self, _: Nil) -> Nil {
+        Nil
+    }
+}
+
+const impl Composition<RangeFull> for Nil {
+    type Output = Nil;
+    fn composition(self, _: RangeFull) -> Nil {
         Nil
     }
 }
@@ -851,6 +965,13 @@ const impl<SA: Shape, DA: Stride<SA>> Composition<Nil> for Layout<SA, DA> {
     }
 }
 
+const impl<SA: Shape, DA: Stride<SA>> Composition<RangeFull> for Layout<SA, DA> {
+    type Output = Self;
+    fn composition(self, _: RangeFull) -> Self {
+        self
+    }
+}
+
 macro_rules! impl_layout_compose_scalar_tiler {
     ([$($g:tt)*] $S:ty) => {
         const impl<SA, DA, $($g)*> Composition<$S> for Layout<SA, DA>
@@ -902,15 +1023,15 @@ const impl<SA: Shape, DA: Stride<SA>> Composition<Layout<Nil, Nil>> for Layout<S
 const impl<SA, DA, BS0, BS1, BST, BD0, BD1, BDT, HeadOutS, HeadOutD, TailOutS, TailOutD>
     Composition<Layout<Til<BS0, Til<BS1, BST>>, Til<BD0, Til<BD1, BDT>>>> for Layout<SA, DA>
 where
-    SA: Shape,
-    DA: ContainsF2 + Stride<SA>,
+    SA: const Shape,
+    DA: ContainsF2 + const Stride<SA>,
     BD0: [const] CrossModeCarry<BS0, Til<BD1, BDT>, Til<BS1, BST>>,
-    BS0: Shape,
-    BD0: Stride<BS0>,
-    BS1: Shape,
-    BD1: Stride<BS1>,
-    BST: Tuple + Shape,
-    BDT: Tuple + Stride<BST>,
+    BS0: const Shape,
+    BD0: const Stride<BS0>,
+    BS1: const Shape,
+    BD1: const Stride<BS1>,
+    BST: const Tuple + const Shape,
+    BDT: const Tuple + const Stride<BST>,
     Self: [const] Composition<Layout<BS0, BD0>, Output = Layout<HeadOutS, HeadOutD>>,
     Self: [const] Composition<
             Layout<Til<BS1, BST>, Til<BD1, BDT>>,
@@ -927,6 +1048,17 @@ where
         self,
         b: Layout<Til<BS0, Til<BS1, BST>>, Til<BD0, Til<BD1, BDT>>>,
     ) -> Self::Output {
+        if CHECK_INTEGER_CARRIES::<SA, DA, Til<BS0, Til<BS1, BST>>, Til<BD0, Til<BD1, BDT>>> {
+            NoodleCuteError::Unsupported.check_with(
+                !integer_carries(
+                    Some(self.shape),
+                    Some(self.stride),
+                    Some(b.shape),
+                    Some(b.stride),
+                ),
+                "cross-mode integer carry in composition",
+            );
+        }
         if CHECK_OVERLAP::<DA, BD0, BS0, Til<BD1, BDT>, Til<BS1, BST>> {
             assert!(
                 b.stride.0.disjoint(b.shape.0, b.stride.1, b.shape.1),
@@ -1004,6 +1136,53 @@ where
     }
 }
 
+/// Mode-wise tile composition of a [`Layout`] with a tuple tiler (CuTe `composition(layout, tile)`).
+///
+/// Composes mode `i` of `self` with element `i` of `T`, leaving modes matched by `..`
+/// ([`RangeFull`]) or [`Nil`] unchanged and dropping trailing modes beyond `T`'s rank.
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::algebra::compose_tile;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::layout::Layout;
+/// use noodle_cute::{int_tuple, tuple};
+///
+/// let layout = Layout::new(int_tuple![Int::<8>, Int::<4>], int_tuple![Int::<1>, Int::<8>]);
+/// let tile = tuple![Layout::new(Int::<4>, Int::<2>), ..];
+/// assert_eq!(
+///     compose_tile(layout, tile),
+///     Layout::new(int_tuple![Int::<4>, Int::<4>], int_tuple![Int::<2>, Int::<8>])
+/// );
+/// ```
+pub const trait ComposeTile<T>: Copy {
+    /// Resulting mode-wise composed [`Layout`].
+    type Output: Copy;
+
+    /// Composes `self` mode by mode with `tile`.
+    fn compose_tile(self, tile: T) -> Self::Output;
+}
+
+const impl<SA, DA, T> ComposeTile<T> for Layout<SA, DA>
+where
+    SA: Shape + [const] Wrap,
+    DA: Stride<SA> + [const] Wrap,
+    SA::Wrapped: Tuple + Shape,
+    DA::Wrapped: Tuple + Stride<SA::Wrapped>,
+    T: Tuple,
+    Layout<SA::Wrapped, DA::Wrapped>: [const] CompositionTuple<T>,
+{
+    type Output = Layout<
+        <Layout<SA::Wrapped, DA::Wrapped> as CompositionTuple<T>>::Shape,
+        <Layout<SA::Wrapped, DA::Wrapped> as CompositionTuple<T>>::Stride,
+    >;
+
+    fn compose_tile(self, tile: T) -> Self::Output {
+        Layout::new(self.shape.wrap(), self.stride.wrap()).composition_tuple(tile)
+    }
+}
+
 impl<S, D> Layout<S, D> {
     /// Computes the layout composition `self o b`.
     pub const fn composition<B>(self, b: B) -> <Self as Composition<B>>::Output
@@ -1011,6 +1190,14 @@ impl<S, D> Layout<S, D> {
         Self: [const] Composition<B>,
     {
         Composition::composition(self, b)
+    }
+
+    /// Composes `self` mode by mode with tuple tile `tile`, keeping `..` / `Nil` modes unchanged.
+    pub const fn compose_tile<T>(self, tile: T) -> <Self as ComposeTile<T>>::Output
+    where
+        Self: [const] ComposeTile<T>,
+    {
+        ComposeTile::compose_tile(self, tile)
     }
 }
 
@@ -1023,4 +1210,12 @@ where
     A: [const] Composition<B>,
 {
     a.composition(b)
+}
+
+/// Composes layout `a` mode by mode with tuple tile `tile` (CuTe `composition(layout, tile)`).
+pub const fn compose_tile<A, T>(a: A, tile: T) -> <A as ComposeTile<T>>::Output
+where
+    A: [const] ComposeTile<T>,
+{
+    a.compose_tile(tile)
 }

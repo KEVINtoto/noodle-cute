@@ -24,9 +24,11 @@
 //!
 //! # Notes
 //!
-//! - [`coshape`] requires positive shape extents (`> 0`) and non-negative maximum offsets.
+//! - [`coshape`] bounds a zero-origin codomain. Every mode must have non-negative
+//!   contributions. Use [`linear_bounds`] for signed linear address ranges.
 //! - Sparse gaps in active basis paths are padded with `Int<1>` in the resulting coshape.
 
+use crate::NoodleCuteError;
 use crate::basis::{
     BasisCoeff, BasisCombination, BasisPath, BasisTerm, BasisTuple, COEFF_IS_STATIC_ZERO,
     CanonicalBasis, CombAsTuple, ComparePath, EQ_MODE, EmitBasisTerm, IntoBasisCombination,
@@ -1135,6 +1137,55 @@ where
     }
 }
 
+/// Verifies each coordinate component of a mode contribution fits a zero-origin codomain.
+#[doc(hidden)]
+pub const trait CoshapeContribution: Copy {
+    /// Rejects contributions reaching below the origin before modes are combined.
+    fn validate(self);
+}
+
+const NONNEGATIVE_CONTRIBUTION<V: BasisCoeff>: bool =
+    !matches!(V::STATIC_CMP_ZERO, Some(core::cmp::Ordering::Less));
+
+const impl<V: [const] BasisCoeff> CoshapeContribution for V
+where
+    (): [const] ValidShapeExtent<{ NONNEGATIVE_CONTRIBUTION::<V> }>,
+{
+    fn validate(self) {
+        NoodleCuteError::InvalidShape.check_with(
+            !matches!(self.cmp_zero(), core::cmp::Ordering::Less),
+            "coshape requires non-negative mode contributions",
+        );
+    }
+}
+
+const impl<V: [const] CoshapeContribution, P: Copy> CoshapeContribution for BasisTerm<V, P> {
+    fn validate(self) {
+        self.value.validate();
+    }
+}
+
+const impl CoshapeContribution for Nil {
+    fn validate(self) {}
+}
+
+const impl<H: [const] CoshapeContribution, T: [const] CoshapeContribution> CoshapeContribution
+    for Til<H, T>
+{
+    fn validate(self) {
+        self.0.validate();
+        self.1.validate();
+    }
+}
+
+const impl<T: BasisTuple + [const] CoshapeContribution> CoshapeContribution
+    for BasisCombination<T>
+{
+    fn validate(self) {
+        self.terms().validate();
+    }
+}
+
 /// Folds maximal mode contributions `(s_i - 1) * d_i` via [`CoshapeAccumulate`].
 #[doc(hidden)]
 pub const trait CoshapeInnerProduct<D, Acc = Int<0>>: Copy {
@@ -1153,11 +1204,14 @@ const impl<S, D, Acc> CoshapeInnerProduct<D, Acc> for S
 where
     S: [const] Integer,
     D: [const] StrideMul<S>,
+    D::Output: [const] CoshapeContribution,
     Acc: [const] CoshapeAccumulate<D::Output>,
 {
     type Output = Acc::Output;
     fn coshape_inner_product(self, stride: D, acc: Acc) -> Self::Output {
-        acc.coshape_accumulate(stride.stride_mul(self))
+        let contribution = stride.stride_mul(self);
+        contribution.validate();
+        acc.coshape_accumulate(contribution)
     }
 }
 
@@ -1178,8 +1232,16 @@ where
 
 /// Computes the codomain shape of a layout defined by `(shape, stride)`.
 ///
-/// Requires positive leaf extents in `shape` and non-negative maximum offsets
-/// (e.g., non-negative strides); panics on zero/negative extents, negative offsets, or [`int`] overflow.
+/// Requires positive leaf extents in `shape` and non-negative per-mode offsets
+/// along each codomain axis. Use [`linear_bounds`] for signed linear address ranges.
+/// Static negative mode contributions are rejected during compilation.
+///
+/// ```compile_fail
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::{integer::Int, int_tuple, stride::coshape};
+/// let _ = coshape(int_tuple![Int::<2>, Int::<2>], int_tuple![Int::<-1>, Int::<2>]);
+/// ```
 pub const trait Coshape<D: Stride<Self>>: [const] Shape {
     /// Bounding codomain shape type.
     type Output: [const] Shape;

@@ -1016,3 +1016,9 @@ fn test_stride_mul_and_prefix_product_panics_on_overflow() {
         .is_err()
     );
 }
+
+#[test]
+#[should_panic(expected = "negative")]
+fn signed_contributions_cannot_cancel_in_coshape() {
+    let _ = coshape(int_tuple![2i32, 2i32], int_tuple![-1i32, 2i32]);
+}

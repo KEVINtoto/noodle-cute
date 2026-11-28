@@ -35,6 +35,7 @@
 //! - Divisibility violations or [`int`] overflow fail at compile time when shape, stride, and
 //!   scale are all static, and panic at runtime when any operand is dynamic.
 
+use crate::NoodleCuteError;
 use crate::basis::{BasisCoeff, BasisCombination, BasisPath, BasisTerm};
 use crate::f2::{F2, F2Scalar, ValidF2Value};
 use crate::integer::{
@@ -516,4 +517,62 @@ pub const fn recast<L: [const] Recast<Scale>, Scale: [const] RecastScale>(
     scale: Scale,
 ) -> L::Output {
     layout.recast(scale)
+}
+
+const fn recast_type_ratio<Old, New>() -> (int, int) {
+    let old = size_of::<Old>();
+    let new = size_of::<New>();
+    NoodleCuteError::InvalidShape.check_with(
+        old > 0 && new > 0,
+        "recast_layout requires non-zero-sized element types",
+    );
+    NoodleCuteError::ArithmeticOverflow.check_with(
+        old <= int::MAX as usize && new <= int::MAX as usize,
+        "recast_layout element size exceeds int::MAX",
+    );
+    let (o, n) = (old as int, new as int);
+    let g = gcd(n, o);
+    (div(n, g), div(o, g))
+}
+
+/// Reduced numerator `size_of::<New>() / gcd(size_of::<New>(), size_of::<Old>())`.
+#[doc(hidden)]
+pub const RECAST_NUM<Old, New>: int = recast_type_ratio::<Old, New>().0;
+
+/// Reduced denominator `size_of::<Old>() / gcd(size_of::<New>(), size_of::<Old>())`.
+#[doc(hidden)]
+pub const RECAST_DEN<Old, New>: int = recast_type_ratio::<Old, New>().1;
+
+/// Reduced rational element-size scale `size_of::<New>() / size_of::<Old>()`.
+pub type RecastTypeScale<Old, New> =
+    Fraction<Int<{ RECAST_NUM::<Old, New> }>, Int<{ RECAST_DEN::<Old, New> }>>;
+
+/// Rescales `layout` from `Old` element units to `New` element units (CuTe `recast_layout<Old, New>`).
+///
+/// Pure layout transformation that never touches memory. Zero-sized element types are rejected
+/// at compile time.
+///
+/// # Examples
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::layout::{Layout, recast_layout};
+///
+/// let bytes = Layout::new(int_tuple![Int::<16>, Int::<8>], int_tuple![Int::<1>, Int::<16>]);
+/// let words = recast_layout::<u8, u32, _>(&bytes);
+/// assert_eq!(
+///     words,
+///     Layout::new(int_tuple![Int::<4>, Int::<8>], int_tuple![Int::<1>, Int::<4>])
+/// );
+/// ```
+pub const fn recast_layout<Old, New, L>(
+    layout: &L,
+) -> <L as Recast<RecastTypeScale<Old, New>>>::Output
+where
+    L: [const] Recast<RecastTypeScale<Old, New>>,
+{
+    layout.recast(Fraction::new(Int, Int))
 }

@@ -59,7 +59,7 @@
 //!
 //! - Negative dynamic [`int`] extents panic at runtime when queried.
 
-use crate::integer::{IS_NON_NEG, IS_ZERO, Int, Integer, int, is_pow2, mul};
+use crate::integer::{IS_NON_NEG, IS_ZERO, Int, Integer, int, is_pow2, mul, mul_maybe_overflows};
 use crate::tuple::{FlatTuple, Item, Leaf, Nil, Til, Tuple};
 
 pub mod compatible;
@@ -69,6 +69,11 @@ pub use compatible::*;
 pub use coord::*;
 
 /// Compile-time guard restricting static shape extents to non-negative values (`VALID == true`).
+#[diagnostic::on_unimplemented(
+    message = "static shape extent must be non-negative",
+    label = "negative static extent in shape",
+    note = "Int<N> shape extents must satisfy N >= 0"
+)]
 #[doc(hidden)]
 pub const trait ValidShapeExtent<const VALID: bool> {}
 const impl ValidShapeExtent<true> for () {}
@@ -96,6 +101,11 @@ const impl ValidShapeExtent<true> for () {}
 /// let s = int_tuple![Int::<2>, (3i32, Int::<5>)];
 /// assert_eq!(s.size(), 30);
 /// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid layout shape",
+    label = "expected a valid shape",
+    note = "use non-negative Int<N>, runtime int (i32), Nil, or nested tuples of shapes"
+)]
 pub const trait Shape: [const] Item {
     /// Compile-time total size when all leaf extents are static and fit in [`int`].
     const STATIC_SIZE: Option<int> = None;
@@ -188,6 +198,11 @@ mod sealed {
     use super::ValidShapeExtent;
 
     /// Seals [`ShapeScalar`](super::ShapeScalar) to `int` and non-negative `Int<N>`.
+    #[diagnostic::on_unimplemented(
+        message = "`{Self}` is not a scalar shape extent",
+        label = "expected a scalar shape leaf (non-negative `Int<N>` or `i32`)",
+        note = "tuple shapes require a congruent tuple stride with matching structure"
+    )]
     #[doc(hidden)]
     pub trait SealedShapeScalar {}
     impl SealedShapeScalar for int {}
@@ -245,6 +260,10 @@ where
 pub const trait BinaryExtents: Shape {
     const STATIC_BINARY: Option<bool>;
     fn binary_extents(self) -> bool;
+    /// Returns the total domain size when every extent is a power of two and fits in `int`.
+    fn binary_extents_size(self) -> Option<int>;
+    /// Returns the total domain size when every extent before the last leaf is a power of two.
+    fn leading_binary_size(self) -> Option<int>;
 }
 const impl<S: [const] ShapeScalar> BinaryExtents for S {
     const STATIC_BINARY: Option<bool> = match S::STATIC_VALUE {
@@ -254,11 +273,25 @@ const impl<S: [const] ShapeScalar> BinaryExtents for S {
     fn binary_extents(self) -> bool {
         is_pow2(self.value())
     }
+    fn binary_extents_size(self) -> Option<int> {
+        let s = self.value();
+        if is_pow2(s) { Some(s) } else { None }
+    }
+    fn leading_binary_size(self) -> Option<int> {
+        let s = self.value();
+        if s > 0 { Some(s) } else { None }
+    }
 }
 const impl BinaryExtents for Nil {
     const STATIC_BINARY: Option<bool> = Some(true);
     fn binary_extents(self) -> bool {
         true
+    }
+    fn binary_extents_size(self) -> Option<int> {
+        Some(1)
+    }
+    fn leading_binary_size(self) -> Option<int> {
+        Some(1)
     }
 }
 const impl<H: [const] BinaryExtents, T: [const] BinaryExtents + Tuple> BinaryExtents for Til<H, T> {
@@ -269,5 +302,21 @@ const impl<H: [const] BinaryExtents, T: [const] BinaryExtents + Tuple> BinaryExt
     };
     fn binary_extents(self) -> bool {
         self.0.binary_extents() && self.1.binary_extents()
+    }
+    fn binary_extents_size(self) -> Option<int> {
+        match (self.0.binary_extents_size(), self.1.binary_extents_size()) {
+            (Some(a), Some(b)) => mul_maybe_overflows(a, b),
+            _ => None,
+        }
+    }
+    fn leading_binary_size(self) -> Option<int> {
+        if T::LEAVES == 0 {
+            self.0.leading_binary_size()
+        } else {
+            match (self.0.binary_extents_size(), self.1.leading_binary_size()) {
+                (Some(a), Some(b)) => mul_maybe_overflows(a, b),
+                _ => None,
+            }
+        }
     }
 }

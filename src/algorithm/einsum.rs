@@ -924,12 +924,12 @@ pub const SPEC_B_FOLD<const SPEC: EinsumSpec>: OperandFold = SPEC.b_fold;
 pub const SPEC_C_FOLD<const SPEC: EinsumSpec>: OperandFold = SPEC.c_fold;
 
 /// Binary tensor contraction trait backing [`einsum()`] and [`einsum!`](crate::einsum!).
-pub const trait Einsum<const SPEC: EinsumSpec, B, C> {
+pub trait Einsum<const SPEC: EinsumSpec, B, C> {
     /// Accumulates the binary contraction specified by `SPEC` into `c` in place.
     fn einsum(self, b: B, c: &mut C);
 }
 
-const impl<const SPEC: EinsumSpec, AA, SA, DA, AB, SB, DB, AC, SC, DC>
+impl<const SPEC: EinsumSpec, AA, SA, DA, AB, SB, DB, AC, SC, DC>
     Einsum<SPEC, Tensor<AB, Layout<SB, DB>>, Tensor<AC, Layout<SC, DC>>>
     for Tensor<AA, Layout<SA, DA>>
 where
@@ -942,17 +942,17 @@ where
     DB: Stride<SB>,
     SC: Shape,
     DC: Stride<SC>,
-    Self: [const] FoldOperand<{ SPEC_A_FOLD::<SPEC> }>,
-    Tensor<AB, Layout<SB, DB>>: [const] FoldOperand<{ SPEC_B_FOLD::<SPEC> }>,
-    Tensor<AC, Layout<SC, DC>>: [const] FoldOperand<{ SPEC_C_FOLD::<SPEC> }>,
-    Layout<SA, DA>: [const] CheckEinsumLabels<
+    Self: FoldOperand<{ SPEC_A_FOLD::<SPEC> }>,
+    Tensor<AB, Layout<SB, DB>>: FoldOperand<{ SPEC_B_FOLD::<SPEC> }>,
+    Tensor<AC, Layout<SC, DC>>: FoldOperand<{ SPEC_C_FOLD::<SPEC> }>,
+    Layout<SA, DA>: CheckEinsumLabels<
             SPEC,
             0,
             { LABEL_ROLE::<SPEC, 0> },
             Layout<SB, DB>,
             Layout<SC, DC>,
         >,
-    <Self as FoldOperand<{ SPEC_A_FOLD::<SPEC> }>>::Output: [const] Gemm<
+    <Self as FoldOperand<{ SPEC_A_FOLD::<SPEC> }>>::Output: Gemm<
             <Tensor<AB, Layout<SB, DB>> as FoldOperand<{ SPEC_B_FOLD::<SPEC> }>>::Output,
             <Tensor<AC, Layout<SC, DC>> as FoldOperand<{ SPEC_C_FOLD::<SPEC> }>>::Output,
         >,
@@ -968,9 +968,9 @@ where
 
 /// Evaluates an explicit binary tensor contraction according to `SPEC`, accumulating into `c`
 /// (`C += A * B`) via zero-copy folding and [`reference::gemm`](super::reference::gemm).
-pub const fn einsum<const SPEC: EinsumSpec, A, B, C>(a: A, b: B, c: &mut C)
+pub fn einsum<const SPEC: EinsumSpec, A, B, C>(a: A, b: B, c: &mut C)
 where
-    A: [const] Einsum<SPEC, B, C>,
+    A: Einsum<SPEC, B, C>,
 {
     a.einsum(b, c);
 }

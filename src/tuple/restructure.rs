@@ -5,9 +5,11 @@
 //!
 //! # Main Interfaces
 //!
-//! - **Wrapping & concatenation**: [`Wrap`], [`Unwrap`], [`Append`], [`Prepend`].
+//! - **Wrapping & concatenation**: [`Wrap`], [`Unwrap`], [`Append`], [`Prepend`],
+//!   [`PadModes`], [`pad_modes`].
+//! - **Grouping & transposition**: [`Group`], [`group`], [`Zip2`], [`zip2`].
 //! - **Flattening & reconstruction**: [`Flatten`], [`Unflatten`], [`unflatten`],
-//!   [`unflatten_like`], [`RepeatLike`], [`repeat_like`].
+//!   [`unflatten_like`], [`RepeatLike`], [`repeat_like`], [`RepeatModes`], [`repeat_modes`].
 //! - **Path-addressed updates & lifting**: [`ReplaceAt`], [`Replace`], [`replace`],
 //!   [`Lift`], [`lift`].
 //!
@@ -695,4 +697,418 @@ pub const fn lift<Path, Make, Pad: Copy, T: [const] Lift<Make, Pad, Path>>(
     pad: Pad,
 ) -> T::Output {
     t.lift(make, pad)
+}
+
+// ------------------------------------------------------------------
+// Grouping: Group<B, E> / group
+// ------------------------------------------------------------------
+
+/// Compile-time guard verifying `0 <= B <= E <= RANK` for [`Group`].
+#[doc(hidden)]
+pub const trait ValidGroupRange<const VALID: bool> {}
+const impl ValidGroupRange<true> for () {}
+
+/// Compile-time check that `[B, E)` is a valid half-open range within `0..=RANK`.
+#[doc(hidden)]
+pub const GROUP_RANGE_VALID<const B: int, const E: int, const RANK: int>: bool =
+    B >= 0 && B <= E && E <= RANK;
+
+/// Number of grouped modes `E - B` when `B <= E` (or `0` otherwise).
+#[doc(hidden)]
+pub const GROUP_SPAN<const B: int, const E: int>: int = if E >= B { sub(E, B) } else { 0 };
+
+/// `true` iff `[B, E)` is an empty range (`B == E`), leaving the tuple unchanged.
+#[doc(hidden)]
+pub const GROUP_IS_EMPTY<const B: int, const E: int>: bool = B == E;
+
+/// Splits a [`Tuple`] at compile-time mode position `N` into `(Prefix, Suffix)`.
+/// `DONE = true` stops splitting (`N == 0`); `DONE = false` peels one head mode.
+#[doc(hidden)]
+pub const trait SplitAtStep<const N: int, const DONE: bool>: [const] Tuple {
+    type Prefix: [const] Tuple;
+    type Suffix: [const] Tuple;
+    fn split_at_step(&self) -> (Self::Prefix, Self::Suffix);
+}
+
+const impl<T: [const] Tuple, const N: int> SplitAtStep<N, true> for T {
+    type Prefix = Nil;
+    type Suffix = T;
+
+    fn split_at_step(&self) -> (Nil, T) {
+        (Nil, *self)
+    }
+}
+
+const impl<H, T, const N: int> SplitAtStep<N, false> for Til<H, T>
+where
+    H: [const] Item,
+    T: [const] Tuple + [const] SplitAtStep<{ DECREASE::<N> }, { IS_ZERO::<{ DECREASE::<N> }> }>,
+{
+    type Prefix =
+        Til<H, <T as SplitAtStep<{ DECREASE::<N> }, { IS_ZERO::<{ DECREASE::<N> }> }>>::Prefix>;
+    type Suffix = <T as SplitAtStep<{ DECREASE::<N> }, { IS_ZERO::<{ DECREASE::<N> }> }>>::Suffix;
+
+    fn split_at_step(&self) -> (Self::Prefix, Self::Suffix) {
+        let (prefix, suffix) = self.1.split_at_step();
+        (Til(self.0, prefix), suffix)
+    }
+}
+
+/// Dispatches [`Group`] between empty ranges (`EMPTY = true`, identity) and non-empty ranges (`EMPTY = false`).
+#[doc(hidden)]
+pub const trait GroupDispatch<const B: int, const E: int, const EMPTY: bool>: [const] Tuple {
+    type Output: [const] Tuple;
+    fn group_dispatch(&self) -> Self::Output;
+}
+
+const impl<T: [const] Tuple, const B: int, const E: int> GroupDispatch<B, E, true> for T {
+    type Output = Self;
+
+    fn group_dispatch(&self) -> Self {
+        *self
+    }
+}
+
+const impl<T, const B: int, const E: int> GroupDispatch<B, E, false> for T
+where
+    T: [const] Tuple + [const] SplitAtStep<B, { IS_ZERO::<B> }>,
+    <T as SplitAtStep<B, { IS_ZERO::<B> }>>::Suffix: [const] SplitAtStep<
+            { GROUP_SPAN::<B, E> },
+            { IS_ZERO::<{ GROUP_SPAN::<B, E> }> },
+        >,
+    <T as SplitAtStep<B, { IS_ZERO::<B> }>>::Prefix: [const] Append<
+            Til<
+                <<T as SplitAtStep<B, { IS_ZERO::<B> }>>::Suffix as SplitAtStep<
+                    { GROUP_SPAN::<B, E> },
+                    { IS_ZERO::<{ GROUP_SPAN::<B, E> }> },
+                >>::Prefix,
+                <<T as SplitAtStep<B, { IS_ZERO::<B> }>>::Suffix as SplitAtStep<
+                    { GROUP_SPAN::<B, E> },
+                    { IS_ZERO::<{ GROUP_SPAN::<B, E> }> },
+                >>::Suffix,
+            >,
+        >,
+{
+    type Output = <<T as SplitAtStep<B, { IS_ZERO::<B> }>>::Prefix as Append<
+        Til<
+            <<T as SplitAtStep<B, { IS_ZERO::<B> }>>::Suffix as SplitAtStep<
+                { GROUP_SPAN::<B, E> },
+                { IS_ZERO::<{ GROUP_SPAN::<B, E> }> },
+            >>::Prefix,
+            <<T as SplitAtStep<B, { IS_ZERO::<B> }>>::Suffix as SplitAtStep<
+                { GROUP_SPAN::<B, E> },
+                { IS_ZERO::<{ GROUP_SPAN::<B, E> }> },
+            >>::Suffix,
+        >,
+    >>::Output;
+
+    fn group_dispatch(&self) -> Self::Output {
+        let (prefix, after_b) = self.split_at_step();
+        let (middle, suffix) = after_b.split_at_step();
+        prefix.append(Til(middle, suffix))
+    }
+}
+
+/// Groups the top-level modes in `[B, E)` into a single nested mode (CuTe `group<B, E>`).
+///
+/// `B == E` leaves the tuple unchanged; invalid ranges (`B < 0`, `B > E`, or `E > RANK`)
+/// fail at compile time.
+///
+/// # Examples
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::tuple::group;
+///
+/// let t = int_tuple![Int::<1>, Int::<2>, Int::<3>, Int::<4>];
+/// assert_eq!(group::<1, 3, _>(&t), int_tuple![Int::<1>, (Int::<2>, Int::<3>), Int::<4>]);
+/// assert_eq!(group::<2, 2, _>(&t), t);
+/// ```
+///
+/// Reversed or out-of-bounds ranges are rejected at compile time:
+///
+/// ```compile_fail,E0277
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::tuple::group;
+/// let t = int_tuple![Int::<1>, Int::<2>];
+/// let _ = group::<2, 1, _>(&t);
+/// ```
+///
+/// ```compile_fail,E0277
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::tuple::group;
+/// let t = int_tuple![Int::<1>, Int::<2>];
+/// let _ = group::<0, 3, _>(&t);
+/// ```
+pub const trait Group<const B: int, const E: int>: [const] Tuple {
+    /// Resulting regrouped [`Tuple`].
+    type Output: [const] Tuple;
+    /// Groups top-level modes in `[B, E)` into one nested mode.
+    fn group(&self) -> Self::Output;
+}
+
+const impl<T, const B: int, const E: int> Group<B, E> for T
+where
+    T: [const] Tuple + [const] GroupDispatch<B, E, { GROUP_IS_EMPTY::<B, E> }>,
+    (): ValidGroupRange<{ GROUP_RANGE_VALID::<B, E, { T::RANK }> }>,
+{
+    type Output = <T as GroupDispatch<B, E, { GROUP_IS_EMPTY::<B, E> }>>::Output;
+
+    fn group(&self) -> Self::Output {
+        self.group_dispatch()
+    }
+}
+
+/// Groups the top-level modes in `[B, E)` of tuple `t` into one nested mode.
+pub const fn group<const B: int, const E: int, T: [const] Group<B, E>>(t: &T) -> T::Output {
+    t.group()
+}
+
+impl<H: Item, T: Tuple> Til<H, T> {
+    /// Groups top-level modes in `[B, E)` into a single nested mode.
+    pub const fn group<const B: int, const E: int>(&self) -> <Self as Group<B, E>>::Output
+    where
+        Self: [const] Group<B, E>,
+    {
+        Group::<B, E>::group(self)
+    }
+}
+
+// ------------------------------------------------------------------
+// Transposition: Zip2 / zip2
+// ------------------------------------------------------------------
+
+/// Unzips a tuple of 2-tuples `((a_0, b_0), (a_1, b_1), ...)` into two parallel tuples
+/// `((a_0, a_1, ...), (b_0, b_1, ...))`.
+#[doc(hidden)]
+pub const trait UnzipPairs: [const] Tuple {
+    type First: [const] Tuple;
+    type Second: [const] Tuple;
+    fn unzip_pairs(self) -> (Self::First, Self::Second);
+}
+
+const impl UnzipPairs for Nil {
+    type First = Nil;
+    type Second = Nil;
+
+    fn unzip_pairs(self) -> (Nil, Nil) {
+        (Nil, Nil)
+    }
+}
+
+const impl<A, B, T> UnzipPairs for Til<Til<A, Til<B, Nil>>, T>
+where
+    A: [const] Item,
+    B: [const] Item,
+    T: [const] UnzipPairs,
+{
+    type First = Til<A, T::First>;
+    type Second = Til<B, T::Second>;
+
+    fn unzip_pairs(self) -> (Self::First, Self::Second) {
+        let (first, second) = self.1.unzip_pairs();
+        (Til(self.0.0, first), Til(self.0.1.0, second))
+    }
+}
+
+/// Transposes a tuple (or [`Layout`](crate::layout::Layout)) of pairs
+/// `((a_0, b_0), (a_1, b_1), ...)` into `((a_0, a_1, ...), (b_0, b_1, ...))` (CuTe `zip2`).
+///
+/// # Examples
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::tuple::zip2;
+///
+/// let t = int_tuple![(Int::<1>, Int::<2>), (Int::<3>, Int::<4>)];
+/// assert_eq!(zip2(t), int_tuple![(Int::<1>, Int::<3>), (Int::<2>, Int::<4>)]);
+/// ```
+pub const trait Zip2: Copy {
+    /// Resulting transposed pair structure.
+    type Output: Copy;
+    /// Transposes the outer mode list and inner pair level.
+    fn zip2(self) -> Self::Output;
+}
+
+const impl Zip2 for Nil {
+    type Output = Til<Nil, Til<Nil, Nil>>;
+
+    fn zip2(self) -> Self::Output {
+        Til(Nil, Til(Nil, Nil))
+    }
+}
+
+const impl<A, B, T> Zip2 for Til<Til<A, Til<B, Nil>>, T>
+where
+    A: [const] Item,
+    B: [const] Item,
+    T: [const] UnzipPairs,
+{
+    type Output = Til<Til<A, T::First>, Til<Til<B, T::Second>, Nil>>;
+
+    fn zip2(self) -> Self::Output {
+        let (first, second) = self.unzip_pairs();
+        Til(first, Til(second, Nil))
+    }
+}
+
+/// Transposes a tuple or layout of pairs `((a_0, b_0), ...)` into `((a_0, ...), (b_0, ...))`.
+pub const fn zip2<T: [const] Zip2>(t: T) -> T::Output {
+    t.zip2()
+}
+
+// ------------------------------------------------------------------
+// Mode padding and top-level mode repetition: PadModes / RepeatModes
+// ------------------------------------------------------------------
+
+/// Pads a [`Tuple`] with trailing copies of `Pad` until its rank is at least `Target::RANK`.
+///
+/// Extra modes when `Self::RANK >= Target::RANK` are preserved unchanged.
+///
+/// # Examples
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::tuple::pad_modes;
+///
+/// let a = int_tuple![Int::<2>];
+/// let target = int_tuple![Int::<1>, Int::<1>, Int::<1>];
+/// assert_eq!(pad_modes(a, &target, Int::<0>), int_tuple![Int::<2>, Int::<0>, Int::<0>]);
+/// ```
+pub const trait PadModes<Target: [const] Tuple, Pad: [const] Item>: [const] Tuple {
+    /// Resulting tuple with rank `max(Self::RANK, Target::RANK)`.
+    type Output: [const] Tuple;
+    /// Appends copies of `pad` until `self` has at least as many modes as `Target`.
+    fn pad_modes(self, pad: Pad) -> Self::Output;
+}
+
+const impl<Pad: [const] Item> PadModes<Nil, Pad> for Nil {
+    type Output = Nil;
+
+    fn pad_modes(self, _: Pad) -> Nil {
+        Nil
+    }
+}
+
+const impl<H: [const] Item, T: [const] Tuple, Pad: [const] Item> PadModes<Nil, Pad> for Til<H, T> {
+    type Output = Self;
+
+    fn pad_modes(self, _: Pad) -> Self {
+        self
+    }
+}
+
+const impl<TH, TT, Pad> PadModes<Til<TH, TT>, Pad> for Nil
+where
+    TH: [const] Item,
+    TT: [const] Tuple,
+    Pad: [const] Item,
+    Nil: [const] PadModes<TT, Pad>,
+{
+    type Output = Til<Pad, <Nil as PadModes<TT, Pad>>::Output>;
+
+    fn pad_modes(self, pad: Pad) -> Self::Output {
+        Til(pad, Nil.pad_modes(pad))
+    }
+}
+
+const impl<H, T, TH, TT, Pad> PadModes<Til<TH, TT>, Pad> for Til<H, T>
+where
+    H: [const] Item,
+    T: [const] Tuple + [const] PadModes<TT, Pad>,
+    TH: [const] Item,
+    TT: [const] Tuple,
+    Pad: [const] Item,
+{
+    type Output = Til<H, <T as PadModes<TT, Pad>>::Output>;
+
+    fn pad_modes(self, pad: Pad) -> Self::Output {
+        Til(self.0, self.1.pad_modes(pad))
+    }
+}
+
+/// Pads tuple `t` with trailing copies of `pad` to at least the rank of `target`.
+pub const fn pad_modes<Target, Pad, T>(t: T, _target: &Target, pad: Pad) -> T::Output
+where
+    Target: [const] Tuple,
+    Pad: [const] Item,
+    T: [const] PadModes<Target, Pad>,
+{
+    t.pad_modes(pad)
+}
+
+/// Replaces every top-level mode of `Self` with a copy of `V` (producing a flat rank-matched
+/// template, unlike [`RepeatLike`] which mirrors full nested leaf structure).
+///
+/// # Examples
+///
+/// ```
+/// # #![feature(min_generic_const_args, generic_const_args, macroless_generic_const_args, generic_const_items, const_trait_impl)]
+/// # #![allow(incomplete_features)]
+/// use noodle_cute::int_tuple;
+/// use noodle_cute::integer::Int;
+/// use noodle_cute::tuple::repeat_modes;
+///
+/// let s = int_tuple![Int::<2>, (Int::<3>, Int::<4>)];
+/// assert_eq!(repeat_modes(Int::<1>, &s), int_tuple![Int::<1>, Int::<1>]);
+/// assert_eq!(repeat_modes(Int::<1>, &Int::<5>), Int::<1>);
+/// ```
+pub const trait RepeatModes<V: [const] Item>: [const] Item {
+    /// Flat template with the same top-level rank as `Self`.
+    type Output: [const] Item;
+    /// Produces a value matching `Self`'s top-level mode count filled with `val`.
+    fn repeat_modes(val: V) -> Self::Output;
+}
+
+const impl<V: [const] Item> RepeatModes<V> for Nil {
+    type Output = Nil;
+
+    fn repeat_modes(_: V) -> Nil {
+        Nil
+    }
+}
+
+const impl<L: [const] Leaf, V: [const] Item> RepeatModes<V> for L {
+    type Output = V;
+
+    fn repeat_modes(val: V) -> V {
+        val
+    }
+}
+
+const impl<H, T, V> RepeatModes<V> for Til<H, T>
+where
+    H: [const] Item,
+    T: [const] Tuple + [const] RepeatModes<V>,
+    <T as RepeatModes<V>>::Output: [const] Tuple,
+    V: [const] Item,
+{
+    type Output = Til<V, <T as RepeatModes<V>>::Output>;
+
+    fn repeat_modes(val: V) -> Self::Output {
+        Til(val, T::repeat_modes(val))
+    }
+}
+
+/// Produces a flat tuple (or scalar) with `template`'s top-level rank filled with `val`.
+pub const fn repeat_modes<V: [const] Item, T: [const] RepeatModes<V>>(
+    val: V,
+    _template: &T,
+) -> T::Output {
+    T::repeat_modes(val)
 }

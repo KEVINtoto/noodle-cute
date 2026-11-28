@@ -1167,3 +1167,23 @@ fn test_dgrad_reversed_stencil() {
         int_tuple![(Int::<1>, (Int::<4>,)), ((Int::<3>,), Int::<1>)]
     );
 }
+
+#[test]
+fn crossing_a_block_requires_coordinate_addressing() {
+    let buf: [i32; 32] = core::array::from_fn(|i| i as i32);
+    let act = make_tensor(
+        &buf,
+        Layout::new(
+            int_tuple![Int::<1>, (Int::<2>, Int::<4>), Int::<1>],
+            int_tuple![Int::<32>, (Int::<1>, Int::<8>), Int::<1>],
+        ),
+    );
+    let opts = Im2ColOptions::new().shape_zpq(Int::<2>).lower_trs(0i32);
+    assert!(std::panic::catch_unwind(|| im2col_with(act, Int::<2>, opts)).is_err());
+    let view = im2col_padded_with(act, Int::<2>, -1, opts);
+    for z in 0..2 {
+        for t in 0..2 {
+            assert_eq!(view(z, t), act(0i32, z + t, 0i32));
+        }
+    }
+}

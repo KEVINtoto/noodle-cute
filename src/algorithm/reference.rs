@@ -1,17 +1,20 @@
-//! Reference (naive) element-wise algorithms over CuTe [`Tensor`]s (Whitepaper §2.6).
+//! Reference element-wise algorithms over CuTe [`Tensor`]s (Whitepaper §2.6),
+//! built on top of [`crate::algorithm::atom`].
 //!
-//! These straightforward loops define the exact mathematical semantics of COPY and
-//! batched GEMM, serving both as executable implementations and as the oracle for
-//! layout-analyzed optimizations such as [`crate::algorithm::copy()`].
+//! These algorithms define the exact mathematical semantics of COPY and batched GEMM
+//! by delegating scalar execution to [`CopyAtom`] ([`UniversalCopy`] via [`copy_with`])
+//! and [`UniversalFma`](super::atom::UniversalFma) (via [`gemm_fma`]), serving both as
+//! executable implementations and as the oracle for layout-analyzed optimizations such
+//! as [`crate::algorithm::copy()`].
 //!
 //! # Main Interfaces
 //!
 //! - [`copy`]: Rank-1 element-wise transfer `dst[i] = src[i]` over flat coordinates
-//!   `0..size(dst)`. Realizes memcpy, gather, scatter, broadcast, constant fill, and
-//!   transpose through layout choice alone.
+//!   `0..size(dst)` via [`CopyAtom`] and [`copy_with`]. Realizes memcpy, gather, scatter,
+//!   broadcast, constant fill, and transpose through layout choice alone.
 //! - [`gemm`] / [`Gemm`]: Rank-3 batched matrix multiplication
-//!   `C[m, n, l] += A[m, k, l] * B[n, k, l]`, with rank-2 `(M, K) x (N, K) -> (M, N)`
-//!   operands automatically promoted with a zero-copy size-1 batch mode `1:0`.
+//!   `C[m, n, l] += A[m, k, l] * B[n, k, l]` and rank-2 unbatched
+//!   `(M, K) x (N, K) -> (M, N)` multiplication via [`gemm_fma`].
 //!
 //! # Usage
 //!
@@ -112,14 +115,19 @@
 //!   coordinates to the same address; use [`crate::algorithm::copy()`] to reject stride-0
 //!   write-after-write races and drop redundant writes.
 
-use core::ops::{Add, Mul};
+use core::ops::{Add, Deref, DerefMut, Mul};
 
-use crate::integer::{Int, add, int};
+use crate::NoodleCuteError;
+use crate::integer::{add, int};
 use crate::layout::Layout;
 use crate::shape::Shape;
 use crate::stride::Stride;
-use crate::tensor::{AccessorBase, Tensor, TensorIndex, TensorSet};
+use crate::tensor::{Tensor, TensorIndex, TensorSet};
 use crate::tuple::{Nil, Til};
+
+use super::atom::{
+    CopyAtom, GemmOperand, GemmOperandMut, Rank, RankOf, UniversalCopy, copy_with, gemm_fma,
+};
 
 /// Returns `true` unless `L` and `R` both have statically known, unequal total sizes.
 #[doc(hidden)]
@@ -135,47 +143,116 @@ const impl ValidSizeMatch<true> for () {}
 
 /// Reference element-wise COPY: `dst[i] = src[i]` for every flat index `i` in `0..size(dst)`.
 ///
-/// Statically mismatched total sizes are rejected at compile time; dynamic mismatches
-/// panic at runtime.
-pub const fn copy<AS, SS, DS, AD, SD, DD, T>(
+/// Delegates execution to [`CopyAtom`] with [`UniversalCopy`] via [`copy_with`]. Statically
+/// mismatched total sizes are rejected at compile time; dynamic mismatches panic at runtime.
+pub fn copy<AS, SS, DS, AD, SD, DD, T>(
     src: Tensor<AS, Layout<SS, DS>>,
     dst: &mut Tensor<AD, Layout<SD, DD>>,
 ) where
-    AS: Copy,
-    SS: [const] Shape,
-    DS: [const] Stride<SS>,
-    SD: [const] Shape,
-    DD: [const] Stride<SD>,
+    SS: Shape,
+    DS: Stride<SS>,
+    SD: Shape,
+    DD: Stride<SD>,
+    T: Copy,
     (): ValidSizeMatch<{ STATIC_SIZE_COMPAT::<SS, SD> }>,
-    Tensor<AS, Layout<SS, DS>>: [const] TensorIndex<int, Output = T>,
-    Tensor<AD, Layout<SD, DD>>: [const] TensorSet<int, Item = T>,
+    Tensor<AS, Layout<SS, DS>>: TensorIndex<int, Output = T>,
+    Tensor<AD, Layout<SD, DD>>: TensorSet<int, Item = T>,
 {
-    let n = dst.size();
-    assert!(src.size() == n, "copy: size mismatch");
-    let mut i: int = 0;
-    while i < n {
-        dst.set(i, src.at(i));
-        i = add(i, 1);
+    let atom = CopyAtom::<UniversalCopy<T>, T>::new();
+    copy_with(&atom, &src, dst);
+}
+
+/// 2-D flat coordinate `(x, y)` used by rank-2 [`Gemm`].
+type Coord2 = Til<int, Til<int, Nil>>;
+
+/// 3-D flat coordinate `(x, y, l)` used by rank-3 batched [`Gemm`].
+type Coord3 = Til<int, Til<int, Til<int, Nil>>>;
+
+/// Rank-2 tensor type `(S0, S1) : (D0, D1)`.
+type Tensor2<A, S0, S1, D0, D1> = Tensor<A, Layout<Til<S0, Til<S1, Nil>>, Til<D0, Til<D1, Nil>>>>;
+
+/// Rank-3 tensor type `(S0, S1, S2) : (D0, D1, D2)`.
+type Tensor3<A, S0, S1, S2, D0, D1, D2> =
+    Tensor<A, Layout<Til<S0, Til<S1, Til<S2, Nil>>>, Til<D0, Til<D1, Til<D2, Nil>>>>>;
+
+/// Adapts one fixed batch index `batch` of a rank-3 `(X, Y, L)` tensor `R` as a rank-2
+/// [`GemmOperand`] / [`GemmOperandMut`] so batched [`Gemm`] delegates directly to [`gemm_fma`].
+struct BatchSlice<R> {
+    tensor: R,
+    batch: int,
+}
+
+impl<R> RankOf for BatchSlice<R> {
+    type Rank = Rank<2>;
+}
+
+impl<R, Acc, S0, S1, SL, D0, D1, DL, E> GemmOperand<Rank<2>> for BatchSlice<R>
+where
+    R: Deref<Target = Tensor3<Acc, S0, S1, SL, D0, D1, DL>>,
+    S0: Shape,
+    S1: Shape,
+    SL: Shape,
+    D0: Stride<S0>,
+    D1: Stride<S1>,
+    DL: Stride<SL>,
+    E: Copy,
+    R::Target: TensorIndex<Coord3, Output = E>,
+{
+    type Elem = E;
+
+    fn extents(&self) -> [int; 3] {
+        [
+            1,
+            self.tensor.layout.shape.0.size(),
+            self.tensor.layout.shape.1.0.size(),
+        ]
+    }
+
+    fn load_vxy(&self, _: int, x: int, y: int) -> E {
+        self.tensor.at(Til(x, Til(y, Til(self.batch, Nil))))
     }
 }
 
-/// 3-D flat coordinate `(m, n, l)` used by [`Gemm`].
-type Coord3 = Til<int, Til<int, Til<int, Nil>>>;
+impl<R, Acc, S0, S1, SL, D0, D1, DL, E> GemmOperandMut<Rank<2>> for BatchSlice<R>
+where
+    R: DerefMut<Target = Tensor3<Acc, S0, S1, SL, D0, D1, DL>>,
+    S0: Shape,
+    S1: Shape,
+    SL: Shape,
+    D0: Stride<S0>,
+    D1: Stride<S1>,
+    DL: Stride<SL>,
+    E: Copy,
+    R::Target: TensorSet<Coord3, Item = E>,
+{
+    type Elem = E;
+
+    fn extents_mut(&self) -> [int; 3] {
+        [
+            1,
+            self.tensor.layout.shape.0.size(),
+            self.tensor.layout.shape.1.0.size(),
+        ]
+    }
+
+    fn store_vxy(&mut self, _: int, x: int, y: int, val: E) {
+        self.tensor.set(Til(x, Til(y, Til(self.batch, Nil))), val);
+    }
+}
 
 /// Reference batched GEMM trait backing [`gemm`].
 ///
-/// Implemented for:
+/// Implemented via [`gemm_fma`] for:
 /// - Rank-3 operands `A:(M, K, L)`, `B:(N, K, L)`, `C:(M, N, L)`.
-/// - Rank-2 operands `A:(M, K)`, `B:(N, K)`, `C:(M, N)`, promoted with a zero-copy
-///   size-1 batch mode `Layout(Int<1>, Int<0>)`.
+/// - Rank-2 operands `A:(M, K)`, `B:(N, K)`, `C:(M, N)`.
 ///
 /// Each mode `M`, `N`, `K`, `L` may itself be a hierarchical multi-mode.
-pub const trait Gemm<B, C> {
+pub trait Gemm<B, C> {
     /// Accumulates `C[m, n, l] += A[m, k, l] * B[n, k, l]` in place.
     fn gemm(self, b: B, c: &mut C);
 }
 
-const impl<
+impl<
     AA,
     SMA,
     SKA,
@@ -200,195 +277,134 @@ const impl<
     TA,
     TB,
     TC,
->
-    Gemm<
-        Tensor<AB, Layout<Til<SNB, Til<SKB, Til<SLB, Nil>>>, Til<DNB, Til<DKB, Til<DLB, Nil>>>>>,
-        Tensor<AC, Layout<Til<SMC, Til<SNC, Til<SLC, Nil>>>, Til<DMC, Til<DNC, Til<DLC, Nil>>>>>,
-    > for Tensor<AA, Layout<Til<SMA, Til<SKA, Til<SLA, Nil>>>, Til<DMA, Til<DKA, Til<DLA, Nil>>>>>
+> Gemm<Tensor3<AB, SNB, SKB, SLB, DNB, DKB, DLB>, Tensor3<AC, SMC, SNC, SLC, DMC, DNC, DLC>>
+    for Tensor3<AA, SMA, SKA, SLA, DMA, DKA, DLA>
 where
-    AA: Copy,
-    AB: Copy,
-    SMA: [const] Shape,
-    SKA: [const] Shape,
-    SLA: [const] Shape,
-    DMA: [const] Stride<SMA>,
-    DKA: [const] Stride<SKA>,
-    DLA: [const] Stride<SLA>,
-    SNB: [const] Shape,
-    SKB: [const] Shape,
-    SLB: [const] Shape,
-    DNB: [const] Stride<SNB>,
-    DKB: [const] Stride<SKB>,
-    DLB: [const] Stride<SLB>,
-    SMC: [const] Shape,
-    SNC: [const] Shape,
-    SLC: [const] Shape,
-    DMC: [const] Stride<SMC>,
-    DNC: [const] Stride<SNC>,
-    DLC: [const] Stride<SLC>,
+    SMA: Shape,
+    SKA: Shape,
+    SLA: Shape,
+    DMA: Stride<SMA>,
+    DKA: Stride<SKA>,
+    DLA: Stride<SLA>,
+    SNB: Shape,
+    SKB: Shape,
+    SLB: Shape,
+    DNB: Stride<SNB>,
+    DKB: Stride<SKB>,
+    DLB: Stride<SLB>,
+    SMC: Shape,
+    SNC: Shape,
+    SLC: Shape,
+    DMC: Stride<SMC>,
+    DNC: Stride<SNC>,
+    DLC: Stride<SLC>,
     (): ValidSizeMatch<{ STATIC_SIZE_COMPAT::<SMA, SMC> }>
         + ValidSizeMatch<{ STATIC_SIZE_COMPAT::<SNB, SNC> }>
         + ValidSizeMatch<{ STATIC_SIZE_COMPAT::<SKA, SKB> }>
         + ValidSizeMatch<{ STATIC_SIZE_COMPAT::<SLA, SLC> }>
         + ValidSizeMatch<{ STATIC_SIZE_COMPAT::<SLB, SLC> }>
         + ValidSizeMatch<{ STATIC_SIZE_COMPAT::<SLA, SLB> }>,
-    Self: [const] TensorIndex<Coord3, Output = TA>,
-    Tensor<AB, Layout<Til<SNB, Til<SKB, Til<SLB, Nil>>>, Til<DNB, Til<DKB, Til<DLB, Nil>>>>>:
-        [const] TensorIndex<Coord3, Output = TB>,
-    Tensor<AC, Layout<Til<SMC, Til<SNC, Til<SLC, Nil>>>, Til<DMC, Til<DNC, Til<DLC, Nil>>>>>:
-        [const] TensorIndex<Coord3, Output = TC> + [const] TensorSet<Coord3, Item = TC>,
-    TA: [const] Mul<TB>,
-    TC: [const] Add<<TA as Mul<TB>>::Output, Output = TC>,
+    Self: TensorIndex<Coord3, Output = TA>,
+    Tensor3<AB, SNB, SKB, SLB, DNB, DKB, DLB>: TensorIndex<Coord3, Output = TB>,
+    Tensor3<AC, SMC, SNC, SLC, DMC, DNC, DLC>:
+        TensorIndex<Coord3, Output = TC> + TensorSet<Coord3, Item = TC>,
+    TA: Copy + Mul<TB>,
+    TB: Copy,
+    TC: Copy,
+    <TA as Mul<TB>>::Output: Add<TC, Output = TC>,
 {
     fn gemm(
         self,
-        b: Tensor<AB, Layout<Til<SNB, Til<SKB, Til<SLB, Nil>>>, Til<DNB, Til<DKB, Til<DLB, Nil>>>>>,
-        c: &mut Tensor<
-            AC,
-            Layout<Til<SMC, Til<SNC, Til<SLC, Nil>>>, Til<DMC, Til<DNC, Til<DLC, Nil>>>>,
-        >,
+        b: Tensor3<AB, SNB, SKB, SLB, DNB, DKB, DLB>,
+        c: &mut Tensor3<AC, SMC, SNC, SLC, DMC, DNC, DLC>,
     ) {
         let size_m = c.layout.shape.0.size();
         let size_n = c.layout.shape.1.0.size();
         let size_k = self.layout.shape.1.0.size();
         let size_l = c.layout.shape.1.1.0.size();
 
-        assert!(
+        NoodleCuteError::SizeMismatch.check_with(
             self.layout.shape.0.size() == size_m,
-            "gemm: row size mismatch"
+            "gemm: row size mismatch",
         );
-        assert!(
+        NoodleCuteError::SizeMismatch.check_with(
             b.layout.shape.0.size() == size_n,
-            "gemm: column size mismatch"
+            "gemm: column size mismatch",
         );
-        assert!(
+        NoodleCuteError::SizeMismatch.check_with(
             b.layout.shape.1.0.size() == size_k,
-            "gemm: reduction size mismatch"
+            "gemm: reduction size mismatch",
         );
-        assert!(
+        NoodleCuteError::SizeMismatch.check_with(
             self.layout.shape.1.1.0.size() == size_l && b.layout.shape.1.1.0.size() == size_l,
-            "gemm: batch size mismatch"
+            "gemm: batch size mismatch",
         );
 
         let mut l: int = 0;
         while l < size_l {
-            let mut k: int = 0;
-            while k < size_k {
-                let mut n: int = 0;
-                while n < size_n {
-                    let mut m: int = 0;
-                    while m < size_m {
-                        let a_val = self.at(Til(m, Til(k, Til(l, Nil))));
-                        let b_val = b.at(Til(n, Til(k, Til(l, Nil))));
-                        let c_coord = Til(m, Til(n, Til(l, Nil)));
-                        let acc = c.at(c_coord) + a_val * b_val;
-                        c.set(c_coord, acc);
-                        m = add(m, 1);
-                    }
-                    n = add(n, 1);
-                }
-                k = add(k, 1);
-            }
+            let a_l = BatchSlice {
+                tensor: &self,
+                batch: l,
+            };
+            let b_l = BatchSlice {
+                tensor: &b,
+                batch: l,
+            };
+            let mut c_l = BatchSlice {
+                tensor: &mut *c,
+                batch: l,
+            };
+            gemm_fma(&a_l, &b_l, &mut c_l);
             l = add(l, 1);
         }
     }
 }
 
-const impl<AA, SMA, SKA, DMA, DKA, AB, SNB, SKB, DNB, DKB, AC, SMC, SNC, DMC, DNC>
-    Gemm<
-        Tensor<AB, Layout<Til<SNB, Til<SKB, Nil>>, Til<DNB, Til<DKB, Nil>>>>,
-        Tensor<AC, Layout<Til<SMC, Til<SNC, Nil>>, Til<DMC, Til<DNC, Nil>>>>,
-    > for Tensor<AA, Layout<Til<SMA, Til<SKA, Nil>>, Til<DMA, Til<DKA, Nil>>>>
+impl<AA, SMA, SKA, DMA, DKA, AB, SNB, SKB, DNB, DKB, AC, SMC, SNC, DMC, DNC, TA, TB, TC>
+    Gemm<Tensor2<AB, SNB, SKB, DNB, DKB>, Tensor2<AC, SMC, SNC, DMC, DNC>>
+    for Tensor2<AA, SMA, SKA, DMA, DKA>
 where
-    AA: AccessorBase,
-    AB: AccessorBase,
-    AC: AccessorBase,
-    SMA: [const] Shape,
-    SKA: [const] Shape,
-    DMA: [const] Stride<SMA>,
-    DKA: [const] Stride<SKA>,
-    SNB: [const] Shape,
-    SKB: [const] Shape,
-    DNB: [const] Stride<SNB>,
-    DKB: [const] Stride<SKB>,
-    SMC: [const] Shape,
-    SNC: [const] Shape,
-    DMC: [const] Stride<SMC>,
-    DNC: [const] Stride<SNC>,
-    Tensor<AA, Layout<Til<SMA, Til<SKA, Til<Int<1>, Nil>>>, Til<DMA, Til<DKA, Til<Int<0>, Nil>>>>>:
-        [const] Gemm<
-                Tensor<
-                    AB,
-                    Layout<
-                        Til<SNB, Til<SKB, Til<Int<1>, Nil>>>,
-                        Til<DNB, Til<DKB, Til<Int<0>, Nil>>>,
-                    >,
-                >,
-                Tensor<
-                    AC,
-                    Layout<
-                        Til<SMC, Til<SNC, Til<Int<1>, Nil>>>,
-                        Til<DMC, Til<DNC, Til<Int<0>, Nil>>>,
-                    >,
-                >,
-            >,
+    SMA: Shape,
+    SKA: Shape,
+    DMA: Stride<SMA>,
+    DKA: Stride<SKA>,
+    SNB: Shape,
+    SKB: Shape,
+    DNB: Stride<SNB>,
+    DKB: Stride<SKB>,
+    SMC: Shape,
+    SNC: Shape,
+    DMC: Stride<SMC>,
+    DNC: Stride<SNC>,
+    (): ValidSizeMatch<{ STATIC_SIZE_COMPAT::<SMA, SMC> }>
+        + ValidSizeMatch<{ STATIC_SIZE_COMPAT::<SNB, SNC> }>
+        + ValidSizeMatch<{ STATIC_SIZE_COMPAT::<SKA, SKB> }>,
+    Self: TensorIndex<Coord2, Output = TA>,
+    Tensor2<AB, SNB, SKB, DNB, DKB>: TensorIndex<Coord2, Output = TB>,
+    Tensor2<AC, SMC, SNC, DMC, DNC>:
+        TensorIndex<Coord2, Output = TC> + TensorSet<Coord2, Item = TC>,
+    TA: Copy + Mul<TB>,
+    TB: Copy,
+    TC: Copy,
+    <TA as Mul<TB>>::Output: Add<TC, Output = TC>,
 {
     fn gemm(
         self,
-        b: Tensor<AB, Layout<Til<SNB, Til<SKB, Nil>>, Til<DNB, Til<DKB, Nil>>>>,
-        c: &mut Tensor<AC, Layout<Til<SMC, Til<SNC, Nil>>, Til<DMC, Til<DNC, Nil>>>>,
+        b: Tensor2<AB, SNB, SKB, DNB, DKB>,
+        c: &mut Tensor2<AC, SMC, SNC, DMC, DNC>,
     ) {
-        let a3 = Tensor::new(
-            self.accessor,
-            Layout::new(
-                Til(
-                    self.layout.shape.0,
-                    Til(self.layout.shape.1.0, Til(Int::<1>, Nil)),
-                ),
-                Til(
-                    self.layout.stride.0,
-                    Til(self.layout.stride.1.0, Til(Int::<0>, Nil)),
-                ),
-            ),
-        );
-        let b3 = Tensor::new(
-            b.accessor,
-            Layout::new(
-                Til(
-                    b.layout.shape.0,
-                    Til(b.layout.shape.1.0, Til(Int::<1>, Nil)),
-                ),
-                Til(
-                    b.layout.stride.0,
-                    Til(b.layout.stride.1.0, Til(Int::<0>, Nil)),
-                ),
-            ),
-        );
-        let mut c3 = Tensor::new(
-            c.accessor,
-            Layout::new(
-                Til(
-                    c.layout.shape.0,
-                    Til(c.layout.shape.1.0, Til(Int::<1>, Nil)),
-                ),
-                Til(
-                    c.layout.stride.0,
-                    Til(c.layout.stride.1.0, Til(Int::<0>, Nil)),
-                ),
-            ),
-        );
-        a3.gemm(b3, &mut c3);
+        gemm_fma(&self, &b, c);
     }
 }
 
 /// Reference batched GEMM: `C[m, n, l] += A[m, k, l] * B[n, k, l]`.
 ///
 /// Accepts either all rank-3 operands `(M, K, L)`, `(N, K, L)`, `(M, N, L)` or all
-/// rank-2 unbatched operands `(M, K)`, `(N, K)`, `(M, N)` (which append a size-1 batch
-/// mode `1:0` without copying). Any mode may be a hierarchical multi-mode.
-pub const fn gemm<A, B, C>(a: A, b: B, c: &mut C)
+/// rank-2 unbatched operands `(M, K)`, `(N, K)`, `(M, N)`, delegating execution to
+/// [`gemm_fma`]. Any mode may be a hierarchical multi-mode.
+pub fn gemm<A, B, C>(a: A, b: B, c: &mut C)
 where
-    A: [const] Gemm<B, C>,
+    A: Gemm<B, C>,
 {
     a.gemm(b, c);
 }

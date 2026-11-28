@@ -351,6 +351,38 @@ const fn checked_shiftr(a: int, s: int) -> Result<int> {
     }
 }
 
+/// Maximum residue of the first `extent` multiples of `stride` modulo a positive radix.
+pub(crate) const fn max_residue(extent: int, stride: int, radix: int) -> int {
+    let step = floor_rem(stride, radix);
+    if step == 0 || extent <= 1 {
+        return 0;
+    }
+    let last = sub(extent, 1);
+    if last <= div(sub(radix, 1), step) {
+        return mul(last, step);
+    }
+    let unit = gcd(radix, step);
+    if extent >= div(radix, unit) {
+        return sub(radix, unit);
+    }
+    let mut residue = 0;
+    let mut high = 0;
+    let mut k = 0;
+    let gap = sub(radix, step);
+    while k < last {
+        residue = if residue >= gap {
+            sub(residue, gap)
+        } else {
+            add(residue, step)
+        };
+        if residue > high {
+            high = residue;
+        }
+        k = add(k, 1);
+    }
+    high
+}
+
 /// Integer bit positions a mode can write without introducing carries.
 pub(crate) const fn carry_free_mask(extent: int, stride: int) -> Option<uint> {
     if extent <= 1 || stride == 0 {

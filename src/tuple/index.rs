@@ -34,11 +34,14 @@
 //!   at compile time if `S.step == 0`.
 
 use core::marker::PhantomData;
+use core::ops::RangeFull;
 
-use crate::integer::{DECREASE, IS_NON_NEG, IS_ONE, IS_ZERO, NOT_ZERO, abs, add, int, mul, sub};
+use crate::integer::{
+    DECREASE, IS_NON_NEG, IS_ONE, IS_ZERO, Integer, NOT_ZERO, abs, add, int, mul, sub,
+};
 use crate::slice::{ResolvedSlice, Slice};
 
-use super::{Append, Item, Leaf, Nil, Til, Tuple, Wrap};
+use super::{Append, Item, Leaf, Nil, RepeatModes, Til, Tuple, Wrap};
 
 /// Type-level mode index path node constructed by [`mode!`](crate::mode).
 ///
@@ -784,4 +787,67 @@ where
 /// Collects the subtrees of `target` whose counterpart in `coord` is not `..` (PyCuTe `dice_`).
 pub const fn dice_by<C: [const] DiceBy<B>, B: [const] Item>(coord: &C, target: &B) -> C::Output {
     coord.dice_by(target)
+}
+
+/// Pads a tuple coordinate with trailing `..` ([`RangeFull`]) wildcards to `Target::RANK`,
+/// passing scalar integer coordinates and `..` through unchanged (CuTe `append<rank(S)>(coord, _)`).
+///
+/// Rejects tuple coordinates longer than `Target` at compile time.
+#[doc(hidden)]
+pub const trait PadCoord<Target: [const] Item>: [const] Item {
+    type Output: [const] Item;
+    fn pad_coord(self) -> Self::Output;
+}
+
+const impl<I: [const] Integer, Target: [const] Item> PadCoord<Target> for I {
+    type Output = I;
+
+    fn pad_coord(self) -> I {
+        self
+    }
+}
+
+const impl<Target: [const] Item> PadCoord<Target> for RangeFull {
+    type Output = RangeFull;
+
+    fn pad_coord(self) -> RangeFull {
+        ..
+    }
+}
+
+const impl PadCoord<Nil> for Nil {
+    type Output = Nil;
+
+    fn pad_coord(self) -> Nil {
+        Nil
+    }
+}
+
+const impl<TH, TT> PadCoord<Til<TH, TT>> for Nil
+where
+    TH: [const] Item,
+    TT: [const] Tuple,
+    Til<TH, TT>: [const] RepeatModes<RangeFull>,
+    <Til<TH, TT> as RepeatModes<RangeFull>>::Output: [const] Tuple,
+{
+    type Output = <Til<TH, TT> as RepeatModes<RangeFull>>::Output;
+
+    fn pad_coord(self) -> Self::Output {
+        Til::<TH, TT>::repeat_modes(..)
+    }
+}
+
+const impl<CH, CT, TH, TT> PadCoord<Til<TH, TT>> for Til<CH, CT>
+where
+    CH: [const] Item,
+    CT: [const] Tuple + [const] PadCoord<TT>,
+    TH: [const] Item,
+    TT: [const] Tuple,
+    <CT as PadCoord<TT>>::Output: [const] Tuple,
+{
+    type Output = Til<CH, <CT as PadCoord<TT>>::Output>;
+
+    fn pad_coord(self) -> Self::Output {
+        Til(self.0, self.1.pad_coord())
+    }
 }
